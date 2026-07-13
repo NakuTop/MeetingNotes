@@ -181,6 +181,13 @@ final class MeetingRepository {
         try context.save()
     }
 
+    func updateMeetingState(id: UUID, state: RecordingState) throws {
+        let meeting = try meeting(id: id)
+        meeting.state = state
+        meeting.updatedAt = .now
+        try context.save()
+    }
+
     func saveArchiveCheckpoint(
         meetingID: UUID,
         notionPageID: String,
