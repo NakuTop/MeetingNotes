@@ -1,4 +1,4 @@
-enum RecordingState: String, Codable, Equatable, Sendable {
+enum RecordingState: String, Codable, CaseIterable, Equatable, Sendable {
     case idle
     case preparing
     case recording
@@ -11,7 +11,7 @@ enum RecordingState: String, Codable, Equatable, Sendable {
     case archived
 }
 
-enum RecordingAction: String, Codable, Equatable, Sendable {
+enum RecordingAction: String, Codable, CaseIterable, Equatable, Sendable {
     case prepare
     case start
     case pause

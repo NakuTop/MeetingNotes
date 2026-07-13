@@ -90,6 +90,32 @@ final class RecordingStateMachineTests: XCTestCase {
         XCTAssertEqual(machine.state, .archived)
     }
 
+    func testEveryStateAndActionPairHasAnExplicitOutcome() throws {
+        for state in RecordingState.allCases {
+            for action in RecordingAction.allCases {
+                var machine = RecordingStateMachine(state: state)
+
+                if let expectedState = expectedState(from: state, action: action) {
+                    try machine.send(action)
+                    XCTAssertEqual(
+                        machine.state,
+                        expectedState,
+                        "Unexpected result for \(state.rawValue) + \(action.rawValue)"
+                    )
+                } else {
+                    XCTAssertThrowsError(try machine.send(action)) { error in
+                        XCTAssertEqual(
+                            error as? RecordingStateError,
+                            .invalidTransition(state, action),
+                            "Unexpected error for \(state.rawValue) + \(action.rawValue)"
+                        )
+                    }
+                    XCTAssertEqual(machine.state, state)
+                }
+            }
+        }
+    }
+
     func testStateAndActionUseStableCodableRawValues() throws {
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
@@ -107,5 +133,43 @@ final class RecordingStateMachineTests: XCTestCase {
         )
         XCTAssertEqual(String(data: encodedState, encoding: .utf8), "\"summaryReady\"")
         XCTAssertEqual(String(data: encodedAction, encoding: .utf8), "\"archiveSucceeded\"")
+    }
+
+    private func expectedState(
+        from state: RecordingState,
+        action: RecordingAction
+    ) -> RecordingState? {
+        switch (state, action) {
+        case (.idle, .prepare):
+            .preparing
+        case (.preparing, .start):
+            .recording
+        case (.recording, .pause):
+            .paused
+        case (.paused, .resume):
+            .recording
+        case (.recording, .stop), (.paused, .stop):
+            .finalizing
+        case (.finalizing, .finalized):
+            .ready
+        case (.recording, .bookmark):
+            .recording
+        case (.paused, .bookmark):
+            .paused
+        case (.ready, .summarize):
+            .summarizing
+        case (.summarizing, .summarySucceeded):
+            .summaryReady
+        case (.summarizing, .summaryFailed):
+            .ready
+        case (.summaryReady, .archive):
+            .archiving
+        case (.archiving, .archiveSucceeded):
+            .archived
+        case (.archiving, .archiveFailed):
+            .summaryReady
+        default:
+            nil
+        }
     }
 }
