@@ -48,3 +48,4 @@ schemes:
     test:
       targets:
         - MeetingNotesTests
+        - MeetingNotesUITests
