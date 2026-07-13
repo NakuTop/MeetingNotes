@@ -1,0 +1,50 @@
+name: MeetingNotes
+options:
+  deploymentTarget:
+    macOS: "15.0"
+settings:
+  base:
+    ARCHS: arm64
+    EXCLUDED_ARCHS: x86_64
+    MACOSX_DEPLOYMENT_TARGET: "15.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_VERSION: "6.0"
+targets:
+  MeetingNotes:
+    type: application
+    platform: macOS
+    sources:
+      - MeetingNotes
+    info:
+      path: Configuration/Info.plist
+    entitlements:
+      path: Configuration/MeetingNotes.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.shenminghao.MeetingNotes
+        PRODUCT_NAME: MeetingNotes
+      configs:
+        Debug:
+          ENABLE_TESTABILITY: true
+  MeetingNotesTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - MeetingNotesTests
+    dependencies:
+      - target: MeetingNotes
+  MeetingNotesUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - MeetingNotesUITests
+    dependencies:
+      - target: MeetingNotes
+schemes:
+  MeetingNotes:
+    build:
+      targets:
+        MeetingNotes: all
+    test:
+      targets:
+        - MeetingNotesTests
