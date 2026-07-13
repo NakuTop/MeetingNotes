@@ -1,7 +1,7 @@
 import Foundation
 
 final class AppSettingsStore: @unchecked Sendable {
-    static let defaultDeepSeekModel = "deepseek-chat"
+    static let defaultDeepSeekModel = "deepseek-v4-flash"
 
     private enum Key {
         static let deepSeekModel = "settings.deepSeekModel"

@@ -10,6 +10,7 @@ final class AppSettingsStoreTests: XCTestCase {
         }
         let first = AppSettingsStore(defaults: defaults)
 
+        XCTAssertEqual(AppSettingsStore.defaultDeepSeekModel, "deepseek-v4-flash")
         XCTAssertEqual(first.deepSeekModel, AppSettingsStore.defaultDeepSeekModel)
         XCTAssertEqual(first.notionParentPageURL, "")
 
