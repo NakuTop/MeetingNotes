@@ -40,10 +40,13 @@ final class SegmentedPCMWriterTests: XCTestCase {
         XCTAssertEqual(manifest.channelCount, 1)
         XCTAssertEqual(manifest.segments.count, 4)
         XCTAssertTrue(manifest.segments.allSatisfy(\.isComplete))
+        XCTAssertEqual(manifest.segments.map(\.frameCount), [128, 128, 128, 16])
         XCTAssertEqual(
             manifest.segments.reduce(Int64(0)) { $0 + $1.frameCount },
             Int64(samples.count)
         )
+        let persistedFinalManifest = try await fileStore.loadManifest(meetingID: meetingID)
+        XCTAssertEqual(persistedFinalManifest, manifest)
 
         var readableFrameCount: AVAudioFramePosition = 0
         for segment in manifest.segments {
