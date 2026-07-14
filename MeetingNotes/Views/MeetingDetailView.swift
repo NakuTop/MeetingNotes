@@ -1,0 +1,204 @@
+import SwiftUI
+
+struct MeetingDetailView: View {
+    let meeting: MeetingRecord
+    let canSummarize: Bool
+    let requestSummary: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                audioSection
+
+                GroupBox("转录") {
+                    TranscriptView(
+                        transcripts: meeting.transcripts,
+                        bookmarks: meeting.bookmarks
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
+                }
+
+                GroupBox("书签") {
+                    BookmarkListView(bookmarks: meeting.bookmarks)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 4)
+                }
+
+                summarySection
+            }
+            .padding(24)
+            .frame(maxWidth: 860, alignment: .leading)
+            .frame(maxWidth: .infinity)
+        }
+        .navigationTitle(meeting.title)
+        .accessibilityIdentifier("meeting.detail")
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(meeting.title)
+                    .font(.largeTitle.bold())
+                    .textSelection(.enabled)
+                Spacer()
+                Label(
+                    MeetingDisplayFormat.state(meeting.state),
+                    systemImage: MeetingDisplayFormat.stateSymbol(meeting.state)
+                )
+                .font(.callout.weight(.medium))
+                .foregroundStyle(MeetingDisplayFormat.stateColor(meeting.state))
+            }
+
+            HStack(spacing: 14) {
+                Label(
+                    meeting.startedAt.formatted(date: .long, time: .shortened),
+                    systemImage: "calendar"
+                )
+                Label(
+                    meeting.mode == .offline ? "线下会议" : "在线会议",
+                    systemImage: meeting.mode == .offline
+                        ? "person.2.fill"
+                        : "display"
+                )
+                Label(
+                    MeetingDisplayFormat.duration(meeting.activeDuration),
+                    systemImage: "clock"
+                )
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var audioSection: some View {
+        GroupBox("音频") {
+            HStack(spacing: 12) {
+                Image(systemName: "waveform")
+                    .font(.title2)
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(meeting.endedAt == nil ? "正在录制" : "本地录音")
+                        .font(.headline)
+                    Text(
+                        meeting.endedAt == nil
+                            ? "结束会议后可播放完整音频"
+                            : "音频保留在这台 Mac 上"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(MeetingDisplayFormat.duration(meeting.activeDuration))
+                    .font(.body.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private var summarySection: some View {
+        GroupBox("总结与归档") {
+            VStack(alignment: .leading, spacing: 14) {
+                if let summary = meeting.summary {
+                    Text(summary.overview)
+                        .textSelection(.enabled)
+                    summaryList(title: "关键结论", items: summary.keyPoints)
+                    summaryList(title: "决定事项", items: summary.decisions)
+                    summaryList(title: "行动项", items: summary.actionItems)
+                } else {
+                    Text("会议结束并完成转录后，可生成总结并归档到 Notion。")
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Button("总结并归档", systemImage: "sparkles") {
+                        requestSummary()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canSummarize)
+                    .accessibilityIdentifier("meeting.summarizeArchive")
+
+                    if let urlString = meeting.notionPageURL,
+                       let url = URL(string: urlString) {
+                        Link("在 Notion 中打开", destination: url)
+                    } else {
+                        Text("尚未归档")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 4)
+        }
+    }
+
+    @ViewBuilder
+    private func summaryList(title: String, items: [String]) -> some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .font(.headline)
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    Text("• \(item)")
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
+}
+
+enum MeetingDisplayFormat {
+    static func duration(_ interval: TimeInterval) -> String {
+        let total = max(0, Int(interval.rounded()))
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, seconds)
+        }
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    static func timecode(_ interval: TimeInterval) -> String {
+        duration(interval)
+    }
+
+    static func state(_ state: RecordingState) -> String {
+        switch state {
+        case .idle: "待开始"
+        case .preparing: "准备中"
+        case .recording: "录音中"
+        case .paused: "已暂停"
+        case .finalizing: "处理中"
+        case .ready: "可总结"
+        case .summarizing: "总结中"
+        case .summaryReady: "待归档"
+        case .archiving: "归档中"
+        case .archived: "已归档"
+        }
+    }
+
+    static func stateSymbol(_ state: RecordingState) -> String {
+        switch state {
+        case .recording: "record.circle.fill"
+        case .paused: "pause.circle.fill"
+        case .archived: "checkmark.circle.fill"
+        case .summarizing, .archiving, .finalizing, .preparing:
+            "clock.arrow.circlepath"
+        default: "circle.fill"
+        }
+    }
+
+    static func stateColor(_ state: RecordingState) -> Color {
+        switch state {
+        case .recording: .red
+        case .paused: .orange
+        case .archived: .green
+        case .ready, .summaryReady: .blue
+        default: .secondary
+        }
+    }
+}

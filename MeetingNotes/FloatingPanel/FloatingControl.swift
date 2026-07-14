@@ -18,7 +18,7 @@ enum FloatingControl: String, CaseIterable, Identifiable, Sendable {
         case .record:
             FloatingControlPresentation(
                 symbolName: "record.circle.fill",
-                accessibilityLabel: "录音"
+                accessibilityLabel: "录音中"
             )
         case .pause:
             FloatingControlPresentation(

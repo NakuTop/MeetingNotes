@@ -9,6 +9,7 @@ final class FloatingPanelPresenter: RecordingPanelPresenting {
     }
 
     func show() async {
+        controller.setPaused(false)
         controller.show()
     }
 

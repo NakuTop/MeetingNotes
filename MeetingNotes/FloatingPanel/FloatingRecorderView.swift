@@ -24,6 +24,8 @@ struct FloatingRecorderView: View {
                     Circle()
                         .fill(.primary.opacity(0.08))
                 )
+                .disabled(control == .record)
+                .opacity(control == .record && isPaused ? 0.45 : 1)
                 .accessibilityLabel(Text(presentation.accessibilityLabel))
                 .accessibilityIdentifier("floating.\(control.rawValue)")
             }
