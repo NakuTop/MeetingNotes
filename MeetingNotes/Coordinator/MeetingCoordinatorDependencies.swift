@@ -106,16 +106,16 @@ struct LiveMeetingAudioWriterFactory: MeetingAudioWriterFactory {
 }
 
 struct LiveMeetingTranscriptionQueueFactory: MeetingTranscriptionQueueFactory {
-    let model: String?
+    let service: any TranscriptionService
 
-    init(model: String? = nil) {
-        self.model = model
+    init(service: any TranscriptionService = WhisperKitTranscriptionService()) {
+        self.service = service
     }
 
     func makeQueue() async throws -> any MeetingTranscriptionQueueing {
         LiveMeetingTranscriptionQueue(
             queue: TranscriptionQueue(
-                service: WhisperKitTranscriptionService(model: model)
+                service: service
             )
         )
     }
@@ -226,14 +226,15 @@ extension MeetingCoordinatorDependencies {
         fileStore: MeetingFileStore,
         permissionSystem: any CapturePermissionSystem = LiveCapturePermissionSystem(),
         panel: any RecordingPanelPresenting = NoopRecordingPanelPresenter(),
-        whisperModel: String? = nil
+        transcriptionService: any TranscriptionService =
+            WhisperKitTranscriptionService()
     ) -> MeetingCoordinatorDependencies {
         MeetingCoordinatorDependencies(
             permissions: CapturePermissionClient(system: permissionSystem),
             captureFactory: LiveMeetingCaptureFactory(),
             writerFactory: LiveMeetingAudioWriterFactory(fileStore: fileStore),
             transcriptionFactory: LiveMeetingTranscriptionQueueFactory(
-                model: whisperModel
+                service: transcriptionService
             ),
             repository: MeetingRepositoryLifecycleAdapter(repository: repository),
             panel: panel,

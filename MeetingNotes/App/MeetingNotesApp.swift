@@ -23,6 +23,9 @@ struct MeetingNotesApp: App {
             case let .ready(container):
                 RootView(
                     viewModel: container.libraryViewModel,
+                    onboardingState: container.onboardingState,
+                    transcriptionModelViewModel:
+                        container.transcriptionModelViewModel,
                     makeDetailViewModel: { meetingID in
                         container.detailViewModel(for: meetingID)
                     }

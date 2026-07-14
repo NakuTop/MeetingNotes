@@ -8,6 +8,8 @@ final class AppContainer {
     let panelController: FloatingPanelController
     let libraryViewModel: MeetingLibraryViewModel
     let settingsViewModel: SettingsViewModel
+    let onboardingState: OnboardingState
+    let transcriptionModelViewModel: TranscriptionModelViewModel
 
     private let controlRouter: MeetingControlRouter
     private let summarizeAndArchiveUseCase: SummarizeAndArchiveUseCase
@@ -15,7 +17,8 @@ final class AppContainer {
 
     private init(
         repository: MeetingRepository,
-        fileStore: MeetingFileStore
+        fileStore: MeetingFileStore,
+        recordingsURL: URL
     ) {
         self.repository = repository
         self.fileStore = fileStore
@@ -30,18 +33,26 @@ final class AppContainer {
         let panelPresenter = FloatingPanelPresenter(
             controller: panelController
         )
+        let transcriptionService = WhisperKitTranscriptionService()
+        transcriptionModelViewModel = TranscriptionModelViewModel(
+            preparer: transcriptionService
+        )
+        onboardingState = OnboardingState()
         let coordinator = MeetingCoordinator(
             dependencies: .live(
                 repository: repository,
                 fileStore: fileStore,
-                panel: panelPresenter
+                panel: panelPresenter,
+                transcriptionService: transcriptionService
             )
         )
         self.coordinator = coordinator
         let libraryViewModel = MeetingLibraryViewModel(
             repository: repository,
             fileDeleter: fileStore,
-            starter: coordinator
+            starter: coordinator,
+            systemRequirements: SystemRequirements(),
+            recordingsURL: recordingsURL
         )
         self.libraryViewModel = libraryViewModel
         let httpClient = URLSessionHTTPClient()
@@ -90,7 +101,8 @@ final class AppContainer {
         let fileStore = MeetingFileStore(rootURL: recordingsRoot)
         return AppContainer(
             repository: repository,
-            fileStore: fileStore
+            fileStore: fileStore,
+            recordingsURL: recordingsRoot
         )
     }
 
@@ -105,7 +117,8 @@ final class AppContainer {
             )
         return AppContainer(
             repository: repository,
-            fileStore: MeetingFileStore(rootURL: recordingsRoot)
+            fileStore: MeetingFileStore(rootURL: recordingsRoot),
+            recordingsURL: recordingsRoot
         )
     }
 

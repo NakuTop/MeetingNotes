@@ -27,21 +27,32 @@ final class MeetingLibraryViewModel {
     private let repository: any MeetingLibraryRepository
     private let fileDeleter: any MeetingFileDeleting
     private let starter: any MeetingStarting
+    private let systemRequirements: any SystemRequirementChecking
+    private let recordingsURL: URL
 
     private(set) var meetings: [MeetingRecord] = []
     var selectedMeetingID: UUID?
     private(set) var isStarting = false
     private(set) var deletingMeetingIDs: Set<UUID> = []
     private(set) var errorMessage: String?
+    private(set) var permissionRepairPermissions: [CapturePermission] = []
+    private(set) var systemRequirementsSnapshot: SystemRequirementsSnapshot
 
     init(
         repository: any MeetingLibraryRepository,
         fileDeleter: any MeetingFileDeleting,
-        starter: any MeetingStarting
+        starter: any MeetingStarting,
+        systemRequirements: any SystemRequirementChecking = SystemRequirements(),
+        recordingsURL: URL = FileManager.default.temporaryDirectory
     ) {
         self.repository = repository
         self.fileDeleter = fileDeleter
         self.starter = starter
+        self.systemRequirements = systemRequirements
+        self.recordingsURL = recordingsURL
+        systemRequirementsSnapshot = systemRequirements.snapshot(
+            for: recordingsURL
+        )
     }
 
     var selectedMeeting: MeetingRecord? {
@@ -50,6 +61,7 @@ final class MeetingLibraryViewModel {
     }
 
     func load() {
+        refreshSystemRequirements()
         do {
             meetings = try repository.meetings().sorted {
                 $0.startedAt > $1.startedAt
@@ -70,6 +82,16 @@ final class MeetingLibraryViewModel {
 
     func startMeeting(mode: MeetingMode) async {
         guard !isStarting else { return }
+        permissionRepairPermissions = []
+        refreshSystemRequirements()
+        guard systemRequirementsSnapshot.isSupportedPlatform else {
+            errorMessage = "仅支持 macOS 15 或更高版本的 Apple Silicon Mac。"
+            return
+        }
+        guard systemRequirementsSnapshot.hasEnoughDiskSpace else {
+            errorMessage = "可用磁盘空间不足 2 GB，无法安全开始录音。"
+            return
+        }
         isStarting = true
         errorMessage = nil
         defer { isStarting = false }
@@ -79,6 +101,12 @@ final class MeetingLibraryViewModel {
             load()
             selectedMeetingID = meetings.first?.id
         } catch {
+            if case let MeetingCoordinatorError.permissionDenied(permissions) =
+                error {
+                permissionRepairPermissions = permissions.sorted {
+                    Self.permissionRank($0) < Self.permissionRank($1)
+                }
+            }
             errorMessage = Self.message(for: error, operation: .start)
         }
     }
@@ -120,10 +148,17 @@ final class MeetingLibraryViewModel {
 
     func dismissError() {
         errorMessage = nil
+        permissionRepairPermissions = []
     }
 
     func reportControlFailure(_ error: Error) {
         errorMessage = Self.message(for: error, operation: .control)
+    }
+
+    func refreshSystemRequirements() {
+        systemRequirementsSnapshot = systemRequirements.snapshot(
+            for: recordingsURL
+        )
     }
 
     private enum Operation {
@@ -153,6 +188,13 @@ final class MeetingLibraryViewModel {
             return "无法完整删除会议，请重试。"
         case .control:
             return "录音操作未完成，请返回主窗口重试。"
+        }
+    }
+
+    private static func permissionRank(_ permission: CapturePermission) -> Int {
+        switch permission {
+        case .microphone: 0
+        case .screenRecording: 1
         }
     }
 }

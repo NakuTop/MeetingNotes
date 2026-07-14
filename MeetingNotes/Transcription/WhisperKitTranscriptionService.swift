@@ -1,11 +1,15 @@
 import Foundation
 @preconcurrency import WhisperKit
 
-actor WhisperKitTranscriptionService: TranscriptionService {
+actor WhisperKitTranscriptionService:
+    TranscriptionService,
+    TranscriptionModelPreparing {
     static let sampleRate = 16_000.0
 
     private let model: String?
     private var whisperKit: WhisperKit?
+    private var preparationInProgress = false
+    private var preparationWaiters: [CheckedContinuation<Void, Error>] = []
 
     init(model: String? = nil) {
         self.model = model
@@ -15,13 +19,26 @@ actor WhisperKitTranscriptionService: TranscriptionService {
         guard whisperKit == nil else {
             return
         }
-        let configuration = WhisperKitConfig(
-            model: model,
-            verbose: false,
-            prewarm: true,
-            load: true
-        )
-        whisperKit = try await WhisperKit(configuration)
+        if preparationInProgress {
+            return try await withCheckedThrowingContinuation { continuation in
+                preparationWaiters.append(continuation)
+            }
+        }
+
+        preparationInProgress = true
+        do {
+            let configuration = WhisperKitConfig(
+                model: model,
+                verbose: false,
+                prewarm: true,
+                load: true
+            )
+            whisperKit = try await WhisperKit(configuration)
+            finishPreparation(with: .success(()))
+        } catch {
+            finishPreparation(with: .failure(error))
+            throw error
+        }
     }
 
     func transcribe(
@@ -70,5 +87,19 @@ actor WhisperKitTranscriptionService: TranscriptionService {
             })
         }
         return TranscriptMerger().merge(drafts)
+    }
+
+    private func finishPreparation(with result: Result<Void, Error>) {
+        preparationInProgress = false
+        let waiters = preparationWaiters
+        preparationWaiters.removeAll(keepingCapacity: true)
+        for waiter in waiters {
+            switch result {
+            case .success:
+                waiter.resume()
+            case let .failure(error):
+                waiter.resume(throwing: error)
+            }
+        }
     }
 }

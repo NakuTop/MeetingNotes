@@ -71,6 +71,46 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         XCTAssertEqual(startedModes, [.offline, .online])
     }
 
+    func testInsufficientDiskSpaceBlocksMeetingBeforeCoordinatorStarts() async {
+        let starter = MeetingStarterSpy()
+        let snapshot = SystemRequirements.evaluate(
+            architecture: "arm64",
+            systemVersion: OperatingSystemVersion(
+                majorVersion: 15,
+                minorVersion: 0,
+                patchVersion: 0
+            ),
+            availableDiskBytes: SystemRequirements.minimumFreeDiskBytes - 1
+        )
+        let viewModel = makeViewModel(
+            starter: starter,
+            systemRequirements: SystemRequirementsStub(snapshot: snapshot)
+        )
+
+        await viewModel.startMeeting(mode: .offline)
+
+        let startedModes = await starter.modes()
+        XCTAssertTrue(startedModes.isEmpty)
+        XCTAssertEqual(
+            viewModel.errorMessage,
+            "可用磁盘空间不足 2 GB，无法安全开始录音。"
+        )
+    }
+
+    func testPermissionDenialExposesMatchingSystemSettingsRepairs() async {
+        let starter = MeetingStarterSpy(
+            error: .permissionDenied([.microphone, .screenRecording])
+        )
+        let viewModel = makeViewModel(starter: starter)
+
+        await viewModel.startMeeting(mode: .online)
+
+        XCTAssertEqual(
+            viewModel.permissionRepairPermissions,
+            [.microphone, .screenRecording]
+        )
+    }
+
     func testSummaryActionIsDisabledBeforeReady() {
         let viewModel = makeViewModel()
 
@@ -113,12 +153,16 @@ final class MeetingLibraryViewModelTests: XCTestCase {
     private func makeViewModel(
         repository: LibraryRepositorySpy = LibraryRepositorySpy(),
         files: any MeetingFileDeleting = FileDeletionSpy(),
-        starter: any MeetingStarting = MeetingStarterSpy()
+        starter: any MeetingStarting = MeetingStarterSpy(),
+        systemRequirements: any SystemRequirementChecking =
+            SystemRequirementsStub.supported
     ) -> MeetingLibraryViewModel {
         MeetingLibraryViewModel(
             repository: repository,
             fileDeleter: files,
-            starter: starter
+            starter: starter,
+            systemRequirements: systemRequirements,
+            recordingsURL: FileManager.default.temporaryDirectory
         )
     }
 
@@ -170,13 +214,40 @@ private actor FileDeletionSpy: MeetingFileDeleting {
 }
 
 private actor MeetingStarterSpy: MeetingStarting {
+    private let error: MeetingCoordinatorError?
     private var startedModes: [MeetingMode] = []
 
+    init(error: MeetingCoordinatorError? = nil) {
+        self.error = error
+    }
+
     func start(mode: MeetingMode) async throws {
+        if let error { throw error }
         startedModes.append(mode)
     }
 
     func modes() -> [MeetingMode] {
         startedModes
+    }
+}
+
+private struct SystemRequirementsStub: SystemRequirementChecking {
+    static let supported = SystemRequirementsStub(
+        snapshot: SystemRequirements.evaluate(
+            architecture: "arm64",
+            systemVersion: OperatingSystemVersion(
+                majorVersion: 15,
+                minorVersion: 0,
+                patchVersion: 0
+            ),
+            availableDiskBytes: SystemRequirements.minimumFreeDiskBytes
+        )
+    )
+
+    let snapshot: SystemRequirementsSnapshot
+
+    func snapshot(for storageURL: URL) -> SystemRequirementsSnapshot {
+        _ = storageURL
+        return snapshot
     }
 }
