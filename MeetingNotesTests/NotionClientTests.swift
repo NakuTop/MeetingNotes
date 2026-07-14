@@ -15,7 +15,13 @@ final class NotionClientTests: XCTestCase {
             .json([
                 "object": "page",
                 "id": parentID.uuidString.lowercased(),
-                "url": "https://www.notion.so/parent"
+                "url": "https://www.notion.so/parent",
+                "properties": [
+                    "Name": [
+                        "type": "title",
+                        "title": [["plain_text": "团队会议库"]]
+                    ]
+                ]
             ])
         ])
         let client = NotionClient(token: "test-token", httpClient: httpClient)
@@ -25,6 +31,7 @@ final class NotionClientTests: XCTestCase {
         XCTAssertEqual(result.userID, "bot-id")
         XCTAssertEqual(result.userName, "Meeting Bot")
         XCTAssertEqual(result.parentPage.id, parentID.uuidString.lowercased())
+        XCTAssertEqual(result.parentPageTitle, "团队会议库")
         let requests = await httpClient.recordedRequests()
         XCTAssertEqual(requests.count, 2)
         XCTAssertEqual(requests.map(\.httpMethod), ["GET", "GET"])

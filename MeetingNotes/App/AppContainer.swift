@@ -7,6 +7,7 @@ final class AppContainer {
     let coordinator: MeetingCoordinator
     let panelController: FloatingPanelController
     let libraryViewModel: MeetingLibraryViewModel
+    let settingsViewModel: SettingsViewModel
 
     private let controlRouter: MeetingControlRouter
 
@@ -41,6 +42,17 @@ final class AppContainer {
             starter: coordinator
         )
         self.libraryViewModel = libraryViewModel
+        let httpClient = URLSessionHTTPClient()
+        settingsViewModel = SettingsViewModel(
+            credentialStore: KeychainCredentialStore(),
+            settingsStore: AppSettingsStore(),
+            deepSeekTester: LiveDeepSeekConnectionTester(
+                httpClient: httpClient
+            ),
+            notionTester: LiveNotionConnectionTester(
+                httpClient: httpClient
+            )
+        )
         controlRouter.connect(
             coordinator: coordinator,
             panelController: panelController,

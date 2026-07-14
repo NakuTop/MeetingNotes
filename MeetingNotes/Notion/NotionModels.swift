@@ -9,6 +9,19 @@ struct NotionConnectionResult: Equatable, Sendable {
     let userID: String
     let userName: String?
     let parentPage: NotionPageReference
+    let parentPageTitle: String
+
+    init(
+        userID: String,
+        userName: String?,
+        parentPage: NotionPageReference,
+        parentPageTitle: String = "未命名页面"
+    ) {
+        self.userID = userID
+        self.userName = userName
+        self.parentPage = parentPage
+        self.parentPageTitle = parentPageTitle
+    }
 }
 
 protocol NotionAPIClient: Sendable {

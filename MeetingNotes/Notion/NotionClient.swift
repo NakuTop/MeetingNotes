@@ -39,11 +39,12 @@ struct NotionClient: NotionAPIClient, Sendable {
                 timeout: 15
             )
         )
-        let page = try decodePage(pageData)
+        let pageResponse = try decodePageResponse(pageData)
         return NotionConnectionResult(
             userID: user.id,
             userName: user.name,
-            parentPage: page
+            parentPage: pageResponse.reference,
+            parentPageTitle: pageResponse.title
         )
     }
 
@@ -141,8 +142,12 @@ struct NotionClient: NotionAPIClient, Sendable {
     }
 
     private func decodePage(_ data: Data) throws -> NotionPageReference {
+        try decodePageResponse(data).reference
+    }
+
+    private func decodePageResponse(_ data: Data) throws -> PageResponse {
         do {
-            return try decoder.decode(NotionPageReference.self, from: data)
+            return try decoder.decode(PageResponse.self, from: data)
         } catch {
             throw NotionClientError.invalidResponse
         }
@@ -152,6 +157,42 @@ struct NotionClient: NotionAPIClient, Sendable {
 private struct UserResponse: Decodable {
     let id: String
     let name: String?
+}
+
+private struct PageResponse: Decodable {
+    let id: String
+    let url: String
+    let properties: [String: Property]?
+
+    var reference: NotionPageReference {
+        NotionPageReference(id: id, url: url)
+    }
+
+    var title: String {
+        let text = properties?.values
+            .first(where: { $0.type == "title" })?
+            .title?
+            .compactMap(\.plainText)
+            .joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let text, !text.isEmpty else {
+            return "未命名页面"
+        }
+        return text
+    }
+
+    struct Property: Decodable {
+        let type: String?
+        let title: [RichText]?
+    }
+
+    struct RichText: Decodable {
+        let plainText: String?
+
+        enum CodingKeys: String, CodingKey {
+            case plainText = "plain_text"
+        }
+    }
 }
 
 private struct CreatePageRequest: Encodable {

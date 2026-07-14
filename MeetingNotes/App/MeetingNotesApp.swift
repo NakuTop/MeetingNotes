@@ -40,8 +40,16 @@ struct MeetingNotesApp: App {
         }
 
         Settings {
-            Text("设置")
-                .frame(width: 420, height: 240)
+            switch startupState {
+            case let .ready(container):
+                SettingsView(viewModel: container.settingsViewModel)
+            case .failed:
+                ContentUnavailableView(
+                    "设置暂不可用",
+                    systemImage: "gear.badge.xmark"
+                )
+                .frame(width: 480, height: 320)
+            }
         }
     }
 }
