@@ -53,8 +53,10 @@ final class NotionArchiveServiceTests: XCTestCase {
 
         XCTAssertEqual(page.id, "created-page-id")
         let createCallsAfterRetry = await client.createCallCount()
+        let createdTitles = await client.createdTitles()
         let successfulBatches = await client.successfulBatches()
         XCTAssertEqual(createCallsAfterRetry, 1)
+        XCTAssertEqual(createdTitles, [content.title])
         XCTAssertEqual(successfulBatches, expectedBatches)
         let completedMeeting = try repository.meeting(id: meetingID)
         XCTAssertEqual(completedMeeting.archiveCheckpoint?.nextSection, "complete")
@@ -107,6 +109,7 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
     )
     private let failOnAppendAttempt: Int?
     private var createCalls = 0
+    private var pageTitles: [String] = []
     private var appendAttempts = 0
     private var completedBatches: [[NotionBlockDraft]] = []
 
@@ -127,8 +130,8 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
 
     func createPage(parentPageID: UUID, title: String) async throws -> NotionPageReference {
         _ = parentPageID
-        _ = title
         createCalls += 1
+        pageTitles.append(title)
         return page
     }
 
@@ -144,6 +147,10 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
 
     func createCallCount() -> Int {
         createCalls
+    }
+
+    func createdTitles() -> [String] {
+        pageTitles
     }
 
     func appendAttemptCount() -> Int {

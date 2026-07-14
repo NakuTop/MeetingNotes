@@ -31,7 +31,7 @@ final class NotionArchiveService {
         } else {
             page = try await client.createPage(
                 parentPageID: parentPageID,
-                title: content.summary.suggestedTitle
+                title: content.title
             )
             try repository.setNotionPage(
                 meetingID: meetingID,

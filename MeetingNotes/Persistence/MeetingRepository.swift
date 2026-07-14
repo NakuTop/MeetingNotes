@@ -52,7 +52,7 @@ final class MeetingRepository {
     func createMeeting(
         mode: MeetingMode,
         startedAt: Date,
-        title: String = "未命名会议",
+        title: String = MeetingRecord.defaultTitle,
         audioManifestPath: String? = nil
     ) throws -> UUID {
         let meeting = MeetingRecord(
@@ -138,6 +138,30 @@ final class MeetingRepository {
         model: String,
         createdAt: Date = .now
     ) throws {
+        try saveSummary(
+            meetingID: meetingID,
+            overview: overview,
+            keyPoints: keyPoints,
+            decisions: decisions,
+            structuredActionItems: actionItems.map {
+                ActionItem(task: $0, owner: nil, dueDate: nil)
+            },
+            bookmarkInsights: bookmarkInsights,
+            model: model,
+            createdAt: createdAt
+        )
+    }
+
+    func saveSummary(
+        meetingID: UUID,
+        overview: String,
+        keyPoints: [String],
+        decisions: [String],
+        structuredActionItems: [ActionItem],
+        bookmarkInsights: [String],
+        model: String,
+        createdAt: Date = .now
+    ) throws {
         let meeting = try meeting(id: meetingID)
 
         if let summary = meeting.summary {
@@ -145,7 +169,7 @@ final class MeetingRepository {
                 overview: overview,
                 keyPoints: keyPoints,
                 decisions: decisions,
-                actionItems: actionItems,
+                actionItems: structuredActionItems,
                 bookmarkInsights: bookmarkInsights,
                 model: model,
                 createdAt: createdAt
@@ -155,7 +179,7 @@ final class MeetingRepository {
                 overview: overview,
                 keyPoints: keyPoints,
                 decisions: decisions,
-                actionItems: actionItems,
+                actionItems: structuredActionItems,
                 bookmarkInsights: bookmarkInsights,
                 model: model,
                 createdAt: createdAt,
@@ -165,6 +189,23 @@ final class MeetingRepository {
             meeting.summary = summary
         }
 
+        meeting.updatedAt = .now
+        try context.save()
+    }
+
+    func applySuggestedTitle(
+        meetingID: UUID,
+        suggestedTitle: String
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+        let trimmed = suggestedTitle.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !trimmed.isEmpty else { return }
+        meeting.suggestedTitle = trimmed
+        if meeting.title == MeetingRecord.defaultTitle {
+            meeting.title = trimmed
+        }
         meeting.updatedAt = .now
         try context.save()
     }

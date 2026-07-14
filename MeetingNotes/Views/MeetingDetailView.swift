@@ -1,15 +1,34 @@
 import SwiftUI
 
 struct MeetingDetailView: View {
-    let meeting: MeetingRecord
-    let canSummarize: Bool
-    let requestSummary: () -> Void
+    @State private var viewModel: MeetingDetailViewModel
+
+    init(viewModel: MeetingDetailViewModel) {
+        _viewModel = State(initialValue: viewModel)
+    }
 
     var body: some View {
+        Group {
+            if let meeting = viewModel.meeting {
+                detailContent(meeting)
+            } else {
+                ContentUnavailableView(
+                    "无法加载会议",
+                    systemImage: "doc.badge.exclamationmark"
+                )
+            }
+        }
+        .navigationTitle(viewModel.meeting?.title ?? "会议详情")
+        .task {
+            viewModel.load()
+        }
+    }
+
+    private func detailContent(_ meeting: MeetingRecord) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                header
-                audioSection
+                header(meeting)
+                audioSection(meeting)
 
                 GroupBox("转录") {
                     TranscriptView(
@@ -26,17 +45,16 @@ struct MeetingDetailView: View {
                         .padding(.top, 4)
                 }
 
-                summarySection
+                summarySection(meeting)
             }
             .padding(24)
             .frame(maxWidth: 860, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
-        .navigationTitle(meeting.title)
         .accessibilityIdentifier("meeting.detail")
     }
 
-    private var header: some View {
+    private func header(_ meeting: MeetingRecord) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 Text(meeting.title)
@@ -72,7 +90,7 @@ struct MeetingDetailView: View {
         }
     }
 
-    private var audioSection: some View {
+    private func audioSection(_ meeting: MeetingRecord) -> some View {
         GroupBox("音频") {
             HStack(spacing: 12) {
                 Image(systemName: "waveform")
@@ -98,7 +116,7 @@ struct MeetingDetailView: View {
         }
     }
 
-    private var summarySection: some View {
+    private func summarySection(_ meeting: MeetingRecord) -> some View {
         GroupBox("总结与归档") {
             VStack(alignment: .leading, spacing: 14) {
                 if let summary = meeting.summary {
@@ -106,19 +124,45 @@ struct MeetingDetailView: View {
                         .textSelection(.enabled)
                     summaryList(title: "关键结论", items: summary.keyPoints)
                     summaryList(title: "决定事项", items: summary.decisions)
-                    summaryList(title: "行动项", items: summary.actionItems)
+                    summaryList(
+                        title: "行动项",
+                        items: summary.actionItemRecords.map(actionItemText)
+                    )
                 } else {
                     Text("会议结束并完成转录后，可生成总结并归档到 Notion。")
                         .foregroundStyle(.secondary)
                 }
 
-                HStack {
-                    Button("总结并归档", systemImage: "sparkles") {
-                        requestSummary()
+                if let errorMessage = viewModel.errorMessage {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(errorMessage)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("关闭") {
+                            viewModel.dismissError()
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                HStack(spacing: 12) {
+                    let action = viewModel.primaryAction
+                    Button(action.title, systemImage: action.symbolName) {
+                        Task {
+                            await viewModel.performPrimaryAction()
+                        }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!canSummarize)
+                    .disabled(!action.isEnabled || viewModel.isPerforming)
                     .accessibilityIdentifier("meeting.summarizeArchive")
+
+                    if action == .summarizing || action == .archiving {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
 
                     if let urlString = meeting.notionPageURL,
                        let url = URL(string: urlString) {
@@ -133,6 +177,18 @@ struct MeetingDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 4)
         }
+    }
+
+    private func actionItemText(_ item: ActionItem) -> String {
+        var details: [String] = []
+        if let owner = item.owner, !owner.isEmpty {
+            details.append("负责人：\(owner)")
+        }
+        if let dueDate = item.dueDate, !dueDate.isEmpty {
+            details.append("截止：\(dueDate)")
+        }
+        guard !details.isEmpty else { return item.task }
+        return "\(item.task)｜\(details.joined(separator: "｜"))"
     }
 
     @ViewBuilder

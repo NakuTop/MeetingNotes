@@ -6,7 +6,6 @@ enum MeetingCoordinatorError: Error, Equatable, Sendable {
     case operationInProgress
     case capturePipelineFailed
     case transcriptPersistenceFailed
-    case summaryWorkflowUnavailable
 }
 
 struct MeetingCoordinatorSnapshot: Equatable, Sendable {
@@ -299,12 +298,6 @@ actor MeetingCoordinator {
             releaseActiveResources()
             throw error
         }
-    }
-
-    func summarizeAndArchive() async throws {
-        try beginLifecycleOperation()
-        defer { lifecycleOperationInProgress = false }
-        throw MeetingCoordinatorError.summaryWorkflowUnavailable
     }
 
     private func makeStreamTask(

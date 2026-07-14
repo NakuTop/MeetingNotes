@@ -10,6 +10,8 @@ final class AppContainer {
     let settingsViewModel: SettingsViewModel
 
     private let controlRouter: MeetingControlRouter
+    private let summarizeAndArchiveUseCase: SummarizeAndArchiveUseCase
+    private var detailViewModels: [UUID: MeetingDetailViewModel] = [:]
 
     private init(
         repository: MeetingRepository,
@@ -43,9 +45,24 @@ final class AppContainer {
         )
         self.libraryViewModel = libraryViewModel
         let httpClient = URLSessionHTTPClient()
+        let credentialStore = KeychainCredentialStore()
+        let settingsStore = AppSettingsStore()
+        let summarizeAndArchiveUseCase = SummarizeAndArchiveUseCase(
+            repository: repository,
+            credentialStore: credentialStore,
+            settingsStore: settingsStore,
+            summaryGenerator: LiveMeetingSummaryGenerator(
+                httpClient: httpClient
+            ),
+            notionArchiver: LiveMeetingNotionArchiver(
+                repository: repository,
+                httpClient: httpClient
+            )
+        )
+        self.summarizeAndArchiveUseCase = summarizeAndArchiveUseCase
         settingsViewModel = SettingsViewModel(
-            credentialStore: KeychainCredentialStore(),
-            settingsStore: AppSettingsStore(),
+            credentialStore: credentialStore,
+            settingsStore: settingsStore,
             deepSeekTester: LiveDeepSeekConnectionTester(
                 httpClient: httpClient
             ),
@@ -92,8 +109,17 @@ final class AppContainer {
         )
     }
 
-    func requestSummary(for meetingID: UUID) {
-        controlRouter.requestSummary(for: meetingID)
+    func detailViewModel(for meetingID: UUID) -> MeetingDetailViewModel {
+        if let existing = detailViewModels[meetingID] {
+            return existing
+        }
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            action: summarizeAndArchiveUseCase
+        )
+        detailViewModels[meetingID] = viewModel
+        return viewModel
     }
 }
 
@@ -142,24 +168,4 @@ private final class MeetingControlRouter {
         }
     }
 
-    func requestSummary(for meetingID: UUID) {
-        guard let coordinator else { return }
-
-        Task { [weak self] in
-            let activeMeetingID = await coordinator.snapshot().meetingID
-            guard activeMeetingID == meetingID else {
-                self?.libraryViewModel?.reportControlFailure(
-                    MeetingCoordinatorError.summaryWorkflowUnavailable
-                )
-                return
-            }
-
-            do {
-                try await coordinator.summarizeAndArchive()
-                self?.libraryViewModel?.load()
-            } catch {
-                self?.libraryViewModel?.reportControlFailure(error)
-            }
-        }
-    }
 }

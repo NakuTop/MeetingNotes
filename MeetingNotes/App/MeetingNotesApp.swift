@@ -23,8 +23,8 @@ struct MeetingNotesApp: App {
             case let .ready(container):
                 RootView(
                     viewModel: container.libraryViewModel,
-                    requestSummary: { meetingID in
-                        container.requestSummary(for: meetingID)
+                    makeDetailViewModel: { meetingID in
+                        container.detailViewModel(for: meetingID)
                     }
                 )
             case .failed:

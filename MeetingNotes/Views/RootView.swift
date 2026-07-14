@@ -3,23 +3,23 @@ import SwiftUI
 struct RootView: View {
     private let ownedContainer: AppContainer?
     @Bindable var viewModel: MeetingLibraryViewModel
-    let requestSummary: (UUID) -> Void
+    let makeDetailViewModel: (UUID) -> MeetingDetailViewModel
 
     init(
         viewModel: MeetingLibraryViewModel,
-        requestSummary: @escaping (UUID) -> Void
+        makeDetailViewModel: @escaping (UUID) -> MeetingDetailViewModel
     ) {
         ownedContainer = nil
         self.viewModel = viewModel
-        self.requestSummary = requestSummary
+        self.makeDetailViewModel = makeDetailViewModel
     }
 
     init() {
         let container = AppContainer.inMemory()
         ownedContainer = container
         viewModel = container.libraryViewModel
-        requestSummary = { meetingID in
-            container.requestSummary(for: meetingID)
+        makeDetailViewModel = { meetingID in
+            container.detailViewModel(for: meetingID)
         }
     }
 
@@ -31,14 +31,9 @@ struct RootView: View {
             } detail: {
                 if let meeting = viewModel.selectedMeeting {
                     MeetingDetailView(
-                        meeting: meeting,
-                        canSummarize: viewModel.canSummarize(
-                            meetingIn: meeting.state
-                        ),
-                        requestSummary: {
-                            requestSummary(meeting.id)
-                        }
+                        viewModel: makeDetailViewModel(meeting.id)
                     )
+                    .id(meeting.id)
                 } else {
                     StartMeetingView(viewModel: viewModel)
                 }

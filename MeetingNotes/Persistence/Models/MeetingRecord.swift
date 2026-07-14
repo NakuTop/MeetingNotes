@@ -8,6 +8,8 @@ enum MeetingMode: String, Codable, CaseIterable, Equatable, Sendable {
 
 @Model
 final class MeetingRecord {
+    static let defaultTitle = "未命名会议"
+
     @Attribute(.unique) var id: UUID
     var title: String
     var modeRawValue: String
