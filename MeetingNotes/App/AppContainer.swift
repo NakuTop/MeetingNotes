@@ -15,10 +15,21 @@ final class AppContainer {
     private let summarizeAndArchiveUseCase: SummarizeAndArchiveUseCase
     private var detailViewModels: [UUID: MeetingDetailViewModel] = [:]
 
-    private init(
+    init(
         repository: MeetingRepository,
         fileStore: MeetingFileStore,
-        recordingsURL: URL
+        recordingsURL: URL,
+        coordinatorDependencies: ((any RecordingPanelPresenting) ->
+            MeetingCoordinatorDependencies)? = nil,
+        modelPreparer: (any TranscriptionModelPreparing)? = nil,
+        credentialStore: (any CredentialStore)? = nil,
+        settingsStore: AppSettingsStore? = nil,
+        deepSeekTester: (any DeepSeekConnectionTesting)? = nil,
+        notionTester: (any NotionConnectionTesting)? = nil,
+        summaryGenerator: (any MeetingSummaryGenerating)? = nil,
+        notionArchiver: (any MeetingNotionArchiving)? = nil,
+        onboardingState: OnboardingState? = nil,
+        systemRequirements: (any SystemRequirementChecking)? = nil
     ) {
         self.repository = repository
         self.fileStore = fileStore
@@ -35,37 +46,38 @@ final class AppContainer {
         )
         let transcriptionService = WhisperKitTranscriptionService()
         transcriptionModelViewModel = TranscriptionModelViewModel(
-            preparer: transcriptionService
+            preparer: modelPreparer ?? transcriptionService
         )
-        onboardingState = OnboardingState()
+        self.onboardingState = onboardingState ?? OnboardingState()
+        let dependencies = coordinatorDependencies?(panelPresenter) ?? .live(
+            repository: repository,
+            fileStore: fileStore,
+            panel: panelPresenter,
+            transcriptionService: transcriptionService
+        )
         let coordinator = MeetingCoordinator(
-            dependencies: .live(
-                repository: repository,
-                fileStore: fileStore,
-                panel: panelPresenter,
-                transcriptionService: transcriptionService
-            )
+            dependencies: dependencies
         )
         self.coordinator = coordinator
         let libraryViewModel = MeetingLibraryViewModel(
             repository: repository,
             fileDeleter: fileStore,
             starter: coordinator,
-            systemRequirements: SystemRequirements(),
+            systemRequirements: systemRequirements ?? SystemRequirements(),
             recordingsURL: recordingsURL
         )
         self.libraryViewModel = libraryViewModel
         let httpClient = URLSessionHTTPClient()
-        let credentialStore = KeychainCredentialStore()
-        let settingsStore = AppSettingsStore()
+        let credentialStore = credentialStore ?? KeychainCredentialStore()
+        let settingsStore = settingsStore ?? AppSettingsStore()
         let summarizeAndArchiveUseCase = SummarizeAndArchiveUseCase(
             repository: repository,
             credentialStore: credentialStore,
             settingsStore: settingsStore,
-            summaryGenerator: LiveMeetingSummaryGenerator(
+            summaryGenerator: summaryGenerator ?? LiveMeetingSummaryGenerator(
                 httpClient: httpClient
             ),
-            notionArchiver: LiveMeetingNotionArchiver(
+            notionArchiver: notionArchiver ?? LiveMeetingNotionArchiver(
                 repository: repository,
                 httpClient: httpClient
             )
@@ -74,10 +86,10 @@ final class AppContainer {
         settingsViewModel = SettingsViewModel(
             credentialStore: credentialStore,
             settingsStore: settingsStore,
-            deepSeekTester: LiveDeepSeekConnectionTester(
+            deepSeekTester: deepSeekTester ?? LiveDeepSeekConnectionTester(
                 httpClient: httpClient
             ),
-            notionTester: LiveNotionConnectionTester(
+            notionTester: notionTester ?? LiveNotionConnectionTester(
                 httpClient: httpClient
             )
         )

@@ -27,6 +27,7 @@ struct BookmarkListView: View {
                     .accessibilityLabel(
                         "书签 \(MeetingDisplayFormat.timecode(bookmark.timestamp))"
                     )
+                    .accessibilityIdentifier("meeting.bookmark")
                 }
             }
         }

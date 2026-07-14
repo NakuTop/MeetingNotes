@@ -10,6 +10,16 @@ struct MeetingNotesApp: App {
     private let startupState: StartupState
 
     init() {
+        #if DEBUG
+        if LaunchArguments.isUITesting() {
+            do {
+                startupState = .ready(try AppContainer.uiTesting())
+            } catch {
+                startupState = .failed
+            }
+            return
+        }
+        #endif
         do {
             startupState = .ready(try AppContainer.live())
         } catch {
