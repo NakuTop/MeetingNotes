@@ -103,6 +103,27 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(try repository.meetings().map(\.id), [newerID, olderID])
     }
 
+    func testFinalizingMeetingPersistsReadyStateEndAndActiveDuration() throws {
+        let repository = try MeetingRepository.inMemory()
+        let id = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+        let endedAt = Date(timeIntervalSince1970: 145)
+
+        try repository.finalizeMeeting(
+            id: id,
+            endedAt: endedAt,
+            activeDuration: 31
+        )
+
+        let meeting = try repository.meeting(id: id)
+        XCTAssertEqual(meeting.state, .ready)
+        XCTAssertEqual(meeting.endedAt, endedAt)
+        XCTAssertEqual(meeting.activeDuration, 31, accuracy: 0.001)
+        XCTAssertEqual(meeting.updatedAt, endedAt)
+    }
+
     func testDeletingMeetingCascadesToAllRelatedRecords() throws {
         let repository = try MeetingRepository.inMemory()
         let id = try repository.createMeeting(mode: .online, startedAt: .now)

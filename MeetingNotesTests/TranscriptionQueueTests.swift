@@ -71,6 +71,28 @@ final class TranscriptionQueueTests: XCTestCase {
         XCTAssertEqual(transcriptStarts, [0, 15, 30])
         XCTAssertEqual(idleSnapshot, .idle)
     }
+
+    func testPublishesCompletedDraftsBeforeTheQueueIsFinalized() async throws {
+        let service = RecordingTranscriptionService()
+        let queue = TranscriptionQueue(service: service)
+        let updates = await queue.updates()
+        let firstUpdate = Task { () -> TranscriptDraft? in
+            for await update in updates {
+                return update
+            }
+            return nil
+        }
+
+        await queue.enqueue(samples: [0.5], startingAt: 12)
+        await queue.drain()
+
+        let update = await firstUpdate.value
+        XCTAssertEqual(
+            update,
+            TranscriptDraft(startTime: 12, endTime: 13, text: "12")
+        )
+        await queue.finishUpdates()
+    }
 }
 
 private actor RecordingTranscriptionService: TranscriptionService {

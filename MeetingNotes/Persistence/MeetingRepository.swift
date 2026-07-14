@@ -188,6 +188,19 @@ final class MeetingRepository {
         try context.save()
     }
 
+    func finalizeMeeting(
+        id: UUID,
+        endedAt: Date,
+        activeDuration: TimeInterval
+    ) throws {
+        let meeting = try meeting(id: id)
+        meeting.state = .ready
+        meeting.endedAt = endedAt
+        meeting.activeDuration = activeDuration
+        meeting.updatedAt = endedAt
+        try context.save()
+    }
+
     func saveArchiveCheckpoint(
         meetingID: UUID,
         notionPageID: String,

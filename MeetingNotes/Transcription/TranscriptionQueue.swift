@@ -26,6 +26,7 @@ actor TranscriptionQueue {
     private var isPrepared = false
     private var isProcessing = false
     private var workerTask: Task<Void, Never>?
+    private var updateContinuation: AsyncStream<TranscriptDraft>.Continuation?
 
     init(
         service: any TranscriptionService,
@@ -60,6 +61,19 @@ actor TranscriptionQueue {
 
     func transcripts() -> [TranscriptDraft] {
         merger.merge(completed)
+    }
+
+    func updates() -> AsyncStream<TranscriptDraft> {
+        updateContinuation?.finish()
+        let pair = AsyncStream<TranscriptDraft>.makeStream()
+        updateContinuation = pair.continuation
+        return pair.stream
+    }
+
+    func finishUpdates() async {
+        await drain()
+        updateContinuation?.finish()
+        updateContinuation = nil
     }
 
     func snapshot() -> TranscriptionQueueSnapshot {
@@ -99,6 +113,9 @@ actor TranscriptionQueue {
                     startingAt: chunk.startingAt
                 )
                 completed.append(contentsOf: drafts)
+                for draft in drafts {
+                    updateContinuation?.yield(draft)
+                }
             } catch {
                 failed.append(chunk)
             }
