@@ -60,5 +60,9 @@ xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
 | 日期 | 检查项 | 结果 | 证据/备注 |
 |---|---|---|---|
 | 2026-07-14 | 长录音 harness | 通过 | `LongRecordingHarnessTests` 及相关队列/协调器测试共 14 项通过 |
+| 2026-07-14 | arm64 干净单元回归 | 通过 | 全新 DerivedData，123/123 通过，0 失败 |
+| 2026-07-14 | Release 架构 | 通过 | `file`: Mach-O 64-bit executable arm64；`lipo`: arm64 |
+| 2026-07-14 | Release 假数据审计 | 通过 | 二进制中无 UI 测试 Key、Token、页面标题或假总结文本 |
 | 2026-07-14 | UI Runner 启动 | 系统阻塞 | Developer Mode disabled；Runner 在 XCTest 连接前 SIGKILL |
 | 2026-07-14 | `-uiTesting` App 直接启动 | 通过 | Debug App 进程正常保持运行，随后主动退出 |
+| 2026-07-14 | Xcode 工程再生成 | 环境缺失 | 当前机器未安装 `xcodegen`；已提交工程可正常构建 |
