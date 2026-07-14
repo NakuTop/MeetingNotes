@@ -76,6 +76,20 @@ final class LiveMeetingNotionArchiver: MeetingNotionArchiving {
 @MainActor
 protocol SummarizeAndArchiving: AnyObject {
     func execute(meetingID: UUID) async throws
+    func execute(
+        meetingID: UUID,
+        onProgress: @escaping (RecordingState) -> Void
+    ) async throws
+}
+
+extension SummarizeAndArchiving {
+    func execute(
+        meetingID: UUID,
+        onProgress: @escaping (RecordingState) -> Void
+    ) async throws {
+        _ = onProgress
+        try await execute(meetingID: meetingID)
+    }
 }
 
 @MainActor
@@ -102,6 +116,13 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
     }
 
     func execute(meetingID: UUID) async throws {
+        try await execute(meetingID: meetingID) { _ in }
+    }
+
+    func execute(
+        meetingID: UUID,
+        onProgress: @escaping (RecordingState) -> Void
+    ) async throws {
         guard processingMeetingIDs.insert(meetingID).inserted else {
             throw SummarizeAndArchiveError.operationInProgress
         }
@@ -110,27 +131,42 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
         let meeting = try repository.meeting(id: meetingID)
         switch meeting.state {
         case .archived:
+            onProgress(.archived)
             return
         case .summarizing, .archiving:
             throw SummarizeAndArchiveError.operationInProgress
         case .summaryReady:
-            try await archiveExistingSummary(meetingID: meetingID)
+            onProgress(.summaryReady)
+            try await archiveExistingSummary(
+                meetingID: meetingID,
+                onProgress: onProgress
+            )
         case .ready:
             if meeting.summary == nil {
-                try await generateSummary(meetingID: meetingID)
+                try await generateSummary(
+                    meetingID: meetingID,
+                    onProgress: onProgress
+                )
             } else {
                 try repository.updateMeetingState(
                     id: meetingID,
                     state: .summaryReady
                 )
+                onProgress(.summaryReady)
             }
-            try await archiveExistingSummary(meetingID: meetingID)
+            try await archiveExistingSummary(
+                meetingID: meetingID,
+                onProgress: onProgress
+            )
         default:
             throw SummarizeAndArchiveError.invalidState(meeting.state)
         }
     }
 
-    private func generateSummary(meetingID: UUID) async throws {
+    private func generateSummary(
+        meetingID: UUID,
+        onProgress: (RecordingState) -> Void
+    ) async throws {
         let meeting = try repository.meeting(id: meetingID)
         let content = contentInputs(for: meeting)
         guard !content.transcripts.isEmpty else {
@@ -141,6 +177,7 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
         }
 
         try repository.updateMeetingState(id: meetingID, state: .summarizing)
+        onProgress(.summarizing)
         let generated: GeneratedMeetingSummary
         do {
             generated = try await summaryGenerator.summarize(
@@ -154,6 +191,7 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
             )
         } catch {
             try? repository.updateMeetingState(id: meetingID, state: .ready)
+            onProgress(.ready)
             throw SummarizeAndArchiveError.summaryFailed
         }
 
@@ -175,13 +213,18 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
                 id: meetingID,
                 state: .summaryReady
             )
+            onProgress(.summaryReady)
         } catch {
             try? repository.updateMeetingState(id: meetingID, state: .ready)
+            onProgress(.ready)
             throw SummarizeAndArchiveError.localPersistenceFailed
         }
     }
 
-    private func archiveExistingSummary(meetingID: UUID) async throws {
+    private func archiveExistingSummary(
+        meetingID: UUID,
+        onProgress: (RecordingState) -> Void
+    ) async throws {
         guard let notionToken = try nonemptyCredential(.notionToken) else {
             throw SummarizeAndArchiveError.missingNotionCredential
         }
@@ -215,6 +258,7 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
         )
 
         try repository.updateMeetingState(id: meetingID, state: .archiving)
+        onProgress(.archiving)
         do {
             _ = try await notionArchiver.archive(
                 token: notionToken,
@@ -223,11 +267,13 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
                 content: pageContent
             )
             try repository.updateMeetingState(id: meetingID, state: .archived)
+            onProgress(.archived)
         } catch {
             try? repository.updateMeetingState(
                 id: meetingID,
                 state: .summaryReady
             )
+            onProgress(.summaryReady)
             throw SummarizeAndArchiveError.archiveFailed
         }
     }

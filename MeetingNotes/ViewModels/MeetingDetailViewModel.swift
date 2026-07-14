@@ -43,6 +43,7 @@ final class MeetingDetailViewModel {
 
     private(set) var meeting: MeetingRecord?
     private(set) var isPerforming = false
+    private(set) var operationState: RecordingState?
     private(set) var errorMessage: String?
 
     init(
@@ -59,7 +60,14 @@ final class MeetingDetailViewModel {
     var primaryAction: MeetingDetailPrimaryAction {
         guard let state = meeting?.state else { return .unavailable }
         if isPerforming {
-            return state == .summaryReady ? .archiving : .summarizing
+            return switch operationState ?? state {
+            case .summaryReady, .archiving:
+                .archiving
+            case .archived:
+                .archived
+            default:
+                .summarizing
+            }
         }
         return switch state {
         case .ready: .summarizeAndArchive
@@ -83,11 +91,17 @@ final class MeetingDetailViewModel {
     func performPrimaryAction() async {
         guard primaryAction.isEnabled, !isPerforming else { return }
         isPerforming = true
+        operationState = meeting?.state
         errorMessage = nil
-        defer { isPerforming = false }
+        defer {
+            isPerforming = false
+            operationState = nil
+        }
 
         do {
-            try await action.execute(meetingID: meetingID)
+            try await action.execute(meetingID: meetingID) { [weak self] state in
+                self?.operationState = state
+            }
         } catch {
             errorMessage = Self.message(for: error)
         }

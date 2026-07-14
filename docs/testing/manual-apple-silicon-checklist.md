@@ -8,26 +8,27 @@
 - [x] Xcode 可构建 arm64 App、单元测试和 UI 测试 Runner。
 - [x] UI 自动化使用 `-uiTesting`，只在 `#if DEBUG` 中注入内存数据库与假服务。
 - [x] 直接启动 Debug App 的 `-uiTesting` 路径后，进程保持运行且未崩溃。
-- [ ] macOS Developer Mode 已启用。
+- [x] macOS Developer Mode 已启用。
 
-当前机器的 `DevToolsSecurity -status` 返回 `Developer mode is currently disabled.`。因此 UI Runner 在建立 XCTest 连接前被系统以 SIGKILL 终止；这不是测试断言或 App 启动崩溃。启用 Developer Mode 后重新运行以下命令：
+当前机器的 `DevToolsSecurity -status` 返回 `Developer mode is currently enabled.`。UI Runner 必须使用本机临时签名；若设置 `CODE_SIGNING_ALLOWED=NO`，复制 XCTest 框架后 Runner 签名会失效并在建立连接前被系统终止。
 
 ```bash
 xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
   -destination 'platform=macOS,arch=arm64' \
-  -derivedDataPath .deriveddata CODE_SIGNING_ALLOWED=NO \
+  -derivedDataPath .deriveddata \
+  CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
   -only-testing:MeetingNotesUITests/MeetingFlowUITests \
   -only-testing:MeetingNotesTests/LongRecordingHarnessTests
 ```
 
 ## UI 自动化场景
 
-- [ ] 首页恰有“线下会议”和“在线会议”两个入口。
-- [ ] 开始录音后悬浮面板可见，且恰有录音、暂停、结束、书签四个按钮。
-- [ ] 暂停/继续只改变暂停按钮语义，不增加第五个按钮。
-- [ ] 添加书签后详情页出现书签，结束会议后仍保留。
-- [ ] 设置页有两个独立的“测试连接”按钮，并显示 DeepSeek 模型和 Notion 页面标题。
-- [ ] “总结并归档”依次显示正在总结、正在归档、已归档与 Notion 链接。
+- [x] 首页恰有“线下会议”和“在线会议”两个入口。
+- [x] 开始录音后悬浮面板可见，且恰有录音、暂停、结束、书签四个按钮。
+- [x] 暂停/继续只改变暂停按钮语义，不增加第五个按钮。
+- [x] 添加书签后详情页出现书签，结束会议后仍保留。
+- [x] 设置页有两个独立的“测试连接”按钮，并显示 DeepSeek 模型和 Notion 页面标题。
+- [x] “总结并归档”依次显示正在总结、正在归档、已归档与 Notion 链接。
 
 对应自动化：`MeetingNotesUITests/MeetingFlowUITests.swift`。
 
@@ -60,9 +61,9 @@ xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
 | 日期 | 检查项 | 结果 | 证据/备注 |
 |---|---|---|---|
 | 2026-07-14 | 长录音 harness | 通过 | `LongRecordingHarnessTests` 及相关队列/协调器测试共 14 项通过 |
-| 2026-07-14 | arm64 干净单元回归 | 通过 | 全新 DerivedData，123/123 通过，0 失败 |
+| 2026-07-14 | arm64 干净单元回归 | 通过 | 全新 DerivedData，124/124 通过，0 失败 |
 | 2026-07-14 | Release 架构 | 通过 | `file`: Mach-O 64-bit executable arm64；`lipo`: arm64 |
 | 2026-07-14 | Release 假数据审计 | 通过 | 二进制中无 UI 测试 Key、Token、页面标题或假总结文本 |
-| 2026-07-14 | UI Runner 启动 | 系统阻塞 | Developer Mode disabled；Runner 在 XCTest 连接前 SIGKILL |
+| 2026-07-14 | UI 流程 + 长录音 harness | 通过 | Developer Mode enabled；本机临时签名；全新 DerivedData，5/5 通过 |
 | 2026-07-14 | `-uiTesting` App 直接启动 | 通过 | Debug App 进程正常保持运行，随后主动退出 |
 | 2026-07-14 | Xcode 工程再生成 | 环境缺失 | 当前机器未安装 `xcodegen`；已提交工程可正常构建 |

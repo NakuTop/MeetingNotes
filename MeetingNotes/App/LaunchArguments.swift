@@ -258,7 +258,7 @@ private struct UITestSummaryGenerator: MeetingSummaryGenerating {
         _ = apiKey
         _ = input
         _ = model
-        try await Task.sleep(for: .milliseconds(700))
+        try await Task.sleep(for: .milliseconds(1_500))
         return GeneratedMeetingSummary(
             suggestedTitle: "UI 测试会议",
             overview: "端到端总结已完成。",
@@ -293,7 +293,7 @@ private final class UITestNotionArchiver: MeetingNotionArchiving {
         _ = token
         _ = parentPageID
         _ = content
-        try await Task.sleep(for: .milliseconds(700))
+        try await Task.sleep(for: .milliseconds(1_500))
         let page = NotionPageReference(
             id: "ui-test-page",
             url: "https://www.notion.so/ui-test-page"

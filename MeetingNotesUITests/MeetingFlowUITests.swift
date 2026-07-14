@@ -38,7 +38,7 @@ final class MeetingFlowUITests: XCTestCase {
 
         app.buttons["floating.bookmark"].click()
         XCTAssertTrue(
-            app.otherElements["meeting.bookmark"]
+            app.staticTexts["meeting.bookmark"]
                 .firstMatch
                 .waitForExistence(timeout: 5)
         )
@@ -48,7 +48,7 @@ final class MeetingFlowUITests: XCTestCase {
             app.buttons["meeting.summarizeArchive"]
                 .waitForExistence(timeout: 5)
         )
-        XCTAssertTrue(app.otherElements["meeting.bookmark"].firstMatch.exists)
+        XCTAssertTrue(app.staticTexts["meeting.bookmark"].firstMatch.exists)
     }
 
     func testSettingsConnectionButtonsShowSuccessfulResults() {
@@ -58,7 +58,8 @@ final class MeetingFlowUITests: XCTestCase {
                 .waitForExistence(timeout: 5)
         )
         app.activate()
-        app.typeKey(",", modifierFlags: .command)
+        app.menuBars.menuBarItems["MeetingNotes"].click()
+        app.menuItems["Settings…"].click()
 
         let deepSeek = app.buttons["settings.deepseek.testConnection"]
         let notion = app.buttons["settings.notion.testConnection"]
@@ -92,9 +93,30 @@ final class MeetingFlowUITests: XCTestCase {
         XCTAssertTrue(action.waitForExistence(timeout: 5))
         action.click()
 
-        XCTAssertTrue(waitForLabel("正在总结", on: action, timeout: 5))
-        XCTAssertTrue(waitForLabel("正在归档", on: action, timeout: 8))
-        XCTAssertTrue(waitForLabel("已归档", on: action, timeout: 8))
+        XCTAssertTrue(
+            waitForButton(
+                identifier: "meeting.summarizeArchive",
+                label: "正在总结",
+                in: app,
+                timeout: 5
+            )
+        )
+        XCTAssertTrue(
+            waitForButton(
+                identifier: "meeting.summarizeArchive",
+                label: "正在归档",
+                in: app,
+                timeout: 8
+            )
+        )
+        XCTAssertTrue(
+            waitForButton(
+                identifier: "meeting.summarizeArchive",
+                label: "已归档",
+                in: app,
+                timeout: 8
+            )
+        )
         XCTAssertTrue(
             app.links["在 Notion 中打开"].waitForExistence(timeout: 5)
         )
@@ -136,5 +158,23 @@ final class MeetingFlowUITests: XCTestCase {
             for: [expectation],
             timeout: timeout
         ) == .completed
+    }
+
+    private func waitForButton(
+        identifier: String,
+        label: String,
+        in app: XCUIApplication,
+        timeout: TimeInterval
+    ) -> Bool {
+        app.buttons
+            .matching(
+                NSPredicate(
+                    format: "identifier == %@ AND label == %@",
+                    identifier,
+                    label
+                )
+            )
+            .firstMatch
+            .waitForExistence(timeout: timeout)
     }
 }

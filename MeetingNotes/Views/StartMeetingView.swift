@@ -18,7 +18,6 @@ struct StartMeetingView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(40)
-        .accessibilityIdentifier("meeting.start")
     }
 
     private func meetingButton(

@@ -2,7 +2,7 @@
 
 一款仅面向 Apple Silicon 的原生 macOS 会议记录 App。它支持线下麦克风录音、在线会议系统音频与麦克风混合录制、本地 WhisperKit 转录、DeepSeek 结构化总结，以及向指定 Notion 父页面归档。
 
-当前状态：功能实现与 arm64 自动化单元验证已完成；UI Runner 和真实权限/真实服务端到端验收尚未全部完成，详见[真机检查表](docs/testing/manual-apple-silicon-checklist.md)。
+当前状态：功能实现、arm64 单元测试和 UI 自动化流程已完成；真实麦克风/系统音频权限与真实 DeepSeek、Notion 端到端验收仍需使用者凭据完成，详见[真机检查表](docs/testing/manual-apple-silicon-checklist.md)。
 
 ## 系统要求
 
@@ -97,12 +97,13 @@ UI 流程与一小时等价稳定性测试：
 ```bash
 xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
   -destination 'platform=macOS,arch=arm64' \
-  -derivedDataPath .deriveddata CODE_SIGNING_ALLOWED=NO \
+  -derivedDataPath .deriveddata \
+  CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
   -only-testing:MeetingNotesUITests/MeetingFlowUITests \
   -only-testing:MeetingNotesTests/LongRecordingHarnessTests
 ```
 
-macOS UI Runner 需要启用 Developer Mode。测试 App 只有在 Debug 构建且明确传入 `-uiTesting` 时才注入内存数据库和假服务；Release 二进制不包含假凭据与假成功载荷。
+macOS UI Runner 需要启用 Developer Mode，并使用上面的本机临时签名参数；`CODE_SIGNING_ALLOWED=NO` 会使 UI Runner 的 XCTest 框架签名失效。测试 App 只有在 Debug 构建且明确传入 `-uiTesting` 时才注入内存数据库和假服务；Release 二进制不包含假凭据与假成功载荷。
 
 Release arm64 检查：
 
@@ -117,12 +118,13 @@ lipo -archs .deriveddata/Build/Products/Release/MeetingNotes.app/Contents/MacOS/
 
 ## 验收证据（2026-07-14）
 
-- 干净构建目录中的 arm64 单元测试：123/123 通过，无 Swift 6 concurrency error。
+- 干净构建目录中的 arm64 单元测试：124/124 通过，无 Swift 6 concurrency error。
+- 全新构建目录中的 UI 流程与长录音 harness：5/5 通过；覆盖双入口、悬浮四键、暂停/继续、书签持久化、设置双连接测试，以及总结/归档完整状态链和 Notion 链接。
 - 一小时等价 harness：57,600,000 个逻辑样本全部到达 writer 计数；模型阻塞时实时转录内存队列不超过 8 个分片，生产循环少于 2 秒。
 - Release：Mach-O 64-bit executable arm64，`lipo` 仅输出 `arm64`。
 - Release 假数据审计：二进制中未发现 UI 测试 Key、Token、页面标题或假总结文本。
 - `-uiTesting` Debug App 可直接启动并保持运行。
-- UI Runner：测试代码完成构建，但本机 Developer Mode 关闭，Runner 在 XCTest 连接前被 SIGKILL；尚不能记为通过。
+- UI Runner：本机 Developer Mode 已启用，并通过临时签名完成全部 UI 自动化。
 - XcodeGen：当前机器未安装 `xcodegen`，因此本轮未重新生成工程；已提交的 `MeetingNotes.xcodeproj` 可正常完成上述构建。
 
 ### 13 项设计验收审计
@@ -132,15 +134,15 @@ lipo -archs .deriveddata/Build/Products/Release/MeetingNotes.app/Contents/MacOS/
 | 1 | Release 为 arm64，运行于 macOS 15+ Apple Silicon | Release `file`/`lipo` 已通过；真实发布签名运行待检查 | 部分通过 |
 | 2 | 线下麦克风录音与带时间戳本地转录 | 采集、协调器、PCM、转录单元测试通过 | 待真实麦克风验证 |
 | 3 | 在线系统音频 + 麦克风，不保存视频 | ScreenCaptureKit 配置、混音和权限测试通过 | 待真实在线会议验证 |
-| 4 | 悬浮条严格四个图标 | 枚举与 SwiftUI 测试覆盖；UI 测试已编写 | 待 UI Runner |
+| 4 | 悬浮条严格四个图标 | 枚举、SwiftUI 实现与 UI 流程测试通过 | 自动化通过 |
 | 5 | 暂停/继续/结束/书签使用有效音频时间轴 | 状态机、时间轴、Coordinator 测试通过 | 自动化通过，待真机 |
 | 6 | 一小时录音不被转录积压阻塞 | 一小时等价有界队列 harness 通过 | 自动化通过，待真实一小时 |
 | 7 | 异常退出后恢复音频、文本和书签 | 恢复服务与分片清单测试通过 | 待真机强制退出 |
 | 8 | DeepSeek 结构化总结，失败保留本地会议 | 客户端、解析、用例与失败恢复测试通过 | 待真实 Key |
 | 9 | Notion 单页面幂等归档全部内容 | blocks、批次检查点、失败重试测试通过 | 待真实 Token/页面 |
 | 10 | Key/Token 存入 Keychain，重启仍可用 | Keychain 保存/替换/删除测试通过 | 待重启验证 |
-| 11 | 两个测试连接按钮给出成功或具体错误 | SettingsViewModel 测试和 UI 场景已覆盖 | 待 UI Runner/真实服务 |
+| 11 | 两个测试连接按钮给出成功或具体错误 | SettingsViewModel 与 UI 场景通过 | 自动化通过，待真实服务 |
 | 12 | 日志不含凭据、完整转录和音频 | 网络与日志脱敏测试通过 | 待真机日志/崩溃日志审计 |
-| 13 | 自动化与 Apple Silicon 真机端到端通过 | 123 项单元测试通过 | UI Runner 与真机清单待完成 |
+| 13 | 自动化与 Apple Silicon 真机端到端通过 | 124 项单元测试、4 项 UI 流程与 1 项长录音 harness 通过 | 自动化通过，真机真实服务清单待完成 |
 
 任何标记为“待验证”的项目都不是已通过项。完整操作记录在[真机检查表](docs/testing/manual-apple-silicon-checklist.md)。

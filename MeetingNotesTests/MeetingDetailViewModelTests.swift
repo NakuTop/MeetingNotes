@@ -87,6 +87,32 @@ final class MeetingDetailViewModelTests: XCTestCase {
         action.finish()
         await operation.value
     }
+
+    func testActionShowsArchivingWhenWorkflowReportsTransition() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        let action = ProgressingDetailAction()
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            action: action
+        )
+
+        let operation = Task {
+            await viewModel.performPrimaryAction()
+        }
+        await action.waitUntilStarted()
+
+        XCTAssertEqual(viewModel.primaryAction, .archiving)
+        XCTAssertTrue(viewModel.isPerforming)
+
+        action.finish()
+        await operation.value
+    }
 }
 
 @MainActor
@@ -131,5 +157,47 @@ private final class BlockingDetailAction: SummarizeAndArchiving {
     func finish() {
         finishContinuation?.resume()
         finishContinuation = nil
+    }
+}
+
+@MainActor
+private final class ProgressingDetailAction: SummarizeAndArchiving {
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var finishContinuation: CheckedContinuation<Void, Never>?
+
+    func execute(meetingID: UUID) async throws {
+        _ = meetingID
+        await waitForFinish()
+    }
+
+    func execute(
+        meetingID: UUID,
+        onProgress: @escaping (RecordingState) -> Void
+    ) async throws {
+        _ = meetingID
+        onProgress(.archiving)
+        await waitForFinish()
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func finish() {
+        finishContinuation?.resume()
+        finishContinuation = nil
+    }
+
+    private func waitForFinish() async {
+        started = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        await withCheckedContinuation { continuation in
+            finishContinuation = continuation
+        }
     }
 }
