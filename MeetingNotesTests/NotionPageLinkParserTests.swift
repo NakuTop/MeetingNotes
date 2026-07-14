@@ -2,6 +2,19 @@ import XCTest
 @testable import MeetingNotes
 
 final class NotionPageLinkParserTests: XCTestCase {
+    func testParsesCopiedAppNotionParentPageLink() throws {
+        let expected = try XCTUnwrap(
+            UUID(uuidString: "39c48749-eaf5-80b8-a7a7-d2e9e1d27b3e")
+        )
+
+        XCTAssertEqual(
+            NotionPageLinkParser.parse(
+                "https://app.notion.com/p/39c48749eaf580b8a7a7d2e9e1d27b3e?source=copy_link"
+            ),
+            expected
+        )
+    }
+
     func testParsesSluggedPlainAndHyphenatedPageIDs() throws {
         let expected = try XCTUnwrap(
             UUID(uuidString: "12345678-90ab-cdef-1234-567890abcdef")

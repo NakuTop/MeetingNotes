@@ -7,7 +7,9 @@ enum NotionPageLinkParser {
               components.user == nil,
               components.password == nil,
               let host = components.host?.lowercased(),
-              host == "notion.so" || host == "www.notion.so",
+              host == "notion.so"
+                  || host == "www.notion.so"
+                  || host == "app.notion.com",
               let lastComponent = components.path
                 .split(separator: "/", omittingEmptySubsequences: true)
                 .last else {
