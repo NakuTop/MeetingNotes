@@ -9,6 +9,10 @@ settings:
     MACOSX_DEPLOYMENT_TARGET: "15.0"
     SWIFT_STRICT_CONCURRENCY: complete
     SWIFT_VERSION: "6.0"
+packages:
+  ArgmaxOSS:
+    url: https://github.com/argmaxinc/argmax-oss-swift.git
+    from: 1.0.0
 targets:
   MeetingNotes:
     type: application
@@ -19,6 +23,9 @@ targets:
       path: Configuration/Info.plist
     entitlements:
       path: Configuration/MeetingNotes.entitlements
+    dependencies:
+      - package: ArgmaxOSS
+        product: WhisperKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.shenminghao.MeetingNotes

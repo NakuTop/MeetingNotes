@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		A10000000000000000000090 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000092 /* WhisperKit */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		A10000000000000000000031 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -38,7 +42,7 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		A10000000000000000000050 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000050 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000090 /* WhisperKit in Frameworks */,); runOnlyForDeploymentPostprocessing = 0; };
 		A10000000000000000000051 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A10000000000000000000052 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
@@ -89,7 +93,7 @@
 			dependencies = ();
 			fileSystemSynchronizedGroups = (A10000000000000000000040 /* MeetingNotes */);
 			name = MeetingNotes;
-			packageProductDependencies = ();
+			packageProductDependencies = (A10000000000000000000092 /* WhisperKit */,);
 			productName = MeetingNotes;
 			productReference = A10000000000000000000020 /* MeetingNotes.app */;
 			productType = "com.apple.product-type.application";
@@ -151,6 +155,7 @@
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000003 /* Products */;
+			packageReferences = (A10000000000000000000091 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */,);
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (A10000000000000000000010 /* MeetingNotes */, A10000000000000000000011 /* MeetingNotesTests */, A10000000000000000000012 /* MeetingNotesUITests */);
@@ -191,6 +196,25 @@
 		A10000000000000000000072 /* Build configuration list for PBXNativeTarget "MeetingNotesUITests" */ = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000084 /* Debug */, A10000000000000000000085 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		A10000000000000000000073 /* Build configuration list for PBXProject "MeetingNotes" */ = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000086 /* Debug */, A10000000000000000000087 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A10000000000000000000091 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/argmaxinc/argmax-oss-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A10000000000000000000092 /* WhisperKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000091 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */;
+			productName = WhisperKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A10000000000000000000001 /* Project object */;
 }
