@@ -38,7 +38,7 @@ final class NotionClientTests: XCTestCase {
         XCTAssertEqual(requests[0].url?.absoluteString, "https://api.notion.com/v1/users/me")
         XCTAssertEqual(
             requests[1].url?.absoluteString,
-            "https://api.notion.com/v1/pages/\(parentID.uuidString)"
+            "https://api.notion.com/v1/pages/\(parentID.uuidString.lowercased())"
         )
         for request in requests {
             XCTAssertEqual(
@@ -53,7 +53,9 @@ final class NotionClientTests: XCTestCase {
     }
 
     func testCreatesChildPageAndAppendsNotionBlocks() async throws {
-        let parentID = UUID()
+        let parentID = try XCTUnwrap(
+            UUID(uuidString: "ABCDEF12-3456-7890-ABCD-EF1234567890")
+        )
         let page = NotionPageReference(
             id: "created-page-id",
             url: "https://www.notion.so/created-page-id"
@@ -86,7 +88,7 @@ final class NotionClientTests: XCTestCase {
         let createBody = try Self.jsonBody(requests[0])
         let parent = try XCTUnwrap(createBody["parent"] as? [String: String])
         XCTAssertEqual(parent["type"], "page_id")
-        XCTAssertEqual(parent["page_id"], parentID.uuidString)
+        XCTAssertEqual(parent["page_id"], parentID.uuidString.lowercased())
         XCTAssertTrue(String(data: requests[0].httpBody ?? Data(), encoding: .utf8)?.contains("产品周会") == true)
 
         XCTAssertEqual(requests[1].httpMethod, "PATCH")

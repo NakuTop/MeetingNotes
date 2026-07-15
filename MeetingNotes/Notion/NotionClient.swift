@@ -35,7 +35,7 @@ struct NotionClient: NotionAPIClient, Sendable {
         let pageData = try await perform(
             request(
                 method: "GET",
-                path: ["pages", parentPageID.uuidString],
+                path: ["pages", Self.serializedID(parentPageID)],
                 timeout: 15
             )
         )
@@ -59,7 +59,7 @@ struct NotionClient: NotionAPIClient, Sendable {
                 CreatePageRequest(
                     parent: .init(
                         type: "page_id",
-                        pageID: parentPageID.uuidString
+                        pageID: Self.serializedID(parentPageID)
                     ),
                     properties: .init(
                         title: .init(
@@ -97,6 +97,10 @@ struct NotionClient: NotionAPIClient, Sendable {
             throw NotionClientError.invalidRequest
         }
         _ = try await perform(request)
+    }
+
+    private static func serializedID(_ id: UUID) -> String {
+        id.uuidString.lowercased()
     }
 
     private func request(
