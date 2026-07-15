@@ -96,9 +96,17 @@ final class MeetingRepository {
 
     func updateTitle(meetingID: UUID, title: String) throws {
         let meeting = try meeting(id: meetingID)
+        let previousTitle = meeting.title
+        let previousUpdatedAt = meeting.updatedAt
         meeting.title = title
         meeting.updatedAt = .now
-        try context.save()
+        do {
+            try context.save()
+        } catch {
+            meeting.title = previousTitle
+            meeting.updatedAt = previousUpdatedAt
+            throw error
+        }
     }
 
     func appendTranscript(

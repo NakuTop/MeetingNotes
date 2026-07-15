@@ -186,6 +186,8 @@ final class MeetingTitleUpdateUseCaseTests: XCTestCase {
             state: .archived,
             notionPageID: "notion-page"
         )
+        let originalTitle = meeting.title
+        let originalUpdatedAt = meeting.updatedAt
         let repository = TitleRepositorySpy(
             meeting: meeting,
             recorder: recorder,
@@ -216,6 +218,8 @@ final class MeetingTitleUpdateUseCaseTests: XCTestCase {
                 "remote:notion-page:旧标题"
             ]
         )
+        XCTAssertEqual(meeting.title, originalTitle)
+        XCTAssertEqual(meeting.updatedAt, originalUpdatedAt)
         XCTAssertEqual(updater.updates.map(\.title), ["远程已成功", "旧标题"])
         XCTAssertEqual(meeting.title, "旧标题")
     }
@@ -226,6 +230,8 @@ final class MeetingTitleUpdateUseCaseTests: XCTestCase {
             state: .archived,
             notionPageID: "notion-page"
         )
+        let originalTitle = meeting.title
+        let originalUpdatedAt = meeting.updatedAt
         let repository = TitleRepositorySpy(
             meeting: meeting,
             recorder: recorder,
@@ -257,6 +263,8 @@ final class MeetingTitleUpdateUseCaseTests: XCTestCase {
                 "remote:notion-page:旧标题"
             ]
         )
+        XCTAssertEqual(meeting.title, originalTitle)
+        XCTAssertEqual(meeting.updatedAt, originalUpdatedAt)
     }
 
     func testConcurrentRenameOfSameMeetingIsRejected() async throws {
@@ -396,9 +404,14 @@ private final class TitleRepositorySpy: MeetingTitlePersisting {
         updateTitles.append(title)
         recorder?.calls.append("local:\(title)")
         if let updateError {
+            let previousTitle = meetingRecord.title
+            let previousUpdatedAt = meetingRecord.updatedAt
             if mutateBeforeFailure {
                 meetingRecord.title = title
+                meetingRecord.updatedAt = .distantFuture
             }
+            meetingRecord.title = previousTitle
+            meetingRecord.updatedAt = previousUpdatedAt
             throw updateError
         }
         meetingRecord.title = title
