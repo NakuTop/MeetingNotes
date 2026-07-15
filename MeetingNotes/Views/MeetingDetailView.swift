@@ -2,9 +2,14 @@ import SwiftUI
 
 struct MeetingDetailView: View {
     @State private var viewModel: MeetingDetailViewModel
+    private let onReturnHome: () -> Void
 
-    init(viewModel: MeetingDetailViewModel) {
+    init(
+        viewModel: MeetingDetailViewModel,
+        onReturnHome: @escaping () -> Void
+    ) {
         _viewModel = State(initialValue: viewModel)
+        self.onReturnHome = onReturnHome
     }
 
     var body: some View {
@@ -19,6 +24,15 @@ struct MeetingDetailView: View {
             }
         }
         .navigationTitle(viewModel.meeting?.title ?? "会议详情")
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button("返回首页", systemImage: "chevron.backward") {
+                    onReturnHome()
+                }
+                .accessibilityIdentifier("meeting.returnHome")
+                .help("返回录音首页，保留历史会议")
+            }
+        }
         .task {
             viewModel.load()
         }

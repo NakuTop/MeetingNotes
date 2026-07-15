@@ -40,7 +40,10 @@ struct RootView: View {
                 } detail: {
                     if let meeting = viewModel.selectedMeeting {
                         MeetingDetailView(
-                            viewModel: makeDetailViewModel(meeting.id)
+                            viewModel: makeDetailViewModel(meeting.id),
+                            onReturnHome: {
+                                viewModel.returnHome()
+                            }
                         )
                         .id(meeting.id)
                     } else {

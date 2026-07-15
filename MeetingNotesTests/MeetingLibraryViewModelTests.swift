@@ -37,6 +37,20 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.selectedMeeting)
     }
 
+    func testReturnHomeClearsOnlySelectionAndPreservesHistory() {
+        let first = makeMeeting(seconds: 100, title: "第一次会议")
+        let second = makeMeeting(seconds: 200, title: "第二次会议")
+        let repository = LibraryRepositorySpy(meetings: [first, second])
+        let viewModel = makeViewModel(repository: repository)
+        viewModel.load()
+        viewModel.select(second.id)
+
+        viewModel.returnHome()
+
+        XCTAssertNil(viewModel.selectedMeetingID)
+        XCTAssertEqual(viewModel.meetings.map(\.id), [second.id, first.id])
+    }
+
     func testDeleteRemovesAudioDirectoryAndMeetingThenClearsSelection() async {
         let meeting = makeMeeting(seconds: 100)
         let repository = LibraryRepositorySpy(meetings: [meeting])

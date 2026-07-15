@@ -80,6 +80,10 @@ final class MeetingLibraryViewModel {
         selectedMeetingID = meetingID
     }
 
+    func returnHome() {
+        selectedMeetingID = nil
+    }
+
     func startMeeting(mode: MeetingMode) async {
         guard !isStarting else { return }
         permissionRepairPermissions = []
