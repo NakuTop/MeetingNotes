@@ -28,6 +28,7 @@ final class MeetingLibraryViewModel {
     private let repository: any MeetingLibraryRepository
     private let fileDeleter: any MeetingFileDeleting
     private let starter: any MeetingStarting
+    private let titleUpdater: any MeetingTitleUpdating
     private let systemRequirements: any SystemRequirementChecking
     private let recordingsURL: URL
 
@@ -35,6 +36,8 @@ final class MeetingLibraryViewModel {
     var selectedMeetingID: UUID?
     private(set) var isStarting = false
     private(set) var deletingMeetingIDs: Set<UUID> = []
+    private(set) var pinningMeetingIDs: Set<UUID> = []
+    private(set) var renamingMeetingIDs: Set<UUID> = []
     private(set) var errorMessage: String?
     private(set) var permissionRepairPermissions: [CapturePermission] = []
     private(set) var systemRequirementsSnapshot: SystemRequirementsSnapshot
@@ -43,12 +46,14 @@ final class MeetingLibraryViewModel {
         repository: any MeetingLibraryRepository,
         fileDeleter: any MeetingFileDeleting,
         starter: any MeetingStarting,
+        titleUpdater: any MeetingTitleUpdating,
         systemRequirements: any SystemRequirementChecking = SystemRequirements(),
         recordingsURL: URL = FileManager.default.temporaryDirectory
     ) {
         self.repository = repository
         self.fileDeleter = fileDeleter
         self.starter = starter
+        self.titleUpdater = titleUpdater
         self.systemRequirements = systemRequirements
         self.recordingsURL = recordingsURL
         systemRequirementsSnapshot = systemRequirements.snapshot(
@@ -81,6 +86,56 @@ final class MeetingLibraryViewModel {
 
     func returnHome() {
         selectedMeetingID = nil
+    }
+
+    func togglePinned(id: UUID, at date: Date = .now) {
+        guard !pinningMeetingIDs.contains(id) else { return }
+        guard let meeting = meetingForOperation(id: id) else {
+            errorMessage = "找不到要置顶的会议，请刷新后重试。"
+            return
+        }
+        let targetDate: Date? = meeting.isPinned ? nil : date
+        pinningMeetingIDs.insert(id)
+        errorMessage = nil
+        defer { pinningMeetingIDs.remove(id) }
+
+        do {
+            try repository.setPinned(meetingID: id, pinnedAt: targetDate)
+            load()
+        } catch {
+            errorMessage = targetDate == nil
+                ? "无法取消置顶会议，请重试。"
+                : "无法置顶会议，请重试。"
+        }
+    }
+
+    func renameMeeting(id: UUID, title: String) async -> Bool {
+        guard !renamingMeetingIDs.contains(id) else { return false }
+        guard let meeting = meetingForOperation(id: id) else {
+            errorMessage = "找不到要重命名的会议，请刷新后重试。"
+            return false
+        }
+        guard canRename(meeting) else {
+            errorMessage = MeetingTitleUpdateError
+                .invalidState(meeting.state)
+                .userMessage
+            return false
+        }
+        renamingMeetingIDs.insert(id)
+        errorMessage = nil
+        defer { renamingMeetingIDs.remove(id) }
+
+        do {
+            try await titleUpdater.updateTitle(meetingID: id, title: title)
+            load()
+            return true
+        } catch let error as MeetingTitleUpdateError {
+            errorMessage = error.userMessage
+            return false
+        } catch {
+            errorMessage = "无法重命名会议，请稍后重试。"
+            return false
+        }
     }
 
     func startMeeting(mode: MeetingMode) async {
@@ -116,6 +171,14 @@ final class MeetingLibraryViewModel {
 
     func deleteMeeting(id: UUID) async {
         guard !deletingMeetingIDs.contains(id) else { return }
+        guard let meeting = meetingForOperation(id: id) else {
+            errorMessage = "找不到要删除的会议，请刷新后重试。"
+            return
+        }
+        guard canDelete(meeting) else {
+            errorMessage = "会议正在录制或处理中，暂时不能删除。"
+            return
+        }
         deletingMeetingIDs.insert(id)
         errorMessage = nil
         defer { deletingMeetingIDs.remove(id) }
@@ -134,6 +197,24 @@ final class MeetingLibraryViewModel {
 
     func canSummarize(meetingIn state: RecordingState) -> Bool {
         state == .ready
+    }
+
+    func canDelete(_ meeting: MeetingRecord) -> Bool {
+        switch meeting.state {
+        case .ready, .summaryReady, .archived:
+            true
+        default:
+            false
+        }
+    }
+
+    func canRename(_ meeting: MeetingRecord) -> Bool {
+        switch meeting.state {
+        case .summarizing, .archiving:
+            false
+        default:
+            true
+        }
     }
 
     func shouldHighlightTranscript(
@@ -162,6 +243,11 @@ final class MeetingLibraryViewModel {
         systemRequirementsSnapshot = systemRequirements.snapshot(
             for: recordingsURL
         )
+    }
+
+    private func meetingForOperation(id: UUID) -> MeetingRecord? {
+        meetings.first(where: { $0.id == id })
+            ?? (try? repository.meetings().first { $0.id == id })
     }
 
     private enum Operation {

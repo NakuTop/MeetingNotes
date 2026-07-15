@@ -14,7 +14,8 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
-            action: action
+            action: action,
+            titleUpdater: DetailTitleUpdaterSpy()
         )
 
         let cases: [(RecordingState, MeetingDetailPrimaryAction)] = [
@@ -52,7 +53,8 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
-            action: action
+            action: action,
+            titleUpdater: DetailTitleUpdaterSpy()
         )
 
         await viewModel.performPrimaryAction()
@@ -73,7 +75,8 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
-            action: action
+            action: action,
+            titleUpdater: DetailTitleUpdaterSpy()
         )
 
         let operation = Task {
@@ -99,7 +102,8 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
-            action: action
+            action: action,
+            titleUpdater: DetailTitleUpdaterSpy()
         )
 
         let operation = Task {
@@ -112,6 +116,195 @@ final class MeetingDetailViewModelTests: XCTestCase {
 
         action.finish()
         await operation.value
+    }
+
+    func testRenameTracksProgressReloadsTitleAndReturnsTrue() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        let updater = BlockingDetailTitleUpdater { _, title in
+            try repository.updateTitle(meetingID: meetingID, title: title)
+        }
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            action: DetailActionSpy(),
+            titleUpdater: updater
+        )
+
+        let operation = Task {
+            await viewModel.rename(to: "新会议标题")
+        }
+        await updater.waitUntilStarted()
+
+        XCTAssertTrue(viewModel.isRenaming)
+        updater.finish()
+        let succeeded = await operation.value
+
+        XCTAssertTrue(succeeded)
+        XCTAssertFalse(viewModel.isRenaming)
+        XCTAssertEqual(viewModel.meeting?.title, "新会议标题")
+        XCTAssertNil(viewModel.renameErrorMessage)
+    }
+
+    func testRenameErrorsUseIndependentChannelAndMapActionableMessages() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        let cases: [(MeetingTitleUpdateError, String)] = [
+            (.emptyTitle, "会议标题不能为空。"),
+            (.operationInProgress, "正在重命名该会议，请稍候。"),
+            (
+                .missingNotionCredential,
+                "请先在设置中保存 Notion Token，再重试重命名。"
+            ),
+            (
+                .missingNotionPage,
+                "找不到该会议对应的 Notion 页面，无法同步标题。"
+            ),
+            (
+                .credentialAccessFailed,
+                "无法读取 Notion Token，请重新保存后重试。"
+            ),
+            (
+                .invalidState(.summarizing),
+                "会议正在总结或归档，暂时不能重命名。"
+            ),
+            (
+                .localUpdateFailed,
+                "无法保存会议标题，请检查本地存储后重试。"
+            ),
+            (
+                .notion(.unauthorized),
+                "Notion Token 无效，请在设置中重新保存。"
+            ),
+            (
+                .notion(.forbidden),
+                "Notion 集成无权修改该页面，请检查页面共享权限。"
+            ),
+            (
+                .notion(.pageNotFound),
+                "找不到对应的 Notion 页面，请检查页面是否仍存在并已共享。"
+            ),
+            (
+                .notion(.rateLimited),
+                "Notion 请求过于频繁，请稍后重试。"
+            ),
+            (
+                .notion(.timeout),
+                "连接 Notion 超时，请检查网络后重试。"
+            ),
+            (
+                .notion(.transport),
+                "无法连接 Notion，请检查网络后重试。"
+            )
+        ]
+
+        for (error, expectedMessage) in cases {
+            let updater = DetailTitleUpdaterSpy(error: error)
+            let viewModel = MeetingDetailViewModel(
+                meetingID: meetingID,
+                repository: repository,
+                action: DetailActionSpy(),
+                titleUpdater: updater
+            )
+
+            let succeeded = await viewModel.rename(to: "新标题")
+
+            XCTAssertFalse(succeeded, "Expected \(error) to fail")
+            XCTAssertEqual(
+                viewModel.renameErrorMessage,
+                expectedMessage,
+                "Unexpected message for \(error)"
+            )
+            XCTAssertNil(viewModel.errorMessage)
+            viewModel.dismissRenameError()
+            XCTAssertNil(viewModel.renameErrorMessage)
+        }
+    }
+
+    func testRenameDoesNotSubmitTwiceWhileRequestIsRunning() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        let updater = BlockingDetailTitleUpdater()
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            action: DetailActionSpy(),
+            titleUpdater: updater
+        )
+
+        let first = Task { await viewModel.rename(to: "第一个标题") }
+        await updater.waitUntilStarted()
+        let secondSucceeded = await viewModel.rename(to: "第二个标题")
+
+        XCTAssertFalse(secondSucceeded)
+        XCTAssertEqual(updater.requests.count, 1)
+        updater.finish()
+        _ = await first.value
+    }
+}
+
+private struct TitleUpdateRequest: Equatable {
+    let meetingID: UUID
+    let title: String
+}
+
+@MainActor
+private final class DetailTitleUpdaterSpy: MeetingTitleUpdating {
+    private let error: Error?
+    private(set) var requests: [TitleUpdateRequest] = []
+
+    init(error: Error? = nil) {
+        self.error = error
+    }
+
+    func updateTitle(meetingID: UUID, title: String) async throws {
+        requests.append(TitleUpdateRequest(meetingID: meetingID, title: title))
+        if let error { throw error }
+    }
+}
+
+@MainActor
+private final class BlockingDetailTitleUpdater: MeetingTitleUpdating {
+    private let onFinish: (UUID, String) throws -> Void
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var finishContinuation: CheckedContinuation<Void, Never>?
+    private(set) var requests: [TitleUpdateRequest] = []
+
+    init(onFinish: @escaping (UUID, String) throws -> Void = { _, _ in }) {
+        self.onFinish = onFinish
+    }
+
+    func updateTitle(meetingID: UUID, title: String) async throws {
+        requests.append(TitleUpdateRequest(meetingID: meetingID, title: title))
+        started = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        await withCheckedContinuation { continuation in
+            finishContinuation = continuation
+        }
+        try onFinish(meetingID, title)
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func finish() {
+        finishContinuation?.resume()
+        finishContinuation = nil
     }
 }
 

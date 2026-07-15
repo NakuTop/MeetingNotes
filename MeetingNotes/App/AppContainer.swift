@@ -13,6 +13,7 @@ final class AppContainer {
 
     private let controlRouter: MeetingControlRouter
     private let summarizeAndArchiveUseCase: SummarizeAndArchiveUseCase
+    private let meetingTitleUpdater: any MeetingTitleUpdating
     private var detailViewModels: [UUID: MeetingDetailViewModel] = [:]
 
     init(
@@ -28,6 +29,7 @@ final class AppContainer {
         notionTester: (any NotionConnectionTesting)? = nil,
         summaryGenerator: (any MeetingSummaryGenerating)? = nil,
         notionArchiver: (any MeetingNotionArchiving)? = nil,
+        meetingTitleUpdater: (any MeetingTitleUpdating)? = nil,
         onboardingState: OnboardingState? = nil,
         systemRequirements: (any SystemRequirementChecking)? = nil
     ) {
@@ -59,16 +61,25 @@ final class AppContainer {
             dependencies: dependencies
         )
         self.coordinator = coordinator
+        let httpClient = URLSessionHTTPClient()
+        let credentialStore = credentialStore ?? KeychainCredentialStore()
+        let titleUpdater = meetingTitleUpdater ?? MeetingTitleUpdateUseCase(
+            repository: repository,
+            credentialStore: credentialStore,
+            notionTitleUpdater: LiveMeetingNotionTitleUpdater(
+                httpClient: httpClient
+            )
+        )
+        self.meetingTitleUpdater = titleUpdater
         let libraryViewModel = MeetingLibraryViewModel(
             repository: repository,
             fileDeleter: fileStore,
             starter: coordinator,
+            titleUpdater: titleUpdater,
             systemRequirements: systemRequirements ?? SystemRequirements(),
             recordingsURL: recordingsURL
         )
         self.libraryViewModel = libraryViewModel
-        let httpClient = URLSessionHTTPClient()
-        let credentialStore = credentialStore ?? KeychainCredentialStore()
         let settingsStore = settingsStore ?? AppSettingsStore()
         let summarizeAndArchiveUseCase = SummarizeAndArchiveUseCase(
             repository: repository,
@@ -141,7 +152,8 @@ final class AppContainer {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
-            action: summarizeAndArchiveUseCase
+            action: summarizeAndArchiveUseCase,
+            titleUpdater: meetingTitleUpdater
         )
         detailViewModels[meetingID] = viewModel
         return viewModel
