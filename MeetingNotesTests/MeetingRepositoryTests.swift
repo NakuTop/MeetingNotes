@@ -165,6 +165,45 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertGreaterThan(meeting.updatedAt, startedAt)
     }
 
+    func testUpdateTitleRestoresRealRecordWhenInjectedSaveFails() throws {
+        var saveAttempts = 0
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                saveAttempts += 1
+                if saveAttempts == 2 {
+                    throw InjectedRepositorySaveError.forced
+                }
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 100),
+            title: "旧标题"
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let originalTitle = meeting.title
+        let originalUpdatedAt = meeting.updatedAt
+
+        XCTAssertThrowsError(
+            try repository.updateTitle(
+                meetingID: meetingID,
+                title: "不应留在内存中"
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? InjectedRepositorySaveError,
+                .forced
+            )
+        }
+
+        let reloaded = try repository.meeting(id: meetingID)
+        XCTAssertTrue(reloaded === meeting)
+        XCTAssertEqual(reloaded.title, originalTitle)
+        XCTAssertEqual(reloaded.updatedAt, originalUpdatedAt)
+        XCTAssertEqual(saveAttempts, 2)
+    }
+
     func testExistingInitializerAndNewRepositoryRecordsDefaultToUnpinned() throws {
         let existingStyleRecord = MeetingRecord(
             title: "旧记录",
@@ -278,4 +317,8 @@ final class MeetingRepositoryTests: XCTestCase {
         }
         XCTAssertEqual(try repository.count(TranscriptRecord.self), 0)
     }
+}
+
+private enum InjectedRepositorySaveError: Error, Equatable {
+    case forced
 }

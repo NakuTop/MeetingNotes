@@ -9,6 +9,7 @@ enum MeetingRepositoryError: Error, Equatable, Sendable {
 final class MeetingRepository {
     private let container: ModelContainer
     private let context: ModelContext
+    private let contextSaver: @MainActor (ModelContext) throws -> Void
 
     private static var schema: Schema {
         Schema([
@@ -20,12 +21,22 @@ final class MeetingRepository {
         ])
     }
 
-    init(container: ModelContainer) {
+    init(
+        container: ModelContainer,
+        contextSaver: @escaping @MainActor (ModelContext) throws -> Void = {
+            try $0.save()
+        }
+    ) {
         self.container = container
         context = ModelContext(container)
+        self.contextSaver = contextSaver
     }
 
-    static func inMemory() throws -> MeetingRepository {
+    static func inMemory(
+        contextSaver: @escaping @MainActor (ModelContext) throws -> Void = {
+            try $0.save()
+        }
+    ) throws -> MeetingRepository {
         let schema = Self.schema
         let configuration = ModelConfiguration(
             schema: schema,
@@ -35,7 +46,10 @@ final class MeetingRepository {
             for: schema,
             configurations: [configuration]
         )
-        return MeetingRepository(container: container)
+        return MeetingRepository(
+            container: container,
+            contextSaver: contextSaver
+        )
     }
 
     static func persistent() throws -> MeetingRepository {
@@ -65,7 +79,7 @@ final class MeetingRepository {
             updatedAt: startedAt
         )
         context.insert(meeting)
-        try context.save()
+        try saveContext()
         return meeting.id
     }
 
@@ -91,7 +105,7 @@ final class MeetingRepository {
         let meeting = try meeting(id: meetingID)
         meeting.pinnedAt = pinnedAt
         meeting.updatedAt = .now
-        try context.save()
+        try saveContext()
     }
 
     func updateTitle(meetingID: UUID, title: String) throws {
@@ -101,7 +115,7 @@ final class MeetingRepository {
         meeting.title = title
         meeting.updatedAt = .now
         do {
-            try context.save()
+            try saveContext()
         } catch {
             meeting.title = previousTitle
             meeting.updatedAt = previousUpdatedAt
@@ -130,7 +144,7 @@ final class MeetingRepository {
         )
         context.insert(transcript)
         meeting.updatedAt = .now
-        try context.save()
+        try saveContext()
     }
 
     func appendBookmark(
@@ -146,7 +160,7 @@ final class MeetingRepository {
         )
         context.insert(bookmark)
         meeting.updatedAt = .now
-        try context.save()
+        try saveContext()
     }
 
     func saveSummary(
@@ -211,7 +225,7 @@ final class MeetingRepository {
         }
 
         meeting.updatedAt = .now
-        try context.save()
+        try saveContext()
     }
 
     func applySuggestedTitle(
@@ -228,7 +242,7 @@ final class MeetingRepository {
             meeting.title = trimmed
         }
         meeting.updatedAt = .now
-        try context.save()
+        try saveContext()
     }
 
     func setNotionPage(
@@ -240,14 +254,14 @@ final class MeetingRepository {
         meeting.notionPageID = pageID
         meeting.notionPageURL = pageURL
         meeting.updatedAt = .now
-        try context.save()
+        try saveContext()
     }
 
     func updateMeetingState(id: UUID, state: RecordingState) throws {
         let meeting = try meeting(id: id)
         meeting.state = state
         meeting.updatedAt = .now
-        try context.save()
+        try saveContext()
     }
 
     func finalizeMeeting(
@@ -260,7 +274,7 @@ final class MeetingRepository {
         meeting.endedAt = endedAt
         meeting.activeDuration = activeDuration
         meeting.updatedAt = endedAt
-        try context.save()
+        try saveContext()
     }
 
     func saveArchiveCheckpoint(
@@ -290,18 +304,22 @@ final class MeetingRepository {
         }
 
         meeting.updatedAt = .now
-        try context.save()
+        try saveContext()
     }
 
     func deleteMeeting(id: UUID) throws {
         let meeting = try meeting(id: id)
         context.delete(meeting)
-        try context.save()
+        try saveContext()
     }
 
     func count<Model: PersistentModel>(_ model: Model.Type) throws -> Int {
         _ = model
         return try context.fetchCount(FetchDescriptor<Model>())
+    }
+
+    private func saveContext() throws {
+        try contextSaver(context)
     }
 
     private static func meetingComesBefore(
