@@ -21,9 +21,10 @@ extension AppContainer {
                 isDirectory: true
             )
         let fileStore = MeetingFileStore(rootURL: recordingsURL)
-        let credentials = UITestCredentialStore()
-        try credentials.save("ui-deepseek-key", for: .deepSeekAPIKey)
-        try credentials.save("ui-notion-token", for: .notionToken)
+        let credentials = EphemeralCredentialStore(
+            deepSeekAPIKey: "ui-deepseek-key",
+            notionToken: "ui-notion-token"
+        )
 
         let suiteName = "MeetingNotes.UITesting.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
@@ -59,34 +60,10 @@ extension AppContainer {
             notionTester: UITestNotionTester(),
             summaryGenerator: UITestSummaryGenerator(),
             notionArchiver: UITestNotionArchiver(repository: repository),
+            notionTitleUpdater: NoopMeetingNotionTitleUpdater(),
             onboardingState: onboarding,
             systemRequirements: UITestSystemRequirements()
         )
-    }
-}
-
-private final class UITestCredentialStore:
-    CredentialStore,
-    @unchecked Sendable {
-    private let lock = NSLock()
-    private var values: [CredentialKey: String] = [:]
-
-    func value(for key: CredentialKey) throws -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        return values[key]
-    }
-
-    func save(_ value: String, for key: CredentialKey) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        values[key] = value
-    }
-
-    func delete(_ key: CredentialKey) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        values[key] = nil
     }
 }
 

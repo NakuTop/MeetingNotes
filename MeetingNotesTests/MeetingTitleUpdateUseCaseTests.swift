@@ -450,6 +450,82 @@ final class MeetingTitleUpdateUseCaseTests: XCTestCase {
         XCTAssertEqual(repository.updateTitles, ["第一个标题"])
     }
 
+    func testSummaryGateRejectsRenameBeforeRemoteOrLocalUpdate() async throws {
+        let gate = MeetingOperationGate()
+        let meeting = makeMeeting(
+            state: .archived,
+            notionPageID: "notion-page"
+        )
+        let repository = TitleRepositorySpy(meeting: meeting)
+        let updater = RecordingNotionTitleUpdater()
+        let useCase = makeUseCase(
+            repository: repository,
+            credentials: TitleCredentialStore(notionToken: "notion-token"),
+            updater: updater,
+            operationGate: gate
+        )
+        XCTAssertTrue(gate.acquire(.summarizeArchive, for: meeting.id))
+        defer { gate.release(.summarizeArchive, for: meeting.id) }
+
+        do {
+            try await useCase.updateTitle(
+                meetingID: meeting.id,
+                title: "新标题"
+            )
+            XCTFail("Expected an in-progress error")
+        } catch {
+            XCTAssertEqual(
+                error as? MeetingTitleUpdateError,
+                .operationInProgress
+            )
+        }
+
+        XCTAssertTrue(updater.updates.isEmpty)
+        XCTAssertTrue(repository.updateTitles.isEmpty)
+        XCTAssertEqual(meeting.title, "旧标题")
+    }
+
+    func testStateChangingToArchivingDuringRemoteUpdateCompensatesTitle() async throws {
+        let meeting = makeMeeting(
+            state: .archived,
+            notionPageID: "notion-page"
+        )
+        let repository = TitleRepositorySpy(meeting: meeting)
+        let remoteStarted = expectation(description: "remote update started")
+        let updater = BlockingNotionTitleUpdater(
+            startedExpectation: remoteStarted
+        )
+        let useCase = makeUseCase(
+            repository: repository,
+            credentials: TitleCredentialStore(notionToken: "notion-token"),
+            updater: updater
+        )
+
+        let operation = Task { @MainActor in
+            try await useCase.updateTitle(
+                meetingID: meeting.id,
+                title: "新标题"
+            )
+        }
+        await fulfillment(of: [remoteStarted], timeout: 1)
+        meeting.state = .archiving
+        updater.resume()
+
+        do {
+            try await operation.value
+            XCTFail("Expected an invalid-state error")
+        } catch {
+            XCTAssertEqual(
+                error as? MeetingTitleUpdateError,
+                .invalidState(.archiving)
+            )
+        }
+
+        XCTAssertEqual(updater.titles, ["新标题", "旧标题"])
+        XCTAssertTrue(repository.updateTitles.isEmpty)
+        XCTAssertEqual(meeting.title, "旧标题")
+    }
+
     func testCanonicalTitleIsTrimmedAndLimitedIdenticallyRemotelyAndLocally() async throws {
         let meeting = makeMeeting(
             state: .archived,
@@ -478,12 +554,14 @@ final class MeetingTitleUpdateUseCaseTests: XCTestCase {
     private func makeUseCase(
         repository: TitleRepositorySpy,
         credentials: TitleCredentialStore,
-        updater: any MeetingNotionTitleUpdating
+        updater: any MeetingNotionTitleUpdating,
+        operationGate: MeetingOperationGate = MeetingOperationGate()
     ) -> MeetingTitleUpdateUseCase {
         MeetingTitleUpdateUseCase(
             repository: repository,
             credentialStore: credentials,
-            notionTitleUpdater: updater
+            notionTitleUpdater: updater,
+            operationGate: operationGate
         )
     }
 
@@ -638,6 +716,7 @@ private final class CompensationFailingNotionTitleUpdater:
 private final class BlockingNotionTitleUpdater: MeetingNotionTitleUpdating {
     private let startedExpectation: XCTestExpectation
     private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var titles: [String] = []
 
     init(startedExpectation: XCTestExpectation) {
         self.startedExpectation = startedExpectation
@@ -650,7 +729,8 @@ private final class BlockingNotionTitleUpdater: MeetingNotionTitleUpdating {
     ) async throws {
         _ = token
         _ = pageID
-        _ = title
+        titles.append(title)
+        guard titles.count == 1 else { return }
         startedExpectation.fulfill()
         await withCheckedContinuation { continuation = $0 }
     }

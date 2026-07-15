@@ -11,13 +11,14 @@ protocol MeetingLibraryRepository: AnyObject {
 extension MeetingRepository: MeetingLibraryRepository {}
 
 protocol MeetingFileDeleting: Actor {
-    func deleteMeetingDirectory(for meetingID: UUID) throws
+    func deleteMeetingDirectory(for meetingID: UUID) async throws
 }
 
 extension MeetingFileStore: MeetingFileDeleting {}
 
 protocol MeetingStarting: Sendable {
-    func start(mode: MeetingMode) async throws
+    @discardableResult
+    func start(mode: MeetingMode) async throws -> UUID
 }
 
 extension MeetingCoordinator: MeetingStarting {}
@@ -29,6 +30,7 @@ final class MeetingLibraryViewModel {
     private let fileDeleter: any MeetingFileDeleting
     private let starter: any MeetingStarting
     private let titleUpdater: any MeetingTitleUpdating
+    private let operationGate: MeetingOperationGate
     private let systemRequirements: any SystemRequirementChecking
     private let recordingsURL: URL
 
@@ -47,6 +49,7 @@ final class MeetingLibraryViewModel {
         fileDeleter: any MeetingFileDeleting,
         starter: any MeetingStarting,
         titleUpdater: any MeetingTitleUpdating,
+        operationGate: MeetingOperationGate,
         systemRequirements: any SystemRequirementChecking = SystemRequirements(),
         recordingsURL: URL = FileManager.default.temporaryDirectory
     ) {
@@ -54,6 +57,7 @@ final class MeetingLibraryViewModel {
         self.fileDeleter = fileDeleter
         self.starter = starter
         self.titleUpdater = titleUpdater
+        self.operationGate = operationGate
         self.systemRequirements = systemRequirements
         self.recordingsURL = recordingsURL
         systemRequirementsSnapshot = systemRequirements.snapshot(
@@ -155,9 +159,9 @@ final class MeetingLibraryViewModel {
         defer { isStarting = false }
 
         do {
-            try await starter.start(mode: mode)
+            let createdMeetingID = try await starter.start(mode: mode)
             load()
-            selectedMeetingID = meetings.first?.id
+            selectedMeetingID = createdMeetingID
         } catch {
             if case let MeetingCoordinatorError.permissionDenied(permissions) =
                 error {
@@ -179,6 +183,11 @@ final class MeetingLibraryViewModel {
             errorMessage = "会议正在录制或处理中，暂时不能删除。"
             return
         }
+        guard operationGate.acquire(.delete, for: id) else {
+            errorMessage = "会议正在执行其他操作，暂时不能删除。"
+            return
+        }
+        defer { operationGate.release(.delete, for: id) }
         deletingMeetingIDs.insert(id)
         errorMessage = nil
         defer { deletingMeetingIDs.remove(id) }
@@ -201,9 +210,10 @@ final class MeetingLibraryViewModel {
 
     func canDelete(_ meeting: MeetingRecord) -> Bool {
         switch meeting.state {
-        case .ready, .summaryReady, .archived:
+        case .idle, .ready, .summaryReady, .archived:
             true
-        default:
+        case .preparing, .recording, .paused, .finalizing,
+                .summarizing, .archiving:
             false
         }
     }
@@ -212,7 +222,8 @@ final class MeetingLibraryViewModel {
         switch meeting.state {
         case .summarizing, .archiving:
             false
-        default:
+        case .idle, .preparing, .recording, .paused, .finalizing,
+                .ready, .summaryReady, .archived:
             true
         }
     }

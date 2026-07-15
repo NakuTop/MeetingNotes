@@ -55,7 +55,11 @@ final class MeetingCoordinatorTests: XCTestCase {
 
     func testPauseResumeAndBookmarkUseOnlyActiveTimeWithoutPanelMutation() async throws {
         let fixture = makeFixture()
-        try await fixture.coordinator.start(mode: .offline)
+        let startedMeetingID = try await fixture.coordinator.start(
+            mode: .offline
+        )
+        let startedSnapshot = await fixture.coordinator.snapshot()
+        XCTAssertEqual(startedMeetingID, startedSnapshot.meetingID)
 
         await fixture.clock.setMonotonic(110)
         try await fixture.coordinator.pauseOrResume()

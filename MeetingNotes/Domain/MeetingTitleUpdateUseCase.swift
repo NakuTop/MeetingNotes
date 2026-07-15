@@ -65,31 +65,47 @@ final class LiveMeetingNotionTitleUpdater: MeetingNotionTitleUpdating {
 }
 
 @MainActor
+final class NoopMeetingNotionTitleUpdater: MeetingNotionTitleUpdating {
+    func updatePageTitle(
+        token: String,
+        pageID: String,
+        title: String
+    ) async throws {
+        _ = token
+        _ = pageID
+        _ = title
+    }
+}
+
+@MainActor
 final class MeetingTitleUpdateUseCase: MeetingTitleUpdating {
     private let repository: any MeetingTitlePersisting
     private let credentialStore: any CredentialStore
     private let notionTitleUpdater: any MeetingNotionTitleUpdating
-    private var processingMeetingIDs: Set<UUID> = []
+    private let operationGate: MeetingOperationGate
 
     init(
         repository: any MeetingTitlePersisting,
         credentialStore: any CredentialStore,
-        notionTitleUpdater: any MeetingNotionTitleUpdating
+        notionTitleUpdater: any MeetingNotionTitleUpdating,
+        operationGate: MeetingOperationGate
     ) {
         self.repository = repository
         self.credentialStore = credentialStore
         self.notionTitleUpdater = notionTitleUpdater
+        self.operationGate = operationGate
     }
 
     func updateTitle(meetingID: UUID, title: String) async throws {
+        guard operationGate.acquire(.rename, for: meetingID) else {
+            throw MeetingTitleUpdateError.operationInProgress
+        }
+        defer { operationGate.release(.rename, for: meetingID) }
+
         let canonicalTitle = MeetingTitlePolicy.canonicalize(title)
         guard !canonicalTitle.isEmpty else {
             throw MeetingTitleUpdateError.emptyTitle
         }
-        guard processingMeetingIDs.insert(meetingID).inserted else {
-            throw MeetingTitleUpdateError.operationInProgress
-        }
-        defer { processingMeetingIDs.remove(meetingID) }
 
         let meeting: MeetingRecord
         do {
@@ -141,19 +157,54 @@ final class MeetingTitleUpdateUseCase: MeetingTitleUpdating {
             throw MeetingTitleUpdateError.notion(.transport)
         }
 
+        let refreshedMeeting: MeetingRecord
         do {
-            try repository.updateTitle(
-                meetingID: meetingID,
-                title: canonicalTitle
-            )
+            refreshedMeeting = try repository.meeting(id: meetingID)
         } catch {
-            try? await notionTitleUpdater.updatePageTitle(
+            await restoreNotionTitle(
                 token: token,
                 pageID: pageID,
                 title: previousTitle
             )
             throw MeetingTitleUpdateError.localUpdateFailed
         }
+        switch refreshedMeeting.state {
+        case .summarizing, .archiving:
+            await restoreNotionTitle(
+                token: token,
+                pageID: pageID,
+                title: previousTitle
+            )
+            throw MeetingTitleUpdateError.invalidState(refreshedMeeting.state)
+        default:
+            break
+        }
+
+        do {
+            try repository.updateTitle(
+                meetingID: meetingID,
+                title: canonicalTitle
+            )
+        } catch {
+            await restoreNotionTitle(
+                token: token,
+                pageID: pageID,
+                title: previousTitle
+            )
+            throw MeetingTitleUpdateError.localUpdateFailed
+        }
+    }
+
+    private func restoreNotionTitle(
+        token: String,
+        pageID: String,
+        title: String
+    ) async {
+        try? await notionTitleUpdater.updatePageTitle(
+            token: token,
+            pageID: pageID,
+            title: title
+        )
     }
 
     private func updateLocalTitle(meetingID: UUID, title: String) throws {

@@ -94,7 +94,9 @@ final class MeetingDetailViewModel {
     }
 
     func performPrimaryAction() async {
-        guard primaryAction.isEnabled, !isPerforming else { return }
+        guard primaryAction.isEnabled, !isPerforming, !isRenaming else {
+            return
+        }
         isPerforming = true
         operationState = meeting?.state
         errorMessage = nil
@@ -118,7 +120,7 @@ final class MeetingDetailViewModel {
     }
 
     func rename(to title: String) async -> Bool {
-        guard !isRenaming else { return false }
+        guard !isRenaming, !isPerforming else { return false }
         isRenaming = true
         renameErrorMessage = nil
         defer { isRenaming = false }

@@ -36,4 +36,64 @@ final class LaunchArgumentsTests: XCTestCase {
         )
         #endif
     }
+
+    @MainActor
+    func testUITestingContainerRenamesArchivedMeetingWithoutNetwork() async throws {
+        #if DEBUG
+        let container = try AppContainer.uiTesting()
+        let meetingID = try container.repository.createMeeting(
+            mode: .offline,
+            startedAt: .now,
+            title: "旧标题"
+        )
+        try container.repository.updateMeetingState(
+            id: meetingID,
+            state: .archived
+        )
+        try container.repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "ui-test-page",
+            pageURL: "https://www.notion.so/ui-test-page"
+        )
+
+        let succeeded = await container
+            .detailViewModel(for: meetingID)
+            .rename(to: "新标题")
+
+        XCTAssertTrue(succeeded)
+        XCTAssertEqual(
+            try container.repository.meeting(id: meetingID).title,
+            "新标题"
+        )
+        #endif
+    }
+
+    @MainActor
+    func testInMemoryContainerRenamesArchivedMeetingWithoutNetwork() async throws {
+        let container = AppContainer.inMemory()
+        let meetingID = try container.repository.createMeeting(
+            mode: .offline,
+            startedAt: .now,
+            title: "旧标题"
+        )
+        try container.repository.updateMeetingState(
+            id: meetingID,
+            state: .archived
+        )
+        try container.repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "preview-page",
+            pageURL: "https://www.notion.so/preview-page"
+        )
+
+        let succeeded = await container
+            .detailViewModel(for: meetingID)
+            .rename(to: "预览标题")
+
+        XCTAssertTrue(succeeded)
+        XCTAssertEqual(
+            try container.repository.meeting(id: meetingID).title,
+            "预览标题"
+        )
+    }
 }

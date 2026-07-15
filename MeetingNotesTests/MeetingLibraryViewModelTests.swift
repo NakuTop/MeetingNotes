@@ -185,35 +185,42 @@ final class MeetingLibraryViewModelTests: XCTestCase {
 
     func testDeleteAndRenameAvailabilityReflectMeetingState() {
         let viewModel = makeViewModel()
-        let busyForDeletion: [RecordingState] = [
-            .preparing, .recording, .paused, .finalizing,
-            .summarizing, .archiving
+        let deleteExpectations: [RecordingState: Bool] = [
+            .idle: true,
+            .preparing: false,
+            .recording: false,
+            .paused: false,
+            .finalizing: false,
+            .ready: true,
+            .summarizing: false,
+            .summaryReady: true,
+            .archiving: false,
+            .archived: true
         ]
-        let deletable: [RecordingState] = [.ready, .summaryReady, .archived]
+        let renameExpectations: [RecordingState: Bool] = [
+            .idle: true,
+            .preparing: true,
+            .recording: true,
+            .paused: true,
+            .finalizing: true,
+            .ready: true,
+            .summarizing: false,
+            .summaryReady: true,
+            .archiving: false,
+            .archived: true
+        ]
 
-        for state in busyForDeletion {
-            XCTAssertFalse(
-                viewModel.canDelete(makeMeeting(seconds: 1, state: state)),
-                "Expected \(state) to reject deletion"
+        for state in RecordingState.allCases {
+            let meeting = makeMeeting(seconds: 1, state: state)
+            XCTAssertEqual(
+                viewModel.canDelete(meeting),
+                deleteExpectations[state],
+                "Unexpected delete availability for \(state)"
             )
-        }
-        for state in deletable {
-            XCTAssertTrue(
-                viewModel.canDelete(makeMeeting(seconds: 1, state: state)),
-                "Expected \(state) to allow deletion"
-            )
-        }
-
-        XCTAssertFalse(
-            viewModel.canRename(makeMeeting(seconds: 1, state: .summarizing))
-        )
-        XCTAssertFalse(
-            viewModel.canRename(makeMeeting(seconds: 1, state: .archiving))
-        )
-        for state in [RecordingState.ready, .summaryReady, .archived, .recording] {
-            XCTAssertTrue(
-                viewModel.canRename(makeMeeting(seconds: 1, state: state)),
-                "Expected \(state) to allow renaming"
+            XCTAssertEqual(
+                viewModel.canRename(meeting),
+                renameExpectations[state],
+                "Unexpected rename availability for \(state)"
             )
         }
     }
@@ -235,6 +242,56 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         XCTAssertTrue(deletedFileIDs.isEmpty)
         XCTAssertTrue(repository.deletedIDs.isEmpty)
         XCTAssertEqual(viewModel.meetings.map(\.id), [meeting.id])
+    }
+
+    func testActiveRenameOrSummaryGateBlocksDeleteWithoutSideEffects() async {
+        for operation in [
+            MeetingOperationKind.rename,
+            .summarizeArchive
+        ] {
+            let meeting = makeMeeting(seconds: 100, state: .ready)
+            let repository = LibraryRepositorySpy(meetings: [meeting])
+            let files = FileDeletionSpy()
+            let gate = MeetingOperationGate()
+            let viewModel = makeViewModel(
+                repository: repository,
+                files: files,
+                operationGate: gate
+            )
+            viewModel.load()
+            XCTAssertTrue(gate.acquire(operation, for: meeting.id))
+
+            await viewModel.deleteMeeting(id: meeting.id)
+
+            let deletedFileIDs = await files.deletedMeetingIDs()
+            XCTAssertTrue(deletedFileIDs.isEmpty)
+            XCTAssertTrue(repository.deletedIDs.isEmpty)
+            gate.release(operation, for: meeting.id)
+        }
+    }
+
+    func testDeleteHoldsGateWhileAwaitingFileDeletion() async {
+        let meeting = makeMeeting(seconds: 100, state: .ready)
+        let repository = LibraryRepositorySpy(meetings: [meeting])
+        let files = BlockingFileDeletionSpy()
+        let gate = MeetingOperationGate()
+        let viewModel = makeViewModel(
+            repository: repository,
+            files: files,
+            operationGate: gate
+        )
+        viewModel.load()
+
+        let deletion = Task {
+            await viewModel.deleteMeeting(id: meeting.id)
+        }
+        await files.waitUntilStarted()
+
+        XCTAssertTrue(gate.isActive(for: meeting.id))
+        XCTAssertFalse(gate.acquire(.rename, for: meeting.id))
+        await files.finish()
+        await deletion.value
+        XCTAssertFalse(gate.isActive(for: meeting.id))
     }
 
     func testDeleteRemovesAudioDirectoryAndMeetingThenClearsSelection() async {
@@ -269,6 +326,22 @@ final class MeetingLibraryViewModelTests: XCTestCase {
 
         let startedModes = await starter.modes()
         XCTAssertEqual(startedModes, [.offline, .online])
+    }
+
+    func testStartSelectsCreatedMeetingInsteadOfOlderPinnedMeeting() async {
+        let pinned = makeMeeting(seconds: 100, title: "旧置顶会议")
+        pinned.pinnedAt = Date(timeIntervalSince1970: 500)
+        let created = makeMeeting(seconds: 600, title: "新会议")
+        let repository = LibraryRepositorySpy(meetings: [pinned, created])
+        let starter = MeetingStarterSpy(meetingID: created.id)
+        let viewModel = makeViewModel(
+            repository: repository,
+            starter: starter
+        )
+
+        await viewModel.startMeeting(mode: .offline)
+
+        XCTAssertEqual(viewModel.selectedMeetingID, created.id)
     }
 
     func testInsufficientDiskSpaceBlocksMeetingBeforeCoordinatorStarts() async {
@@ -355,6 +428,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         files: any MeetingFileDeleting = FileDeletionSpy(),
         starter: any MeetingStarting = MeetingStarterSpy(),
         titleUpdater: any MeetingTitleUpdating = TitleUpdaterSpy(),
+        operationGate: MeetingOperationGate = MeetingOperationGate(),
         systemRequirements: any SystemRequirementChecking =
             SystemRequirementsStub.supported
     ) -> MeetingLibraryViewModel {
@@ -363,6 +437,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
             fileDeleter: files,
             starter: starter,
             titleUpdater: titleUpdater,
+            operationGate: operationGate,
             systemRequirements: systemRequirements,
             recordingsURL: FileManager.default.temporaryDirectory
         )
@@ -496,17 +571,51 @@ private actor FileDeletionSpy: MeetingFileDeleting {
     }
 }
 
-private actor MeetingStarterSpy: MeetingStarting {
-    private let error: MeetingCoordinatorError?
-    private var startedModes: [MeetingMode] = []
+private actor BlockingFileDeletionSpy: MeetingFileDeleting {
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var finishContinuation: CheckedContinuation<Void, Never>?
 
-    init(error: MeetingCoordinatorError? = nil) {
-        self.error = error
+    func deleteMeetingDirectory(for meetingID: UUID) async throws {
+        _ = meetingID
+        started = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        await withCheckedContinuation { continuation in
+            finishContinuation = continuation
+        }
     }
 
-    func start(mode: MeetingMode) async throws {
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func finish() {
+        finishContinuation?.resume()
+        finishContinuation = nil
+    }
+}
+
+private actor MeetingStarterSpy: MeetingStarting {
+    private let error: MeetingCoordinatorError?
+    private let meetingID: UUID
+    private var startedModes: [MeetingMode] = []
+
+    init(
+        error: MeetingCoordinatorError? = nil,
+        meetingID: UUID = UUID()
+    ) {
+        self.error = error
+        self.meetingID = meetingID
+    }
+
+    func start(mode: MeetingMode) async throws -> UUID {
         if let error { throw error }
         startedModes.append(mode)
+        return meetingID
     }
 
     func modes() -> [MeetingMode] {

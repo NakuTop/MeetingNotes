@@ -99,20 +99,22 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
     private let settingsStore: AppSettingsStore
     private let summaryGenerator: any MeetingSummaryGenerating
     private let notionArchiver: any MeetingNotionArchiving
-    private var processingMeetingIDs: Set<UUID> = []
+    private let operationGate: MeetingOperationGate
 
     init(
         repository: MeetingRepository,
         credentialStore: any CredentialStore,
         settingsStore: AppSettingsStore,
         summaryGenerator: any MeetingSummaryGenerating,
-        notionArchiver: any MeetingNotionArchiving
+        notionArchiver: any MeetingNotionArchiving,
+        operationGate: MeetingOperationGate
     ) {
         self.repository = repository
         self.credentialStore = credentialStore
         self.settingsStore = settingsStore
         self.summaryGenerator = summaryGenerator
         self.notionArchiver = notionArchiver
+        self.operationGate = operationGate
     }
 
     func execute(meetingID: UUID) async throws {
@@ -123,10 +125,12 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
         meetingID: UUID,
         onProgress: @escaping (RecordingState) -> Void
     ) async throws {
-        guard processingMeetingIDs.insert(meetingID).inserted else {
+        guard operationGate.acquire(.summarizeArchive, for: meetingID) else {
             throw SummarizeAndArchiveError.operationInProgress
         }
-        defer { processingMeetingIDs.remove(meetingID) }
+        defer {
+            operationGate.release(.summarizeArchive, for: meetingID)
+        }
 
         let meeting = try repository.meeting(id: meetingID)
         switch meeting.state {

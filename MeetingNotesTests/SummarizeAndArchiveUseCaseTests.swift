@@ -151,6 +151,32 @@ final class SummarizeAndArchiveUseCaseTests: XCTestCase {
         XCTAssertEqual(generatorCalls, 1)
     }
 
+    func testRenameGateRejectsSummaryWithoutChangingMeeting() async throws {
+        let gate = MeetingOperationGate()
+        let fixture = try makeFixture(operationGate: gate)
+        let meetingID = try fixture.makeReadyMeeting()
+        try fixture.addFinalTranscript(to: meetingID)
+        XCTAssertTrue(gate.acquire(.rename, for: meetingID))
+        defer { gate.release(.rename, for: meetingID) }
+
+        await XCTAssertThrowsErrorAsync(
+            try await fixture.useCase.execute(meetingID: meetingID)
+        ) { error in
+            XCTAssertEqual(
+                error as? SummarizeAndArchiveError,
+                .operationInProgress
+            )
+        }
+
+        XCTAssertEqual(
+            try fixture.repository.meeting(id: meetingID).state,
+            .ready
+        )
+        let generatorCallCount = await fixture.generator.callCount()
+        XCTAssertEqual(generatorCallCount, 0)
+        XCTAssertEqual(fixture.archiver.callCount, 0)
+    }
+
     private func makeFixture(
         generatorResult: Result<GeneratedMeetingSummary, Error>? = nil,
         archiveResults: [Result<NotionPageReference, Error>] = [
@@ -161,7 +187,8 @@ final class SummarizeAndArchiveUseCaseTests: XCTestCase {
                 )
             )
         ],
-        generator: (any MeetingSummaryGenerating)? = nil
+        generator: (any MeetingSummaryGenerating)? = nil,
+        operationGate: MeetingOperationGate = MeetingOperationGate()
     ) throws -> Fixture {
         let repository = try MeetingRepository.inMemory()
         let credentials = UseCaseCredentialStore()
@@ -189,7 +216,8 @@ final class SummarizeAndArchiveUseCaseTests: XCTestCase {
             credentialStore: credentials,
             settingsStore: settings,
             summaryGenerator: selectedGenerator,
-            notionArchiver: archiver
+            notionArchiver: archiver,
+            operationGate: operationGate
         )
         return Fixture(
             repository: repository,

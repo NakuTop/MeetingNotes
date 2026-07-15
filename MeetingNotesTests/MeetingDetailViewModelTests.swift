@@ -250,6 +250,57 @@ final class MeetingDetailViewModelTests: XCTestCase {
         updater.finish()
         _ = await first.value
     }
+
+    func testPrimaryActionDoesNotStartWhileRenameIsRunning() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        let updater = BlockingDetailTitleUpdater()
+        let action = DetailActionSpy()
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            action: action,
+            titleUpdater: updater
+        )
+        let rename = Task { await viewModel.rename(to: "新标题") }
+        await updater.waitUntilStarted()
+
+        await viewModel.performPrimaryAction()
+
+        XCTAssertEqual(action.callCount, 0)
+        updater.finish()
+        _ = await rename.value
+    }
+
+    func testRenameDoesNotStartWhilePrimaryActionIsRunning() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        let action = BlockingDetailAction()
+        let updater = DetailTitleUpdaterSpy()
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            action: action,
+            titleUpdater: updater
+        )
+        let primaryAction = Task { await viewModel.performPrimaryAction() }
+        await action.waitUntilStarted()
+
+        let succeeded = await viewModel.rename(to: "新标题")
+
+        XCTAssertFalse(succeeded)
+        XCTAssertTrue(updater.requests.isEmpty)
+        action.finish()
+        _ = await primaryAction.value
+    }
 }
 
 private struct TitleUpdateRequest: Equatable {

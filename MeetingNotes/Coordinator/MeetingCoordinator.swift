@@ -64,7 +64,8 @@ actor MeetingCoordinator {
         )
     }
 
-    func start(mode: MeetingMode) async throws {
+    @discardableResult
+    func start(mode: MeetingMode) async throws -> UUID {
         try beginLifecycleOperation()
         defer { lifecycleOperationInProgress = false }
         var preparingMachine = stateMachine
@@ -146,6 +147,7 @@ actor MeetingCoordinator {
             }
             streamTask = makeStreamTask(stream)
             await dependencies.panel.show()
+            return createdID
         } catch {
             if let newCapture {
                 await newCapture.stop()

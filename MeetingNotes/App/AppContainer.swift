@@ -14,6 +14,7 @@ final class AppContainer {
     private let controlRouter: MeetingControlRouter
     private let summarizeAndArchiveUseCase: SummarizeAndArchiveUseCase
     private let meetingTitleUpdater: any MeetingTitleUpdating
+    private let operationGate: MeetingOperationGate
     private var detailViewModels: [UUID: MeetingDetailViewModel] = [:]
 
     init(
@@ -29,7 +30,7 @@ final class AppContainer {
         notionTester: (any NotionConnectionTesting)? = nil,
         summaryGenerator: (any MeetingSummaryGenerating)? = nil,
         notionArchiver: (any MeetingNotionArchiving)? = nil,
-        meetingTitleUpdater: (any MeetingTitleUpdating)? = nil,
+        notionTitleUpdater: (any MeetingNotionTitleUpdating)? = nil,
         onboardingState: OnboardingState? = nil,
         systemRequirements: (any SystemRequirementChecking)? = nil
     ) {
@@ -63,12 +64,14 @@ final class AppContainer {
         self.coordinator = coordinator
         let httpClient = URLSessionHTTPClient()
         let credentialStore = credentialStore ?? KeychainCredentialStore()
-        let titleUpdater = meetingTitleUpdater ?? MeetingTitleUpdateUseCase(
+        let operationGate = MeetingOperationGate()
+        self.operationGate = operationGate
+        let titleUpdater = MeetingTitleUpdateUseCase(
             repository: repository,
             credentialStore: credentialStore,
-            notionTitleUpdater: LiveMeetingNotionTitleUpdater(
-                httpClient: httpClient
-            )
+            notionTitleUpdater: notionTitleUpdater
+                ?? LiveMeetingNotionTitleUpdater(httpClient: httpClient),
+            operationGate: operationGate
         )
         self.meetingTitleUpdater = titleUpdater
         let libraryViewModel = MeetingLibraryViewModel(
@@ -76,6 +79,7 @@ final class AppContainer {
             fileDeleter: fileStore,
             starter: coordinator,
             titleUpdater: titleUpdater,
+            operationGate: operationGate,
             systemRequirements: systemRequirements ?? SystemRequirements(),
             recordingsURL: recordingsURL
         )
@@ -91,7 +95,8 @@ final class AppContainer {
             notionArchiver: notionArchiver ?? LiveMeetingNotionArchiver(
                 repository: repository,
                 httpClient: httpClient
-            )
+            ),
+            operationGate: operationGate
         )
         self.summarizeAndArchiveUseCase = summarizeAndArchiveUseCase
         settingsViewModel = SettingsViewModel(
@@ -141,7 +146,12 @@ final class AppContainer {
         return AppContainer(
             repository: repository,
             fileStore: MeetingFileStore(rootURL: recordingsRoot),
-            recordingsURL: recordingsRoot
+            recordingsURL: recordingsRoot,
+            credentialStore: EphemeralCredentialStore(
+                deepSeekAPIKey: "preview-deepseek-key",
+                notionToken: "preview-notion-token"
+            ),
+            notionTitleUpdater: NoopMeetingNotionTitleUpdater()
         )
     }
 
