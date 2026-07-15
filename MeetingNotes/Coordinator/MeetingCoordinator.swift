@@ -263,6 +263,7 @@ actor MeetingCoordinator {
             state: .finalizing
         )
         stateMachine = finalizingMachine
+        await dependencies.panel.hide()
 
         do {
             let task = streamTask
@@ -287,14 +288,12 @@ actor MeetingCoordinator {
             try readyMachine.send(.finalized)
             stateMachine = readyMachine
             finalActiveDuration = activeDuration
-            await dependencies.panel.hide()
             releaseActiveResources()
         } catch {
             finalActiveDuration = activeDuration
             await transcriber.drain()
             await transcriber.finishUpdates()
             _ = await transcriptPersistenceTask?.value
-            await dependencies.panel.hide()
             releaseActiveResources()
             throw error
         }

@@ -110,11 +110,12 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertEqual(
             events,
             [
+                "repository.finalizing",
+                "panel.hide",
                 "capture.stop",
                 "writer.finish",
                 "transcriber.drain",
-                "repository.finalize",
-                "panel.hide"
+                "repository.finalize"
             ]
         )
         XCTAssertEqual(snapshot.state, .ready)
@@ -225,6 +226,23 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.state, .finalizing)
     }
 
+    func testFinalizingPersistenceFailureKeepsRecorderVisibleForRetry() async throws {
+        let fixture = makeFixture(repositoryFailsFinalizingUpdate: true)
+        try await fixture.coordinator.start(mode: .offline)
+
+        do {
+            try await fixture.coordinator.stop()
+            XCTFail("Expected finalizing persistence failure")
+        } catch {
+            XCTAssertEqual(error as? CoordinatorTestError, .repositoryUpdate)
+        }
+
+        let panelCalls = await fixture.panel.calls()
+        let events = await fixture.events.values()
+        XCTAssertEqual(panelCalls, ["show"])
+        XCTAssertFalse(events.contains("capture.stop"))
+    }
+
     func testRejectsOverlappingPauseAndStopOperations() async throws {
         let fixture = makeFixture(captureSuspendsPause: true)
         try await fixture.coordinator.start(mode: .offline)
@@ -267,6 +285,7 @@ final class MeetingCoordinatorTests: XCTestCase {
         transcriberEmitsDrafts: Bool = false,
         writerFailsAppend: Bool = false,
         writerFailsFinish: Bool = false,
+        repositoryFailsFinalizingUpdate: Bool = false,
         captureSuspendsPause: Bool = false
     ) -> CoordinatorFixture {
         let events = CoordinatorEventLog()
@@ -285,7 +304,10 @@ final class MeetingCoordinatorTests: XCTestCase {
             events: events,
             emitsDrafts: transcriberEmitsDrafts
         )
-        let repository = FakeCoordinatorRepository(events: events)
+        let repository = FakeCoordinatorRepository(
+            events: events,
+            failsFinalizingUpdate: repositoryFailsFinalizingUpdate
+        )
         let panel = FakeCoordinatorPanel(events: events)
         let clock = ManualCoordinatorClock(
             date: Date(timeIntervalSince1970: 1_000),
@@ -331,6 +353,7 @@ private struct CoordinatorFixture {
 
 private enum CoordinatorTestError: Error, Equatable {
     case captureStart
+    case repositoryUpdate
     case writerAppend
     case writerFinish
 }
@@ -553,13 +576,18 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
     }
 
     private let events: CoordinatorEventLog
+    private let failsFinalizingUpdate: Bool
     private let meetingID = UUID()
     private var bookmarks: [TimeInterval] = []
     private var transcripts: [TranscriptDraft] = []
     private var savedFinalization: Finalization?
 
-    init(events: CoordinatorEventLog) {
+    init(
+        events: CoordinatorEventLog,
+        failsFinalizingUpdate: Bool
+    ) {
         self.events = events
+        self.failsFinalizingUpdate = failsFinalizingUpdate
     }
 
     func createMeeting(mode: MeetingMode, startedAt: Date) async throws -> UUID {
@@ -571,7 +599,13 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
 
     func updateState(meetingID: UUID, state: RecordingState) async throws {
         _ = meetingID
-        _ = state
+        guard state == .finalizing else {
+            return
+        }
+        await events.append("repository.finalizing")
+        if failsFinalizingUpdate {
+            throw CoordinatorTestError.repositoryUpdate
+        }
     }
 
     func appendBookmark(meetingID: UUID, timestamp: TimeInterval) async throws {
