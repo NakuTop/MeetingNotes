@@ -150,12 +150,108 @@ final class MeetingFlowUITests: XCTestCase {
         keepScreenshot(named: "06-archived-detail", of: app)
     }
 
+    func testMeetingManagementMenusAndRename() {
+        let app = launchApp()
+        finishOfflineMeeting(in: app)
+
+        let historyRow = app.descendants(matching: .any)[
+            "meeting.historyRow"
+        ].firstMatch
+        XCTAssertTrue(historyRow.waitForExistence(timeout: 5))
+
+        historyRow.rightClick()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["meeting.context.rename"]
+                .waitForExistence(timeout: 3)
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["meeting.context.pin"].exists
+        )
+        XCTAssertTrue(
+            app.descendants(matching: .any)["meeting.context.delete"].exists
+        )
+
+        app.descendants(matching: .any)["meeting.context.rename"].click()
+        let renameField = app.textFields["meeting.rename.field"]
+        XCTAssertTrue(renameField.waitForExistence(timeout: 3))
+        XCTAssertEqual(renameField.value as? String, "未命名会议")
+        replaceText(in: renameField, with: "侧栏重命名会议")
+        app.buttons["meeting.rename.save"].click()
+        XCTAssertTrue(
+            app.staticTexts["侧栏重命名会议"]
+                .firstMatch
+                .waitForExistence(timeout: 5)
+        )
+
+        historyRow.rightClick()
+        let pin = app.descendants(matching: .any)["meeting.context.pin"]
+        XCTAssertTrue(pin.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.menuItems["置顶会议"].exists)
+        pin.click()
+        XCTAssertTrue(waitForValueContaining("已置顶", on: historyRow))
+
+        historyRow.rightClick()
+        let unpin = app.descendants(matching: .any)["meeting.context.pin"]
+        XCTAssertTrue(unpin.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.menuItems["取消置顶"].exists)
+        app.typeKey(.escape, modifierFlags: [])
+
+        let detailRename = app.buttons["meeting.detail.rename"]
+        XCTAssertTrue(detailRename.waitForExistence(timeout: 3))
+        detailRename.click()
+        let detailRenameField = app.textFields["meeting.detail.renameField"]
+        XCTAssertTrue(detailRenameField.waitForExistence(timeout: 3))
+        replaceText(in: detailRenameField, with: "详情重命名会议")
+        app.buttons["meeting.detail.renameSave"].click()
+        XCTAssertTrue(
+            app.staticTexts["详情重命名会议"]
+                .firstMatch
+                .waitForExistence(timeout: 5)
+        )
+
+        historyRow.rightClick()
+        app.descendants(matching: .any)["meeting.context.delete"].click()
+        let cancelDeletion = app.buttons["meeting.delete.cancel"]
+        XCTAssertTrue(cancelDeletion.waitForExistence(timeout: 3))
+        XCTAssertTrue(historyRow.exists)
+        cancelDeletion.click()
+        XCTAssertTrue(historyRow.waitForExistence(timeout: 3))
+
+        historyRow.rightClick()
+        app.descendants(matching: .any)["meeting.context.delete"].click()
+        let confirmDeletion = app.buttons["meeting.delete.confirm"]
+        XCTAssertTrue(confirmDeletion.waitForExistence(timeout: 3))
+        confirmDeletion.click()
+        XCTAssertTrue(historyRow.waitForNonExistence(timeout: 5))
+    }
+
     private func launchApp() -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["-uiTesting"]
         app.launch()
         return app
+    }
+
+    private func finishOfflineMeeting(in app: XCUIApplication) {
+        let start = app.buttons["meeting.start.offline"]
+        XCTAssertTrue(start.waitForExistence(timeout: 5))
+        start.click()
+
+        let stop = app.buttons["floating.stop"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 5))
+        stop.click()
+        XCTAssertTrue(stop.waitForNonExistence(timeout: 3))
+        XCTAssertTrue(
+            app.buttons["meeting.summarizeArchive"]
+                .waitForExistence(timeout: 5)
+        )
+    }
+
+    private func replaceText(in field: XCUIElement, with text: String) {
+        field.click()
+        field.typeKey("a", modifierFlags: .command)
+        field.typeText(text)
     }
 
     private func assertExactlyFourFloatingControls(
@@ -188,6 +284,22 @@ final class MeetingFlowUITests: XCTestCase {
         timeout: TimeInterval = 3
     ) -> Bool {
         let predicate = NSPredicate(format: "label == %@", label)
+        let expectation = XCTNSPredicateExpectation(
+            predicate: predicate,
+            object: element
+        )
+        return XCTWaiter.wait(
+            for: [expectation],
+            timeout: timeout
+        ) == .completed
+    }
+
+    private func waitForValueContaining(
+        _ text: String,
+        on element: XCUIElement,
+        timeout: TimeInterval = 3
+    ) -> Bool {
+        let predicate = NSPredicate(format: "value CONTAINS %@", text)
         let expectation = XCTNSPredicateExpectation(
             predicate: predicate,
             object: element

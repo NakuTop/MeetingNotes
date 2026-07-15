@@ -2,14 +2,20 @@ import SwiftUI
 
 struct MeetingDetailView: View {
     @State private var viewModel: MeetingDetailViewModel
+    @State private var isEditingTitle = false
+    @State private var titleDraft = ""
+    @FocusState private var isTitleFieldFocused: Bool
     private let onReturnHome: () -> Void
+    private let onMeetingChanged: () -> Void
 
     init(
         viewModel: MeetingDetailViewModel,
-        onReturnHome: @escaping () -> Void
+        onReturnHome: @escaping () -> Void,
+        onMeetingChanged: @escaping () -> Void = {}
     ) {
         _viewModel = State(initialValue: viewModel)
         self.onReturnHome = onReturnHome
+        self.onMeetingChanged = onMeetingChanged
     }
 
     var body: some View {
@@ -74,9 +80,7 @@ struct MeetingDetailView: View {
     private func header(_ meeting: MeetingRecord) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text(meeting.title)
-                    .font(.largeTitle.bold())
-                    .textSelection(.enabled)
+                titleEditor(meeting)
                 Spacer()
                 Label(
                     MeetingDisplayFormat.state(meeting.state),
@@ -84,6 +88,22 @@ struct MeetingDetailView: View {
                 )
                 .font(.callout.weight(.medium))
                 .foregroundStyle(MeetingDisplayFormat.stateColor(meeting.state))
+            }
+
+            if let renameErrorMessage = viewModel.renameErrorMessage {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(renameErrorMessage)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("关闭") {
+                        viewModel.dismissRenameError()
+                    }
+                    .buttonStyle(.plain)
+                }
+                .accessibilityIdentifier("meeting.detail.renameError")
             }
 
             HStack(spacing: 14) {
@@ -104,6 +124,108 @@ struct MeetingDetailView: View {
             }
             .font(.callout)
             .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func titleEditor(_ meeting: MeetingRecord) -> some View {
+        if isEditingTitle {
+            HStack(spacing: 8) {
+                TextField("会议标题", text: $titleDraft)
+                    .font(.largeTitle.bold())
+                    .textFieldStyle(.plain)
+                    .focused($isTitleFieldFocused)
+                    .onSubmit {
+                        saveTitle()
+                    }
+                    .onExitCommand {
+                        cancelTitleEditing(meeting)
+                    }
+                    .disabled(viewModel.isRenaming)
+                    .accessibilityIdentifier("meeting.detail.renameField")
+
+                Button {
+                    saveTitle()
+                } label: {
+                    Image(systemName: "checkmark")
+                }
+                .buttonStyle(.borderless)
+                .disabled(trimmedTitleDraft.isEmpty || viewModel.isRenaming)
+                .accessibilityLabel("保存会议标题")
+                .accessibilityIdentifier("meeting.detail.renameSave")
+
+                Button {
+                    cancelTitleEditing(meeting)
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .disabled(viewModel.isRenaming)
+                .accessibilityLabel("取消重命名")
+                .accessibilityIdentifier("meeting.detail.renameCancel")
+
+                if viewModel.isRenaming {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+        } else {
+            HStack(spacing: 8) {
+                Text(meeting.title)
+                    .font(.largeTitle.bold())
+                    .textSelection(.enabled)
+
+                Button {
+                    beginTitleEditing(meeting)
+                } label: {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.borderless)
+                .disabled(!canRename(meeting) || viewModel.isRenaming)
+                .accessibilityLabel("重命名会议")
+                .accessibilityIdentifier("meeting.detail.rename")
+            }
+        }
+    }
+
+    private var trimmedTitleDraft: String {
+        titleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func canRename(_ meeting: MeetingRecord) -> Bool {
+        !viewModel.isPerforming
+            && meeting.state != .summarizing
+            && meeting.state != .archiving
+    }
+
+    private func beginTitleEditing(_ meeting: MeetingRecord) {
+        titleDraft = meeting.title
+        viewModel.dismissRenameError()
+        isEditingTitle = true
+        Task { @MainActor in
+            await Task.yield()
+            isTitleFieldFocused = true
+        }
+    }
+
+    private func cancelTitleEditing(_ meeting: MeetingRecord) {
+        guard !viewModel.isRenaming else { return }
+        titleDraft = meeting.title
+        isEditingTitle = false
+        viewModel.dismissRenameError()
+    }
+
+    private func saveTitle() {
+        guard !trimmedTitleDraft.isEmpty, !viewModel.isRenaming else { return }
+        let title = trimmedTitleDraft
+        Task { @MainActor in
+            if await viewModel.rename(to: title) {
+                titleDraft = title
+                isEditingTitle = false
+                onMeetingChanged()
+            } else {
+                isTitleFieldFocused = true
+            }
         }
     }
 

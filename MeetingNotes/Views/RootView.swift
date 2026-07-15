@@ -47,6 +47,9 @@ struct RootView: View {
                                 viewModel: makeDetailViewModel(meeting.id),
                                 onReturnHome: {
                                     viewModel.returnHome()
+                                },
+                                onMeetingChanged: {
+                                    viewModel.load()
                                 }
                             )
                             .id(meeting.id)
