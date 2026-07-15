@@ -87,20 +87,101 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(checkpoint.updatedAt, checkpointDate)
     }
 
-    func testMeetingListIsNewestFirst() throws {
+    func testMeetingsPlaceMostRecentlyPinnedFirstThenSortUnpinnedByStartDate() throws {
+        let repository = try MeetingRepository.inMemory()
+        let oldestID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 100),
+            title: "最早会议"
+        )
+        let middleID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 200),
+            title: "中间会议"
+        )
+        let newestID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 300),
+            title: "最新会议"
+        )
+
+        try repository.setPinned(
+            meetingID: newestID,
+            pinnedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        try repository.setPinned(
+            meetingID: oldestID,
+            pinnedAt: Date(timeIntervalSince1970: 2_000)
+        )
+
+        XCTAssertEqual(
+            try repository.meetings().map(\.id),
+            [oldestID, newestID, middleID]
+        )
+        XCTAssertGreaterThan(
+            try repository.meeting(id: oldestID).updatedAt,
+            Date(timeIntervalSince1970: 100)
+        )
+    }
+
+    func testClearingPinRestoresNormalMeetingOrder() throws {
         let repository = try MeetingRepository.inMemory()
         let olderID = try repository.createMeeting(
             mode: .offline,
-            startedAt: Date(timeIntervalSince1970: 100),
-            title: "早期会议"
+            startedAt: Date(timeIntervalSince1970: 100)
         )
         let newerID = try repository.createMeeting(
             mode: .online,
-            startedAt: Date(timeIntervalSince1970: 200),
-            title: "近期会议"
+            startedAt: Date(timeIntervalSince1970: 200)
+        )
+        try repository.setPinned(
+            meetingID: olderID,
+            pinnedAt: Date(timeIntervalSince1970: 1_000)
         )
 
+        try repository.setPinned(meetingID: olderID, pinnedAt: nil)
+
         XCTAssertEqual(try repository.meetings().map(\.id), [newerID, olderID])
+        XCTAssertNil(try repository.meeting(id: olderID).pinnedAt)
+        XCTAssertFalse(try repository.meeting(id: olderID).isPinned)
+    }
+
+    func testExistingInitializerAndNewRepositoryRecordsDefaultToUnpinned() throws {
+        let existingStyleRecord = MeetingRecord(
+            title: "旧记录",
+            mode: .offline,
+            state: .ready,
+            startedAt: Date(timeIntervalSince1970: 50)
+        )
+        let repository = try MeetingRepository.inMemory()
+        let newID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+
+        XCTAssertNil(existingStyleRecord.pinnedAt)
+        XCTAssertFalse(existingStyleRecord.isPinned)
+        XCTAssertNil(try repository.meeting(id: newID).pinnedAt)
+        XCTAssertFalse(try repository.meeting(id: newID).isPinned)
+    }
+
+    func testMeetingOrderUsesUUIDAsFinalDeterministicTieBreaker() throws {
+        let repository = try MeetingRepository.inMemory()
+        let timestamp = Date(timeIntervalSince1970: 100)
+        let firstID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: timestamp
+        )
+        let secondID = try repository.createMeeting(
+            mode: .online,
+            startedAt: timestamp
+        )
+
+        let expected = [firstID, secondID].sorted {
+            $0.uuidString < $1.uuidString
+        }
+
+        XCTAssertEqual(try repository.meetings().map(\.id), expected)
     }
 
     func testFinalizingMeetingPersistsReadyStateEndAndActiveDuration() throws {

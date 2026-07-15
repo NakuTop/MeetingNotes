@@ -70,10 +70,9 @@ final class MeetingRepository {
     }
 
     func meetings() throws -> [MeetingRecord] {
-        let descriptor = FetchDescriptor<MeetingRecord>(
-            sortBy: [SortDescriptor(\MeetingRecord.startedAt, order: .reverse)]
+        try context.fetch(FetchDescriptor<MeetingRecord>()).sorted(
+            by: Self.meetingComesBefore
         )
-        return try context.fetch(descriptor)
     }
 
     func meeting(id: UUID) throws -> MeetingRecord {
@@ -86,6 +85,13 @@ final class MeetingRepository {
             throw MeetingRepositoryError.meetingNotFound(id)
         }
         return meeting
+    }
+
+    func setPinned(meetingID: UUID, pinnedAt: Date?) throws {
+        let meeting = try meeting(id: meetingID)
+        meeting.pinnedAt = pinnedAt
+        meeting.updatedAt = .now
+        try context.save()
     }
 
     func appendTranscript(
@@ -281,5 +287,29 @@ final class MeetingRepository {
     func count<Model: PersistentModel>(_ model: Model.Type) throws -> Int {
         _ = model
         return try context.fetchCount(FetchDescriptor<Model>())
+    }
+
+    private static func meetingComesBefore(
+        _ lhs: MeetingRecord,
+        _ rhs: MeetingRecord
+    ) -> Bool {
+        switch (lhs.pinnedAt, rhs.pinnedAt) {
+        case let (lhsPinnedAt?, rhsPinnedAt?) where lhsPinnedAt != rhsPinnedAt:
+            return lhsPinnedAt > rhsPinnedAt
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        default:
+            break
+        }
+
+        if lhs.startedAt != rhs.startedAt {
+            return lhs.startedAt > rhs.startedAt
+        }
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt > rhs.createdAt
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
     }
 }

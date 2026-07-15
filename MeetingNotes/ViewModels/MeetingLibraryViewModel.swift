@@ -4,6 +4,7 @@ import Observation
 @MainActor
 protocol MeetingLibraryRepository: AnyObject {
     func meetings() throws -> [MeetingRecord]
+    func setPinned(meetingID: UUID, pinnedAt: Date?) throws
     func deleteMeeting(id: UUID) throws
 }
 
@@ -63,9 +64,7 @@ final class MeetingLibraryViewModel {
     func load() {
         refreshSystemRequirements()
         do {
-            meetings = try repository.meetings().sorted {
-                $0.startedAt > $1.startedAt
-            }
+            meetings = try repository.meetings()
             if let selectedMeetingID,
                !meetings.contains(where: { $0.id == selectedMeetingID }) {
                 self.selectedMeetingID = nil

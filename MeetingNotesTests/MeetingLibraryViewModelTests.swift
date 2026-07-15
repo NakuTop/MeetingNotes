@@ -4,24 +4,30 @@ import XCTest
 
 @MainActor
 final class MeetingLibraryViewModelTests: XCTestCase {
-    func testLoadSortsMeetingsNewestFirstAndKeepsSelectionWhenPossible() {
-        let older = makeMeeting(seconds: 100, title: "较早会议")
-        let newer = makeMeeting(seconds: 300, title: "最近会议")
-        let middle = makeMeeting(seconds: 200, title: "中间会议")
+    func testLoadPreservesRepositoryOrderAndKeepsSelectionWhenPossible() {
+        let mostRecentlyPinned = makeMeeting(
+            seconds: 100,
+            title: "最近置顶会议"
+        )
+        let previouslyPinned = makeMeeting(
+            seconds: 300,
+            title: "较早置顶会议"
+        )
+        let unpinned = makeMeeting(seconds: 200, title: "普通会议")
         let repository = LibraryRepositorySpy(
-            meetings: [older, newer, middle]
+            meetings: [mostRecentlyPinned, previouslyPinned, unpinned]
         )
         let viewModel = makeViewModel(repository: repository)
-        viewModel.select(middle.id)
+        viewModel.select(previouslyPinned.id)
 
         viewModel.load()
 
         XCTAssertEqual(
             viewModel.meetings.map(\.id),
-            [newer.id, middle.id, older.id]
+            [mostRecentlyPinned.id, previouslyPinned.id, unpinned.id]
         )
-        XCTAssertEqual(viewModel.selectedMeetingID, middle.id)
-        XCTAssertEqual(viewModel.selectedMeeting?.id, middle.id)
+        XCTAssertEqual(viewModel.selectedMeetingID, previouslyPinned.id)
+        XCTAssertEqual(viewModel.selectedMeeting?.id, previouslyPinned.id)
     }
 
     func testLoadClearsSelectionWhenMeetingNoLongerExists() {
@@ -40,7 +46,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
     func testReturnHomeClearsOnlySelectionAndPreservesHistory() {
         let first = makeMeeting(seconds: 100, title: "第一次会议")
         let second = makeMeeting(seconds: 200, title: "第二次会议")
-        let repository = LibraryRepositorySpy(meetings: [first, second])
+        let repository = LibraryRepositorySpy(meetings: [second, first])
         let viewModel = makeViewModel(repository: repository)
         viewModel.load()
         viewModel.select(second.id)
@@ -212,6 +218,13 @@ private final class LibraryRepositorySpy: MeetingLibraryRepository {
     func deleteMeeting(id: UUID) throws {
         deletedIDs.append(id)
         storedMeetings.removeAll { $0.id == id }
+    }
+
+    func setPinned(meetingID: UUID, pinnedAt: Date?) throws {
+        guard let meeting = storedMeetings.first(where: { $0.id == meetingID }) else {
+            throw MeetingRepositoryError.meetingNotFound(meetingID)
+        }
+        meeting.pinnedAt = pinnedAt
     }
 }
 

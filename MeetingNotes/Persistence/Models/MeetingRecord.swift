@@ -20,6 +20,7 @@ final class MeetingRecord {
     var audioManifestPath: String?
     var createdAt: Date
     var updatedAt: Date
+    var pinnedAt: Date?
     var suggestedTitle: String?
     var notionPageID: String?
     var notionPageURL: String?
@@ -47,6 +48,10 @@ final class MeetingRecord {
         set { stateRawValue = newValue.rawValue }
     }
 
+    var isPinned: Bool {
+        pinnedAt != nil
+    }
+
     init(
         id: UUID = UUID(),
         title: String,
@@ -58,6 +63,7 @@ final class MeetingRecord {
         audioManifestPath: String? = nil,
         createdAt: Date = .now,
         updatedAt: Date = .now,
+        pinnedAt: Date? = nil,
         suggestedTitle: String? = nil,
         notionPageID: String? = nil,
         notionPageURL: String? = nil,
@@ -73,6 +79,7 @@ final class MeetingRecord {
         self.audioManifestPath = audioManifestPath
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.pinnedAt = pinnedAt
         self.suggestedTitle = suggestedTitle
         self.notionPageID = notionPageID
         self.notionPageURL = notionPageURL
