@@ -1,6 +1,6 @@
 # MeetingNotes Apple Silicon 验证清单
 
-更新日期：2026-07-14
+更新日期：2026-07-15
 目标平台：macOS 15+、Apple Silicon（arm64）
 
 ## 自动化前置条件
@@ -67,3 +67,4 @@ xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
 | 2026-07-14 | UI 流程 + 长录音 harness | 通过 | Developer Mode enabled；本机临时签名；全新 DerivedData，5/5 通过 |
 | 2026-07-14 | `-uiTesting` App 直接启动 | 通过 | Debug App 进程正常保持运行，随后主动退出 |
 | 2026-07-14 | Xcode 工程再生成 | 环境缺失 | 当前机器未安装 `xcodegen`；已提交工程可正常构建 |
+| 2026-07-15 | 真实 Notion 父页面连接 | 通过 | 重启临时签名 App 后复用 Keychain Token；父页面链接测试显示“连接成功：会议记录”，两次真实请求均返回 HTTP 200。实际归档与失败重试仍待验收 |
