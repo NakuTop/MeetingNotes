@@ -38,14 +38,30 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
     private let positionStore: FloatingPanelPositionStore
     private let action: (FloatingControl) -> Void
+    private let animationDuration: TimeInterval
+    private let reduceMotion: () -> Bool
+    private let hostingView: NSHostingView<FloatingRecorderView>
     private var isPaused = false
+    private var visibilityGeneration = 0
 
     init(
         defaults: UserDefaults = .standard,
+        animationDuration: TimeInterval = 0.16,
+        reduceMotion: @escaping () -> Bool = {
+            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        },
         action: @escaping (FloatingControl) -> Void
     ) {
         positionStore = FloatingPanelPositionStore(defaults: defaults)
         self.action = action
+        self.animationDuration = animationDuration
+        self.reduceMotion = reduceMotion
+        hostingView = NSHostingView(
+            rootView: FloatingRecorderView(
+                isPaused: false,
+                action: action
+            )
+        )
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 194, height: 54),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -58,21 +74,46 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         configurePanel()
         restorePosition()
         panel.delegate = self
-        refreshContent()
+        panel.contentView = hostingView
     }
 
     func show() {
+        visibilityGeneration += 1
+        let generation = visibilityGeneration
+        let shouldAnimate = shouldAnimateVisibility
+        if !panel.isVisible {
+            panel.alphaValue = shouldAnimate ? 0 : 1
+        }
         panel.orderFrontRegardless()
+        guard shouldAnimate else {
+            panel.alphaValue = 1
+            return
+        }
+        animateAlpha(to: 1, generation: generation, hideAfter: false)
     }
 
     func hide() {
-        panel.orderOut(nil)
+        visibilityGeneration += 1
+        let generation = visibilityGeneration
+        guard panel.isVisible else {
+            panel.alphaValue = 1
+            return
+        }
+        guard shouldAnimateVisibility else {
+            panel.orderOut(nil)
+            panel.alphaValue = 1
+            return
+        }
+        animateAlpha(to: 0, generation: generation, hideAfter: true)
     }
 
     func setPaused(_ isPaused: Bool) {
         guard self.isPaused != isPaused else { return }
         self.isPaused = isPaused
-        refreshContent()
+        hostingView.rootView = FloatingRecorderView(
+            isPaused: isPaused,
+            action: action
+        )
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -104,12 +145,32 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         panel.setFrameOrigin(CGPoint(x: x, y: y))
     }
 
-    private func refreshContent() {
-        panel.contentView = NSHostingView(
-            rootView: FloatingRecorderView(
-                isPaused: isPaused,
-                action: action
+    private var shouldAnimateVisibility: Bool {
+        animationDuration > 0 && !reduceMotion()
+    }
+
+    private func animateAlpha(
+        to alpha: CGFloat,
+        generation: Int,
+        hideAfter: Bool
+    ) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = animationDuration
+            context.timingFunction = CAMediaTimingFunction(
+                name: .easeInEaseOut
             )
-        )
+            panel.animator().alphaValue = alpha
+        } completionHandler: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.visibilityGeneration == generation else {
+                    return
+                }
+                if hideAfter {
+                    self.panel.orderOut(nil)
+                    self.panel.alphaValue = 1
+                }
+            }
+        }
     }
 }

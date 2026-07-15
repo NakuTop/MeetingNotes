@@ -68,6 +68,33 @@ final class FloatingControlTests: XCTestCase {
         XCTAssertTrue(panel.collectionBehavior.contains(.fullScreenAuxiliary))
     }
 
+    @MainActor
+    func testPanelReusesHostingViewAcrossPauseAndRepeatVisibilityCycles() {
+        let suiteName = "FloatingPanelReuseTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let controller = FloatingPanelController(
+            defaults: defaults,
+            animationDuration: 0,
+            reduceMotion: { false },
+            action: { _ in }
+        )
+        let contentView = controller.panel.contentView
+
+        controller.show()
+        XCTAssertTrue(controller.panel.isVisible)
+        controller.setPaused(true)
+        XCTAssertTrue(controller.panel.contentView === contentView)
+        controller.hide()
+        XCTAssertFalse(controller.panel.isVisible)
+        XCTAssertEqual(controller.panel.alphaValue, 1)
+
+        controller.show()
+        XCTAssertTrue(controller.panel.isVisible)
+        XCTAssertEqual(controller.panel.alphaValue, 1)
+        controller.hide()
+    }
+
     func testPositionStoreRoundTripsPanelOrigin() {
         let suiteName = "FloatingPanelPositionTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
