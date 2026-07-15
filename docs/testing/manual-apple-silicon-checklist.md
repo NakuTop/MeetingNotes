@@ -27,8 +27,18 @@ xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
 - [x] 开始录音后悬浮面板可见，且恰有录音、暂停、结束、书签四个按钮。
 - [x] 暂停/继续只改变暂停按钮语义，不增加第五个按钮。
 - [x] 添加书签后详情页出现书签，结束会议后仍保留。
+- [x] 点击结束后录音浮窗在 3 秒内消失，再进入转录收尾阶段。
+- [x] 详情页可返回录音首页，返回前后历史会议侧栏和会议行都保留。
 - [x] 设置页有两个独立的“测试连接”按钮，并显示 DeepSeek 模型和 Notion 页面标题。
 - [x] “总结并归档”依次显示正在总结、正在归档、已归档与 Notion 链接。
+
+## macOS 26 视觉与动效回归
+
+- [x] macOS 26.5 上首页主按钮、详情关键卡片、设置卡片、返回按钮和录音浮窗显示原生 Liquid Glass。
+- [x] 长转录、书签和长总结区未叠加高强度玻璃，文字可读性正常。
+- [x] 详情切换动画只作用于主内容，不动画侧栏和时长数字。
+- [x] Reduce Motion 策略和浮窗零动画路径由单元测试覆盖。
+- [x] macOS 15 部署目标编译通过；macOS 26 API 均受可用性检查保护，旧系统使用 Material/系统按钮回退。
 
 对应自动化：`MeetingNotesUITests/MeetingFlowUITests.swift`。
 
@@ -68,3 +78,6 @@ xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
 | 2026-07-14 | `-uiTesting` App 直接启动 | 通过 | Debug App 进程正常保持运行，随后主动退出 |
 | 2026-07-14 | Xcode 工程再生成 | 环境缺失 | 当前机器未安装 `xcodegen`；已提交工程可正常构建 |
 | 2026-07-15 | 真实 Notion 父页面连接 | 通过 | 重启临时签名 App 后复用 Keychain Token；父页面链接测试显示“连接成功：会议记录”，两次真实请求均返回 HTTP 200。实际归档与失败重试仍待验收 |
+| 2026-07-15 | Liquid Glass 实机视觉回归 | 通过 | macOS 26.5 / arm64；首页、浮窗、结束后详情、返回首页、设置、已归档详情共 6 张 XCTest 截图已逐张检查；结果包为 `/tmp/meetingnotes-visual-ui/Logs/Test/Test-MeetingNotes-2026.07.15_10-49-24-+0800.xcresult` |
+| 2026-07-15 | 完整回归 | 通过 | arm64 单元测试 130/130；UI 流程 4/4；0 失败 |
+| 2026-07-15 | 签名与架构 | 通过 | macOS 15 部署目标构建成功；`file` 为 Mach-O 64-bit executable arm64；`codesign --verify --deep --strict` 通过 |

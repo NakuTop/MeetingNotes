@@ -16,6 +16,7 @@ final class MeetingFlowUITests: XCTestCase {
             )
         )
         XCTAssertEqual(entries.count, 2)
+        keepScreenshot(named: "01-home", of: app)
     }
 
     func testFloatingRecorderAlwaysHasFourControlsAndBookmarkPersists() {
@@ -27,6 +28,7 @@ final class MeetingFlowUITests: XCTestCase {
             app.buttons["floating.pause"].waitForExistence(timeout: 5)
         )
         assertExactlyFourFloatingControls(in: app)
+        keepScreenshot(named: "02-floating-recorder", of: app)
 
         app.buttons["floating.pause"].click()
         XCTAssertTrue(waitForLabel("继续", on: app.buttons["floating.pause"]))
@@ -58,6 +60,7 @@ final class MeetingFlowUITests: XCTestCase {
             "meeting.historyRow"
         ].firstMatch
         XCTAssertTrue(historyMeeting.waitForExistence(timeout: 5))
+        keepScreenshot(named: "03-meeting-detail", of: app)
         returnHome.click()
 
         XCTAssertTrue(
@@ -66,6 +69,7 @@ final class MeetingFlowUITests: XCTestCase {
         )
         XCTAssertTrue(app.buttons["meeting.start.online"].exists)
         XCTAssertTrue(historyMeeting.waitForExistence(timeout: 5))
+        keepScreenshot(named: "04-returned-home", of: app)
     }
 
     func testSettingsConnectionButtonsShowSuccessfulResults() {
@@ -94,6 +98,7 @@ final class MeetingFlowUITests: XCTestCase {
             app.staticTexts["连接成功：UI 测试父页面"]
                 .waitForExistence(timeout: 5)
         )
+        keepScreenshot(named: "05-settings", of: app)
     }
 
     func testSummarizeAndArchiveShowsBothStagesThenNotionLink() {
@@ -137,6 +142,7 @@ final class MeetingFlowUITests: XCTestCase {
         XCTAssertTrue(
             app.links["在 Notion 中打开"].waitForExistence(timeout: 5)
         )
+        keepScreenshot(named: "06-archived-detail", of: app)
     }
 
     private func launchApp() -> XCUIApplication {
@@ -159,6 +165,16 @@ final class MeetingFlowUITests: XCTestCase {
             )
         )
         XCTAssertEqual(controls.count, 4, file: file, line: line)
+    }
+
+    private func keepScreenshot(
+        named name: String,
+        of app: XCUIApplication
+    ) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func waitForLabel(
