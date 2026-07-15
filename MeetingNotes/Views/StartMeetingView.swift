@@ -34,7 +34,7 @@ struct StartMeetingView: View {
                 .font(.title3.weight(.semibold))
                 .frame(minWidth: 150, minHeight: 54)
         }
-        .buttonStyle(.borderedProminent)
+        .adaptivePrimaryButtonStyle()
         .controlSize(.large)
         .disabled(viewModel.isStarting)
         .keyboardShortcut(

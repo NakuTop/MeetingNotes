@@ -43,12 +43,29 @@ final class MeetingFlowUITests: XCTestCase {
                 .waitForExistence(timeout: 5)
         )
 
-        app.buttons["floating.stop"].click()
+        let stop = app.buttons["floating.stop"]
+        stop.click()
+        XCTAssertTrue(stop.waitForNonExistence(timeout: 3))
         XCTAssertTrue(
             app.buttons["meeting.summarizeArchive"]
                 .waitForExistence(timeout: 5)
         )
         XCTAssertTrue(app.staticTexts["meeting.bookmark"].firstMatch.exists)
+
+        let returnHome = app.buttons["meeting.returnHome"]
+        XCTAssertTrue(returnHome.waitForExistence(timeout: 5))
+        let historyMeeting = app.descendants(matching: .any)[
+            "meeting.historyRow"
+        ].firstMatch
+        XCTAssertTrue(historyMeeting.waitForExistence(timeout: 5))
+        returnHome.click()
+
+        XCTAssertTrue(
+            app.buttons["meeting.start.offline"]
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertTrue(app.buttons["meeting.start.online"].exists)
+        XCTAssertTrue(historyMeeting.waitForExistence(timeout: 5))
     }
 
     func testSettingsConnectionButtonsShowSuccessfulResults() {

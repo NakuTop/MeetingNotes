@@ -31,6 +31,7 @@ struct MeetingDetailView: View {
                 }
                 .accessibilityIdentifier("meeting.returnHome")
                 .help("返回录音首页，保留历史会议")
+                .adaptiveSecondaryButtonStyle()
             }
         }
         .task {
@@ -41,7 +42,9 @@ struct MeetingDetailView: View {
     private func detailContent(_ meeting: MeetingRecord) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                header(meeting)
+                AdaptiveGlassCard {
+                    header(meeting)
+                }
                 audioSection(meeting)
 
                 GroupBox("转录") {
@@ -105,34 +108,41 @@ struct MeetingDetailView: View {
     }
 
     private func audioSection(_ meeting: MeetingRecord) -> some View {
-        GroupBox("音频") {
-            HStack(spacing: 12) {
-                Image(systemName: "waveform")
-                    .font(.title2)
-                    .foregroundStyle(.tint)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(meeting.endedAt == nil ? "正在录制" : "本地录音")
-                        .font(.headline)
-                    Text(
-                        meeting.endedAt == nil
-                            ? "结束会议后可播放完整音频"
-                            : "音频保留在这台 Mac 上"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        AdaptiveGlassCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("音频")
+                    .font(.headline)
+
+                HStack(spacing: 12) {
+                    Image(systemName: "waveform")
+                        .font(.title2)
+                        .foregroundStyle(.tint)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(meeting.endedAt == nil ? "正在录制" : "本地录音")
+                            .font(.headline)
+                        Text(
+                            meeting.endedAt == nil
+                                ? "结束会议后可播放完整音频"
+                                : "音频保留在这台 Mac 上"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text(MeetingDisplayFormat.duration(meeting.activeDuration))
+                        .font(.body.monospacedDigit())
+                        .foregroundStyle(.secondary)
                 }
-                Spacer()
-                Text(MeetingDisplayFormat.duration(meeting.activeDuration))
-                    .font(.body.monospacedDigit())
-                    .foregroundStyle(.secondary)
             }
-            .padding(.top, 4)
         }
     }
 
     private func summarySection(_ meeting: MeetingRecord) -> some View {
-        GroupBox("总结与归档") {
+        AdaptiveGlassCard {
             VStack(alignment: .leading, spacing: 14) {
+                Text("总结与归档")
+                    .font(.headline)
+
                 if let summary = meeting.summary {
                     Text(summary.overview)
                         .textSelection(.enabled)
@@ -169,7 +179,7 @@ struct MeetingDetailView: View {
                             await viewModel.performPrimaryAction()
                         }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .adaptivePrimaryButtonStyle()
                     .disabled(!action.isEnabled || viewModel.isPerforming)
                     .accessibilityIdentifier("meeting.summarizeArchive")
 
@@ -189,7 +199,6 @@ struct MeetingDetailView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 4)
         }
     }
 

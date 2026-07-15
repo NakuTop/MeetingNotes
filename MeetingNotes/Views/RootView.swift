@@ -1,6 +1,9 @@
 import SwiftUI
 
 struct RootView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
     private let ownedContainer: AppContainer?
     @Bindable var viewModel: MeetingLibraryViewModel
     @Bindable var onboardingState: OnboardingState
@@ -34,28 +37,37 @@ struct RootView: View {
     var body: some View {
         VStack(spacing: 0) {
             if viewModel.systemRequirementsSnapshot.isSupportedPlatform {
-                NavigationSplitView {
+                NavigationSplitView(columnVisibility: $columnVisibility) {
                     MeetingSidebarView(viewModel: viewModel)
                         .navigationSplitViewColumnWidth(min: 260, ideal: 300)
                 } detail: {
-                    if let meeting = viewModel.selectedMeeting {
-                        MeetingDetailView(
-                            viewModel: makeDetailViewModel(meeting.id),
-                            onReturnHome: {
-                                viewModel.returnHome()
-                            }
-                        )
-                        .id(meeting.id)
-                    } else {
-                        VStack(spacing: 0) {
-                            StartMeetingView(viewModel: viewModel)
-                            ModelStatusView(
-                                viewModel: transcriptionModelViewModel
+                    Group {
+                        if let meeting = viewModel.selectedMeeting {
+                            MeetingDetailView(
+                                viewModel: makeDetailViewModel(meeting.id),
+                                onReturnHome: {
+                                    viewModel.returnHome()
+                                }
                             )
-                            .padding(.horizontal, 28)
-                            .padding(.bottom, 22)
+                            .id(meeting.id)
+                            .transition(detailTransition)
+                        } else {
+                            VStack(spacing: 0) {
+                                StartMeetingView(viewModel: viewModel)
+                                ModelStatusView(
+                                    viewModel: transcriptionModelViewModel
+                                )
+                                .padding(.horizontal, 28)
+                                .padding(.bottom, 22)
+                            }
+                            .transition(detailTransition)
                         }
                     }
+                    .animation(
+                        AppVisualPolicy.motion(reduceMotion: reduceMotion)
+                            .animation,
+                        value: viewModel.selectedMeetingID
+                    )
                 }
             } else {
                 ContentUnavailableView(
@@ -96,7 +108,15 @@ struct RootView: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
-                .background(.bar)
+                .adaptiveGlassSurface(
+                    in: RoundedRectangle(
+                        cornerRadius: 14,
+                        style: .continuous
+                    ),
+                    tint: .orange.opacity(0.08)
+                )
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
             }
         }
         .frame(minWidth: 900, minHeight: 600)
@@ -120,5 +140,10 @@ struct RootView: View {
         case .microphone: "打开麦克风设置"
         case .screenRecording: "打开屏幕录制设置"
         }
+    }
+
+    private var detailTransition: AnyTransition {
+        let motion = AppVisualPolicy.motion(reduceMotion: reduceMotion)
+        return .opacity.combined(with: .scale(scale: motion.scale))
     }
 }

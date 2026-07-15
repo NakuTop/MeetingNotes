@@ -68,5 +68,6 @@ private struct MeetingSidebarRow: View {
         .accessibilityLabel(
             "\(meeting.title)，\(meeting.mode == .offline ? "线下会议" : "在线会议")，\(MeetingDisplayFormat.duration(meeting.activeDuration))，\(meeting.state == .archived ? "已归档" : "未归档")"
         )
+        .accessibilityIdentifier("meeting.historyRow")
     }
 }

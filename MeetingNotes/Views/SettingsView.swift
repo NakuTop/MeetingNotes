@@ -6,8 +6,11 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                GroupBox("DeepSeek") {
+                AdaptiveGlassCard {
                     VStack(alignment: .leading, spacing: 12) {
+                        Text("DeepSeek")
+                            .font(.headline)
+
                         SecureField(
                             "输入新的 API Key",
                             text: $viewModel.deepSeekAPIKeyInput
@@ -52,11 +55,13 @@ struct SettingsView: View {
                             .disabled(viewModel.deepSeekCredential == .missing)
                         }
                     }
-                    .padding(.top, 6)
                 }
 
-                GroupBox("Notion") {
+                AdaptiveGlassCard {
                     VStack(alignment: .leading, spacing: 12) {
+                        Text("Notion")
+                            .font(.headline)
+
                         SecureField(
                             "输入新的 Notion Token",
                             text: $viewModel.notionTokenInput
@@ -103,7 +108,6 @@ struct SettingsView: View {
                             .disabled(viewModel.notionCredential == .missing)
                         }
                     }
-                    .padding(.top, 6)
                 }
 
                 HStack(spacing: 12) {
@@ -112,7 +116,7 @@ struct SettingsView: View {
                     Button("保存设置") {
                         viewModel.save()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .adaptivePrimaryButtonStyle()
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("settings.save")
                 }
