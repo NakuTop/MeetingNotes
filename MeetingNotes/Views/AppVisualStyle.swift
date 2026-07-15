@@ -100,3 +100,13 @@ struct AdaptiveGlassCard<Content: View>: View {
             )
     }
 }
+
+struct AppWindowGlassBackground: View {
+    var body: some View {
+        Rectangle()
+            .fill(.clear)
+            .adaptiveGlassSurface(in: Rectangle())
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}

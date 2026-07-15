@@ -120,6 +120,11 @@ struct RootView: View {
             }
         }
         .frame(minWidth: 900, minHeight: 600)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("app.windowGlassSurface")
+        .containerBackground(for: .window) {
+            AppWindowGlassBackground()
+        }
         .task {
             viewModel.load()
         }

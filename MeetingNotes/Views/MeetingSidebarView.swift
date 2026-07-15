@@ -20,6 +20,8 @@ struct MeetingSidebarView: View {
                     }
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(.clear)
         .navigationTitle("全部会议")
         .accessibilityIdentifier("meeting.sidebar")
     }

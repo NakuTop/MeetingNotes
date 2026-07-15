@@ -16,6 +16,11 @@ final class MeetingFlowUITests: XCTestCase {
             )
         )
         XCTAssertEqual(entries.count, 2)
+
+        let windowGlassSurface = app.descendants(matching: .any)[
+            "app.windowGlassSurface"
+        ].firstMatch
+        XCTAssertTrue(windowGlassSurface.waitForExistence(timeout: 5))
         keepScreenshot(named: "01-home", of: app)
     }
 
