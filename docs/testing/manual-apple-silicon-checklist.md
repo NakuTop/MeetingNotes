@@ -34,6 +34,7 @@ xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
 
 ## macOS 26 视觉与动效回归
 
+- [x] 整个主窗口与历史会议侧栏共享窗口级原生 Liquid Glass，侧栏列表背景透明且会议行可读。
 - [x] macOS 26.5 上首页主按钮、详情关键卡片、设置卡片、返回按钮和录音浮窗显示原生 Liquid Glass。
 - [x] 长转录、书签和长总结区未叠加高强度玻璃，文字可读性正常。
 - [x] 详情切换动画只作用于主内容，不动画侧栏和时长数字。
@@ -81,3 +82,4 @@ xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
 | 2026-07-15 | Liquid Glass 实机视觉回归 | 通过 | macOS 26.5 / arm64；首页、浮窗、结束后详情、返回首页、设置、已归档详情共 6 张 XCTest 截图已逐张检查；结果包为 `/tmp/meetingnotes-visual-ui/Logs/Test/Test-MeetingNotes-2026.07.15_10-49-24-+0800.xcresult` |
 | 2026-07-15 | 完整回归 | 通过 | arm64 单元测试 130/130；UI 流程 4/4；0 失败 |
 | 2026-07-15 | 签名与架构 | 通过 | macOS 15 部署目标构建成功；`file` 为 Mach-O 64-bit executable arm64；`codesign --verify --deep --strict` 通过 |
+| 2026-07-15 | 整窗 Liquid Glass 回归 | 通过 | macOS 26.5 / arm64；主窗口、历史侧栏、详情页、设置页及浮窗共 6 张 XCTest 截图逐张检查；结果包为 `/tmp/meetingnotes-window-glass-ui-full/Logs/Test/Test-MeetingNotes-2026.07.15_11-52-45-+0800.xcresult` |
