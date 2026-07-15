@@ -19,6 +19,7 @@ enum MeetingTitleUpdateError: Error, Equatable, Sendable {
     case credentialAccessFailed
     case notion(NotionClientError)
     case localUpdateFailed
+    case invalidState(RecordingState)
 }
 
 @MainActor
@@ -98,16 +99,22 @@ final class MeetingTitleUpdateUseCase: MeetingTitleUpdating {
         }
         let previousTitle = meeting.title
 
-        guard meeting.state == .archived else {
+        switch meeting.state {
+        case .summarizing, .archiving:
+            throw MeetingTitleUpdateError.invalidState(meeting.state)
+        default:
+            break
+        }
+
+        guard let pageID = nonempty(meeting.notionPageID) else {
+            if meeting.state == .archived {
+                throw MeetingTitleUpdateError.missingNotionPage
+            }
             try updateLocalTitle(
                 meetingID: meetingID,
                 title: canonicalTitle
             )
             return
-        }
-
-        guard let pageID = nonempty(meeting.notionPageID) else {
-            throw MeetingTitleUpdateError.missingNotionPage
         }
         let token: String
         do {

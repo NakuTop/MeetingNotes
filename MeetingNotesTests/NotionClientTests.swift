@@ -149,6 +149,32 @@ final class NotionClientTests: XCTestCase {
         XCTAssertEqual(text["content"]?.count, 1_900)
     }
 
+    func testUpdatePageTitleTrimsWhitespaceInRequestBody() async throws {
+        let httpClient = QueuedNotionHTTPClient(responses: [
+            .json(["object": "page", "id": "page-id"])
+        ])
+        let client = NotionClient(token: "test-token", httpClient: httpClient)
+
+        try await client.updatePageTitle(
+            pageID: "page-id",
+            title: "  季度复盘 \n"
+        )
+
+        let requests = await httpClient.recordedRequests()
+        let request = try XCTUnwrap(requests.first)
+        let body = try Self.jsonBody(request)
+        let properties = try XCTUnwrap(body["properties"] as? [String: Any])
+        let titleProperty = try XCTUnwrap(
+            properties["title"] as? [String: Any]
+        )
+        let richText = try XCTUnwrap(
+            titleProperty["title"] as? [[String: Any]]
+        )
+        let firstItem = try XCTUnwrap(richText.first)
+        let text = try XCTUnwrap(firstItem["text"] as? [String: String])
+        XCTAssertEqual(text["content"], "季度复盘")
+    }
+
     func testRejectsBlankPageIDAndTitleBeforeNetwork() async throws {
         let httpClient = QueuedNotionHTTPClient(responses: [
             .json(["object": "page"]),

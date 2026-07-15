@@ -92,6 +92,74 @@ final class MeetingTitleUpdateUseCaseTests: XCTestCase {
         XCTAssertEqual(meeting.title, "归档新标题")
     }
 
+    func testSummaryReadyMeetingWithNotionPageUpdatesRemoteBeforeLocal() async throws {
+        let recorder = TitleCallRecorder()
+        let meeting = makeMeeting(
+            state: .summaryReady,
+            notionPageID: "  notion-page \n"
+        )
+        let repository = TitleRepositorySpy(
+            meeting: meeting,
+            recorder: recorder
+        )
+        let updater = RecordingNotionTitleUpdater(recorder: recorder)
+        let useCase = makeUseCase(
+            repository: repository,
+            credentials: TitleCredentialStore(notionToken: "notion-token"),
+            updater: updater
+        )
+
+        try await useCase.updateTitle(
+            meetingID: meeting.id,
+            title: " \n 阶段复盘 \t "
+        )
+
+        XCTAssertEqual(
+            recorder.calls,
+            ["remote:notion-page:阶段复盘", "local:阶段复盘"]
+        )
+        XCTAssertEqual(updater.updates.map(\.title), ["阶段复盘"])
+        XCTAssertEqual(repository.updateTitles, ["阶段复盘"])
+        XCTAssertEqual(meeting.title, "阶段复盘")
+    }
+
+    func testBusySummaryAndArchiveStatesRejectRenameWithoutSideEffects() async throws {
+        for state in [RecordingState.summarizing, .archiving] {
+            let meeting = makeMeeting(
+                state: state,
+                notionPageID: "notion-page"
+            )
+            let repository = TitleRepositorySpy(meeting: meeting)
+            let credentials = TitleCredentialStore(
+                notionToken: "notion-token"
+            )
+            let updater = RecordingNotionTitleUpdater()
+            let useCase = makeUseCase(
+                repository: repository,
+                credentials: credentials,
+                updater: updater
+            )
+
+            do {
+                try await useCase.updateTitle(
+                    meetingID: meeting.id,
+                    title: "忙碌期间不允许改名"
+                )
+                XCTFail("Expected invalid state for \(state)")
+            } catch {
+                XCTAssertEqual(
+                    error as? MeetingTitleUpdateError,
+                    .invalidState(state)
+                )
+            }
+
+            XCTAssertEqual(repository.updateTitles, [])
+            XCTAssertEqual(credentials.readCount, 0)
+            XCTAssertEqual(updater.updates, [])
+            XCTAssertEqual(meeting.title, "旧标题")
+        }
+    }
+
     func testNotionFailurePreservesLocalTitleAndSpecificError() async throws {
         let meeting = makeMeeting(
             state: .archived,
@@ -122,6 +190,47 @@ final class MeetingTitleUpdateUseCaseTests: XCTestCase {
 
         XCTAssertEqual(meeting.title, "旧标题")
         XCTAssertEqual(repository.updateTitles, [])
+    }
+
+    func testRemoteFailureReleasesMeetingSoSameMeetingCanRetry() async throws {
+        let meeting = makeMeeting(
+            state: .archived,
+            notionPageID: "notion-page"
+        )
+        let repository = TitleRepositorySpy(meeting: meeting)
+        let updater = RecordingNotionTitleUpdater(
+            errors: [NotionClientError.rateLimited]
+        )
+        let useCase = makeUseCase(
+            repository: repository,
+            credentials: TitleCredentialStore(notionToken: "notion-token"),
+            updater: updater
+        )
+
+        do {
+            try await useCase.updateTitle(
+                meetingID: meeting.id,
+                title: "第一次失败"
+            )
+            XCTFail("Expected a rate-limit error")
+        } catch {
+            XCTAssertEqual(
+                error as? MeetingTitleUpdateError,
+                .notion(.rateLimited)
+            )
+        }
+
+        try await useCase.updateTitle(
+            meetingID: meeting.id,
+            title: "重试成功"
+        )
+
+        XCTAssertEqual(
+            updater.updates.map(\.title),
+            ["第一次失败", "重试成功"]
+        )
+        XCTAssertEqual(repository.updateTitles, ["重试成功"])
+        XCTAssertEqual(meeting.title, "重试成功")
     }
 
     func testArchivedMeetingWithoutTokenDoesNotRenameLocally() async throws {
@@ -265,6 +374,37 @@ final class MeetingTitleUpdateUseCaseTests: XCTestCase {
         )
         XCTAssertEqual(meeting.title, originalTitle)
         XCTAssertEqual(meeting.updatedAt, originalUpdatedAt)
+    }
+
+    func testCompensationFailureStillReportsLocalUpdateFailure() async throws {
+        let meeting = makeMeeting(
+            state: .archived,
+            notionPageID: "notion-page"
+        )
+        let repository = TitleRepositorySpy(
+            meeting: meeting,
+            updateError: TitleRepositorySpy.Failure.save
+        )
+        let updater = CompensationFailingNotionTitleUpdater()
+        let useCase = makeUseCase(
+            repository: repository,
+            credentials: TitleCredentialStore(notionToken: "notion-token"),
+            updater: updater
+        )
+
+        do {
+            try await useCase.updateTitle(
+                meetingID: meeting.id,
+                title: "新标题"
+            )
+            XCTFail("Expected a local-update error")
+        } catch {
+            XCTAssertEqual(error as? MeetingTitleUpdateError, .localUpdateFailed)
+        }
+
+        XCTAssertEqual(updater.titles, ["新标题", "旧标题"])
+        XCTAssertEqual(repository.updateTitles, ["新标题"])
+        XCTAssertEqual(meeting.title, "旧标题")
     }
 
     func testConcurrentRenameOfSameMeetingIsRejected() async throws {
@@ -471,6 +611,25 @@ private final class RecordingNotionTitleUpdater: MeetingNotionTitleUpdating {
         recorder?.calls.append("remote:\(pageID):\(title)")
         if !errors.isEmpty {
             throw errors.removeFirst()
+        }
+    }
+}
+
+@MainActor
+private final class CompensationFailingNotionTitleUpdater:
+    MeetingNotionTitleUpdating {
+    private(set) var titles: [String] = []
+
+    func updatePageTitle(
+        token: String,
+        pageID: String,
+        title: String
+    ) async throws {
+        _ = token
+        _ = pageID
+        titles.append(title)
+        if titles.count == 2 {
+            throw NotionClientError.rateLimited
         }
     }
 }
