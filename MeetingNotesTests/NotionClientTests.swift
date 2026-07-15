@@ -101,6 +101,78 @@ final class NotionClientTests: XCTestCase {
         XCTAssertNil(appendBody["after"])
     }
 
+    func testUpdatesPageTitleWithCurrentHeadersAndCanonicalLength() async throws {
+        let httpClient = QueuedNotionHTTPClient(responses: [
+            .json(["object": "page", "id": "page-id"])
+        ])
+        let client = NotionClient(token: "test-token", httpClient: httpClient)
+        let overlongTitle = String(repeating: "会", count: 1_905)
+
+        try await client.updatePageTitle(
+            pageID: "page-id",
+            title: overlongTitle
+        )
+
+        let requests = await httpClient.recordedRequests()
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.httpMethod, "PATCH")
+        XCTAssertEqual(
+            request.url?.absoluteString,
+            "https://api.notion.com/v1/pages/page-id"
+        )
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "Authorization"),
+            "Bearer test-token"
+        )
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "Notion-Version"),
+            "2026-03-11"
+        )
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "Content-Type"),
+            "application/json"
+        )
+
+        let body = try Self.jsonBody(request)
+        let properties = try XCTUnwrap(body["properties"] as? [String: Any])
+        let titleProperty = try XCTUnwrap(
+            properties["title"] as? [String: Any]
+        )
+        XCTAssertEqual(titleProperty["type"] as? String, "title")
+        let richText = try XCTUnwrap(
+            titleProperty["title"] as? [[String: Any]]
+        )
+        let firstItem = try XCTUnwrap(richText.first)
+        XCTAssertEqual(firstItem["type"] as? String, "text")
+        let text = try XCTUnwrap(firstItem["text"] as? [String: String])
+        XCTAssertEqual(text["content"], String(overlongTitle.prefix(1_900)))
+        XCTAssertEqual(text["content"]?.count, 1_900)
+    }
+
+    func testRejectsBlankPageIDAndTitleBeforeNetwork() async throws {
+        let httpClient = QueuedNotionHTTPClient(responses: [
+            .json(["object": "page"]),
+            .json(["object": "page"])
+        ])
+        let client = NotionClient(token: "test-token", httpClient: httpClient)
+
+        do {
+            try await client.updatePageTitle(pageID: " \n ", title: "有效标题")
+            XCTFail("Expected a blank-page-ID error")
+        } catch {
+            XCTAssertEqual(error as? NotionClientError, .invalidRequest)
+        }
+        do {
+            try await client.updatePageTitle(pageID: "page-id", title: " \t ")
+            XCTFail("Expected a blank-title error")
+        } catch {
+            XCTAssertEqual(error as? NotionClientError, .invalidRequest)
+        }
+
+        let requests = await httpClient.recordedRequests()
+        XCTAssertEqual(requests.count, 0)
+    }
+
     func testMapsActionableStatusesAndTimeoutWithoutLeakingTokenOrBody() async throws {
         let cases: [(Int, NotionClientError)] = [
             (401, .unauthorized),

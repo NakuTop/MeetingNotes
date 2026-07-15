@@ -99,6 +99,37 @@ struct NotionClient: NotionAPIClient, Sendable {
         _ = try await perform(request)
     }
 
+    func updatePageTitle(pageID: String, title: String) async throws {
+        let canonicalPageID = pageID.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let canonicalTitle = MeetingTitlePolicy.canonicalize(title)
+        guard !canonicalPageID.isEmpty, !canonicalTitle.isEmpty else {
+            throw NotionClientError.invalidRequest
+        }
+        var request = request(
+            method: "PATCH",
+            path: ["pages", canonicalPageID],
+            timeout: 30
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        do {
+            request.httpBody = try encoder.encode(
+                UpdatePageTitleRequest(
+                    properties: .init(
+                        title: .init(
+                            type: "title",
+                            title: [.plain(canonicalTitle)]
+                        )
+                    )
+                )
+            )
+        } catch {
+            throw NotionClientError.invalidRequest
+        }
+        _ = try await perform(request)
+    }
+
     private static func serializedID(_ id: UUID) -> String {
         id.uuidString.lowercased()
     }
@@ -238,4 +269,8 @@ private struct PlainRichText: Encodable {
 
 private struct AppendBlocksRequest: Encodable {
     let children: [NotionBlockDraft]
+}
+
+private struct UpdatePageTitleRequest: Encodable {
+    let properties: CreatePageRequest.Properties
 }

@@ -38,6 +38,8 @@ protocol NotionAPIClient: Sendable {
         blocks: [NotionBlockDraft],
         to pageID: String
     ) async throws
+
+    func updatePageTitle(pageID: String, title: String) async throws
 }
 
 enum NotionClientError: Error, Equatable, Sendable {

@@ -146,6 +146,25 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertFalse(try repository.meeting(id: olderID).isPinned)
     }
 
+    func testUpdatingTitlePersistsValueAndRefreshesUpdatedAt() throws {
+        let repository = try MeetingRepository.inMemory()
+        let startedAt = Date(timeIntervalSince1970: 100)
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: startedAt,
+            title: "旧标题"
+        )
+
+        try repository.updateTitle(
+            meetingID: meetingID,
+            title: "新标题"
+        )
+
+        let meeting = try repository.meeting(id: meetingID)
+        XCTAssertEqual(meeting.title, "新标题")
+        XCTAssertGreaterThan(meeting.updatedAt, startedAt)
+    }
+
     func testExistingInitializerAndNewRepositoryRecordsDefaultToUnpinned() throws {
         let existingStyleRecord = MeetingRecord(
             title: "旧记录",

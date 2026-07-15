@@ -145,6 +145,11 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
         completedBatches.append(blocks)
     }
 
+    func updatePageTitle(pageID: String, title: String) async throws {
+        _ = pageID
+        _ = title
+    }
+
     func createCallCount() -> Int {
         createCalls
     }
