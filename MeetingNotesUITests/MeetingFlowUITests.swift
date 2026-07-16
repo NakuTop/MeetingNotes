@@ -194,12 +194,29 @@ final class MeetingFlowUITests: XCTestCase {
         let unpin = app.descendants(matching: .any)["meeting.context.pin"]
         XCTAssertTrue(unpin.waitForExistence(timeout: 3))
         XCTAssertTrue(app.menuItems["取消置顶"].exists)
+        unpin.click()
+        XCTAssertTrue(waitForValueContaining("未置顶", on: historyRow))
+        XCTAssertFalse((historyRow.value as? String)?.contains("已置顶") ?? true)
+
+        historyRow.rightClick()
+        let repin = app.descendants(matching: .any)["meeting.context.pin"]
+        XCTAssertTrue(repin.waitForExistence(timeout: 3))
+        XCTAssertTrue(app.menuItems["置顶会议"].exists)
         app.typeKey(.escape, modifierFlags: [])
 
         let detailRename = app.buttons["meeting.detail.rename"]
         XCTAssertTrue(detailRename.waitForExistence(timeout: 3))
+        let summaryAction = app.buttons["meeting.summarizeArchive"]
+        XCTAssertTrue(summaryAction.isEnabled)
         detailRename.click()
         let detailRenameField = app.textFields["meeting.detail.renameField"]
+        XCTAssertTrue(detailRenameField.waitForExistence(timeout: 3))
+        XCTAssertFalse(summaryAction.isEnabled)
+        app.buttons["meeting.detail.renameCancel"].click()
+        XCTAssertTrue(detailRename.waitForExistence(timeout: 3))
+        XCTAssertTrue(summaryAction.isEnabled)
+
+        detailRename.click()
         XCTAssertTrue(detailRenameField.waitForExistence(timeout: 3))
         replaceText(in: detailRenameField, with: "详情重命名会议")
         app.buttons["meeting.detail.renameSave"].click()

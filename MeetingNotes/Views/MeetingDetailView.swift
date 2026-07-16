@@ -136,21 +136,25 @@ struct MeetingDetailView: View {
                     .textFieldStyle(.plain)
                     .focused($isTitleFieldFocused)
                     .onSubmit {
-                        saveTitle()
+                        saveTitle(meeting)
                     }
                     .onExitCommand {
                         cancelTitleEditing(meeting)
                     }
-                    .disabled(viewModel.isRenaming)
+                    .disabled(viewModel.isRenaming || !canRename(meeting))
                     .accessibilityIdentifier("meeting.detail.renameField")
 
                 Button {
-                    saveTitle()
+                    saveTitle(meeting)
                 } label: {
                     Image(systemName: "checkmark")
                 }
                 .buttonStyle(.borderless)
-                .disabled(trimmedTitleDraft.isEmpty || viewModel.isRenaming)
+                .disabled(
+                    trimmedTitleDraft.isEmpty
+                        || viewModel.isRenaming
+                        || !canRename(meeting)
+                )
                 .accessibilityLabel("保存会议标题")
                 .accessibilityIdentifier("meeting.detail.renameSave")
 
@@ -215,8 +219,12 @@ struct MeetingDetailView: View {
         viewModel.dismissRenameError()
     }
 
-    private func saveTitle() {
-        guard !trimmedTitleDraft.isEmpty, !viewModel.isRenaming else { return }
+    private func saveTitle(_ meeting: MeetingRecord) {
+        guard !trimmedTitleDraft.isEmpty,
+              !viewModel.isRenaming,
+              canRename(meeting) else {
+            return
+        }
         let title = trimmedTitleDraft
         Task { @MainActor in
             if await viewModel.rename(to: title) {
@@ -302,7 +310,12 @@ struct MeetingDetailView: View {
                         }
                     }
                     .adaptivePrimaryButtonStyle()
-                    .disabled(!action.isEnabled || viewModel.isPerforming)
+                    .disabled(
+                        !action.isEnabled
+                            || viewModel.isPerforming
+                            || isEditingTitle
+                            || viewModel.isRenaming
+                    )
                     .accessibilityIdentifier("meeting.summarizeArchive")
 
                     if action == .summarizing || action == .archiving {
