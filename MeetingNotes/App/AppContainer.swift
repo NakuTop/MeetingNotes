@@ -6,6 +6,7 @@ final class AppContainer {
     let fileStore: MeetingFileStore
     let coordinator: MeetingCoordinator
     let panelController: FloatingPanelController
+    let audioPlayerController: MeetingAudioPlayerController
     let libraryViewModel: MeetingLibraryViewModel
     let settingsViewModel: SettingsViewModel
     let onboardingState: OnboardingState
@@ -74,12 +75,19 @@ final class AppContainer {
             operationGate: operationGate
         )
         self.meetingTitleUpdater = titleUpdater
+        let audioPlayerController = MeetingAudioPlayerController(
+            sourceLoader: MeetingAudioSourceLoader(fileStore: fileStore),
+            waveformLoader: WaveformAnalyzer(fileStore: fileStore),
+            engine: AVFoundationMeetingAudioPlaybackEngine()
+        )
+        self.audioPlayerController = audioPlayerController
         let libraryViewModel = MeetingLibraryViewModel(
             repository: repository,
             fileDeleter: fileStore,
             starter: coordinator,
             titleUpdater: titleUpdater,
             operationGate: operationGate,
+            playbackStopper: audioPlayerController,
             systemRequirements: systemRequirements ?? SystemRequirements(),
             recordingsURL: recordingsURL
         )

@@ -37,6 +37,7 @@ final class MeetingLibraryViewModel {
     private let starter: any MeetingStarting
     private let titleUpdater: any MeetingTitleUpdating
     private let operationGate: MeetingOperationGate
+    private let playbackStopper: any MeetingPlaybackStopping
     private let systemRequirements: any SystemRequirementChecking
     private let recordingsURL: URL
 
@@ -63,6 +64,7 @@ final class MeetingLibraryViewModel {
         starter: any MeetingStarting,
         titleUpdater: any MeetingTitleUpdating,
         operationGate: MeetingOperationGate,
+        playbackStopper: any MeetingPlaybackStopping,
         systemRequirements: any SystemRequirementChecking = SystemRequirements(),
         recordingsURL: URL = FileManager.default.temporaryDirectory
     ) {
@@ -71,6 +73,7 @@ final class MeetingLibraryViewModel {
         self.starter = starter
         self.titleUpdater = titleUpdater
         self.operationGate = operationGate
+        self.playbackStopper = playbackStopper
         self.systemRequirements = systemRequirements
         self.recordingsURL = recordingsURL
         systemRequirementsSnapshot = systemRequirements.snapshot(
@@ -226,6 +229,7 @@ final class MeetingLibraryViewModel {
         setErrorPresentation()
         defer { deletingMeetingIDs.remove(id) }
 
+        playbackStopper.stop(meetingID: id)
         do {
             try await fileDeleter.deleteMeetingDirectory(for: id)
             try repository.deleteMeeting(id: id)
