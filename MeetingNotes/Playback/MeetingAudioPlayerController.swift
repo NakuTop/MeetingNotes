@@ -32,7 +32,7 @@ protocol MeetingAudioPlaybackEngine: AnyObject {
 
 @MainActor
 protocol MeetingPlaybackStopping: AnyObject {
-    func stop(meetingID: UUID?)
+    func stopAndWait(meetingID: UUID?) async
 }
 
 enum MeetingAudioPlayerState: Equatable, Sendable {
@@ -59,6 +59,10 @@ final class MeetingAudioPlayerController: MeetingPlaybackStopping {
     @ObservationIgnored private let engine: any MeetingAudioPlaybackEngine
     @ObservationIgnored private let waveformBucketCount: Int
     @ObservationIgnored private var prepareTask: Task<Void, Never>?
+    @ObservationIgnored private var prepareWaiters: Set<UUID> = []
+    @ObservationIgnored private var quiescingPreparations: [
+        UUID: [UUID: Task<Void, Never>]
+    ] = [:]
     @ObservationIgnored private var generation: UInt64 = 0
     @ObservationIgnored private var isSeeking = false
     @ObservationIgnored private var shouldResumeAfterSeeking = false
@@ -78,11 +82,24 @@ final class MeetingAudioPlayerController: MeetingPlaybackStopping {
     /// Preparing an already loaded meeting is idempotent. If that meeting is
     /// still loading, additional callers wait for the shared preparation.
     func prepare(meetingID requestedMeetingID: UUID) async {
+        let waiterID = UUID()
+        let requestedGeneration: UInt64
+        let task: Task<Void, Never>
+
         if meetingID == requestedMeetingID {
             switch state {
             case .loading:
-                if let prepareTask { await prepareTask.value }
-                return
+                if let prepareTask {
+                    requestedGeneration = generation
+                    prepareWaiters.insert(waiterID)
+                    task = prepareTask
+                    await waitForPreparation(
+                        task,
+                        waiterID: waiterID,
+                        generation: requestedGeneration
+                    )
+                    return
+                }
             case .ready, .playing, .paused, .ended:
                 return
             case .failed, .idle:
@@ -92,7 +109,7 @@ final class MeetingAudioPlayerController: MeetingPlaybackStopping {
 
         replaceCurrentSelectionIfNeeded()
         generation &+= 1
-        let requestedGeneration = generation
+        requestedGeneration = generation
         meetingID = requestedMeetingID
         state = .loading
         currentTime = 0
@@ -100,7 +117,8 @@ final class MeetingAudioPlayerController: MeetingPlaybackStopping {
         waveform = []
         clearSeekingState()
 
-        let task = Task<Void, Never> { @MainActor [weak self] in
+        prepareWaiters = [waiterID]
+        task = Task<Void, Never> { @MainActor [weak self] in
             guard let self else { return }
             await self.performPreparation(
                 meetingID: requestedMeetingID,
@@ -109,14 +127,30 @@ final class MeetingAudioPlayerController: MeetingPlaybackStopping {
         }
         prepareTask = task
 
+        await waitForPreparation(
+            task,
+            waiterID: waiterID,
+            generation: requestedGeneration
+        )
+    }
+
+    private func waitForPreparation(
+        _ task: Task<Void, Never>,
+        waiterID: UUID,
+        generation requestedGeneration: UInt64
+    ) async {
         await withTaskCancellationHandler {
             await task.value
+            releasePreparationWaiter(
+                waiterID,
+                generation: requestedGeneration
+            )
         } onCancel: { [weak self] in
             Task { @MainActor in
-                guard let self,
-                      self.generation == requestedGeneration,
-                      self.meetingID == requestedMeetingID else { return }
-                self.stop(meetingID: requestedMeetingID)
+                self?.releasePreparationWaiter(
+                    waiterID,
+                    generation: requestedGeneration
+                )
             }
         }
     }
@@ -172,16 +206,42 @@ final class MeetingAudioPlayerController: MeetingPlaybackStopping {
     }
 
     func stop(meetingID requestedMeetingID: UUID? = nil) {
+        _ = cancelAndReset(meetingID: requestedMeetingID)
+    }
+
+    func stopAndWait(meetingID requestedMeetingID: UUID? = nil) async {
+        let targetMeetingID = requestedMeetingID ?? meetingID
+        _ = cancelAndReset(meetingID: requestedMeetingID)
+        let tasks: [Task<Void, Never>]
+        if let targetMeetingID {
+            tasks = Array(
+                quiescingPreparations[targetMeetingID, default: [:]].values
+            )
+        } else {
+            tasks = quiescingPreparations.values.flatMap { $0.values }
+        }
+        for task in tasks {
+            await task.value
+        }
+    }
+
+    @discardableResult
+    private func cancelAndReset(
+        meetingID requestedMeetingID: UUID?
+    ) -> Task<Void, Never>? {
         if let requestedMeetingID, requestedMeetingID != meetingID {
-            return
+            return nil
         }
         guard meetingID != nil || state != .idle || prepareTask != nil else {
-            return
+            return nil
         }
 
+        let task = prepareTask
+        let stoppedMeetingID = meetingID
         generation &+= 1
-        prepareTask?.cancel()
+        task?.cancel()
         prepareTask = nil
+        prepareWaiters.removeAll()
         engine.stop()
         meetingID = nil
         state = .idle
@@ -189,6 +249,13 @@ final class MeetingAudioPlayerController: MeetingPlaybackStopping {
         duration = 0
         waveform = []
         clearSeekingState()
+        if let task, let stoppedMeetingID {
+            registerQuiescingPreparation(
+                task,
+                meetingID: stoppedMeetingID
+            )
+        }
+        return task
     }
 
     private var canSeek: Bool {
@@ -206,11 +273,44 @@ final class MeetingAudioPlayerController: MeetingPlaybackStopping {
         guard meetingID != nil || prepareTask != nil || state != .idle else {
             return
         }
-        generation &+= 1
-        prepareTask?.cancel()
-        prepareTask = nil
-        engine.stop()
-        clearSeekingState()
+        _ = cancelAndReset(meetingID: nil)
+    }
+
+    private func releasePreparationWaiter(
+        _ waiterID: UUID,
+        generation requestedGeneration: UInt64
+    ) {
+        guard generation == requestedGeneration,
+              prepareWaiters.remove(waiterID) != nil else {
+            return
+        }
+        guard prepareWaiters.isEmpty, prepareTask != nil else { return }
+        stop(meetingID: meetingID)
+    }
+
+    private func registerQuiescingPreparation(
+        _ task: Task<Void, Never>,
+        meetingID: UUID
+    ) {
+        let token = UUID()
+        quiescingPreparations[meetingID, default: [:]][token] = task
+        Task { @MainActor [weak self] in
+            await task.value
+            self?.removeQuiescingPreparation(
+                token: token,
+                meetingID: meetingID
+            )
+        }
+    }
+
+    private func removeQuiescingPreparation(
+        token: UUID,
+        meetingID: UUID
+    ) {
+        quiescingPreparations[meetingID]?[token] = nil
+        if quiescingPreparations[meetingID]?.isEmpty == true {
+            quiescingPreparations[meetingID] = nil
+        }
     }
 
     private func performPreparation(
@@ -220,6 +320,7 @@ final class MeetingAudioPlayerController: MeetingPlaybackStopping {
         defer {
             if generation == requestedGeneration {
                 prepareTask = nil
+                prepareWaiters.removeAll()
             }
         }
 

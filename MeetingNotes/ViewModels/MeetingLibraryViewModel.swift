@@ -229,7 +229,7 @@ final class MeetingLibraryViewModel {
         setErrorPresentation()
         defer { deletingMeetingIDs.remove(id) }
 
-        playbackStopper.stop(meetingID: id)
+        await playbackStopper.stopAndWait(meetingID: id)
         do {
             try await fileDeleter.deleteMeetingDirectory(for: id)
             try repository.deleteMeeting(id: id)

@@ -308,6 +308,116 @@ final class MeetingAudioPlayerControllerTests: XCTestCase {
         XCTAssertEqual(engine.stopCallCount, 0)
     }
 
+    func testCancellingOneOfTwoSharedPrepareWaitersKeepsPreparationAlive() async {
+        let meetingID = UUID()
+        let sourceLoader = ControlledAudioSourceLoader(
+            sources: [meetingID: makeSource(meetingID: meetingID, duration: 11)]
+        )
+        await sourceLoader.block(meetingID)
+        let waveformLoader = ControlledWaveformLoader(
+            values: [meetingID: [0.2, 0.8]]
+        )
+        let engine = PlaybackEngineSpy()
+        let controller = makeController(
+            sourceLoader: sourceLoader,
+            waveformLoader: waveformLoader,
+            engine: engine
+        )
+
+        let first = Task { await controller.prepare(meetingID: meetingID) }
+        await sourceLoader.waitUntilStarted(meetingID)
+        let second = Task { await controller.prepare(meetingID: meetingID) }
+        await Task.yield()
+
+        first.cancel()
+        await Task.yield()
+
+        XCTAssertEqual(controller.state, .loading)
+        XCTAssertEqual(controller.meetingID, meetingID)
+        XCTAssertEqual(engine.stopCallCount, 0)
+
+        await sourceLoader.resume(meetingID)
+        await first.value
+        await second.value
+
+        XCTAssertEqual(controller.state, .ready)
+        XCTAssertEqual(controller.duration, 11, accuracy: 0.000_001)
+        XCTAssertEqual(controller.waveform, [0.2, 0.8])
+        let sourceLoadCount = await sourceLoader.loadCount(for: meetingID)
+        XCTAssertEqual(sourceLoadCount, 1)
+        XCTAssertEqual(engine.preparedMeetingIDs, [meetingID])
+        XCTAssertEqual(engine.stopCallCount, 0)
+    }
+
+    func testCancellingEverySharedPrepareWaiterCancelsAndResetsPreparation() async {
+        let meetingID = UUID()
+        let sourceLoader = ControlledAudioSourceLoader(
+            sources: [meetingID: makeSource(meetingID: meetingID, duration: 11)]
+        )
+        await sourceLoader.block(meetingID)
+        let engine = PlaybackEngineSpy()
+        let controller = makeController(
+            sourceLoader: sourceLoader,
+            waveformLoader: ControlledWaveformLoader(),
+            engine: engine
+        )
+
+        let first = Task { await controller.prepare(meetingID: meetingID) }
+        await sourceLoader.waitUntilStarted(meetingID)
+        let second = Task { await controller.prepare(meetingID: meetingID) }
+        await Task.yield()
+
+        first.cancel()
+        second.cancel()
+        await Task.yield()
+        await Task.yield()
+
+        assertIdle(controller)
+        XCTAssertEqual(engine.stopCallCount, 1)
+
+        await sourceLoader.resume(meetingID)
+        await first.value
+        await second.value
+
+        assertIdle(controller)
+        XCTAssertTrue(engine.preparedMeetingIDs.isEmpty)
+
+        await controller.prepare(meetingID: meetingID)
+
+        XCTAssertEqual(controller.state, .ready)
+        let sourceLoadCount = await sourceLoader.loadCount(for: meetingID)
+        XCTAssertEqual(sourceLoadCount, 2)
+        XCTAssertEqual(engine.preparedMeetingIDs, [meetingID])
+    }
+
+    func testFailedPreparationClearsSharedWaitersAndCanBeRetried() async {
+        let meetingID = UUID()
+        let sourceLoader = ControlledAudioSourceLoader(
+            sources: [meetingID: makeSource(meetingID: meetingID, duration: 13)]
+        )
+        let engine = PlaybackEngineSpy()
+        engine.prepareErrors[meetingID] = PlaybackTestError.audioPrepare
+        let controller = makeController(
+            sourceLoader: sourceLoader,
+            waveformLoader: ControlledWaveformLoader(),
+            engine: engine
+        )
+
+        await controller.prepare(meetingID: meetingID)
+        guard case .failed = controller.state else {
+            return XCTFail("Expected first preparation to fail")
+        }
+
+        engine.prepareErrors[meetingID] = nil
+        await controller.prepare(meetingID: meetingID)
+
+        XCTAssertEqual(controller.state, .ready)
+        XCTAssertEqual(controller.duration, 13, accuracy: 0.000_001)
+        let sourceLoadCount = await sourceLoader.loadCount(for: meetingID)
+        XCTAssertEqual(sourceLoadCount, 2)
+        XCTAssertEqual(engine.preparedMeetingIDs, [meetingID, meetingID])
+    }
+
     func testStopIgnoresUnrelatedMeetingAndMatchingOrNilStopFullyReset() async {
         let meetingID = UUID()
         let engine = PlaybackEngineSpy()
@@ -355,6 +465,133 @@ final class MeetingAudioPlayerControllerTests: XCTestCase {
 
         assertIdle(controller)
         XCTAssertTrue(engine.preparedMeetingIDs.isEmpty)
+        XCTAssertEqual(engine.stopCallCount, 1)
+    }
+
+    func testStopAndWaitResetsImmediatelyButWaitsForPreparationToQuiesce() async {
+        let meetingID = UUID()
+        let waveformLoader = ControlledWaveformLoader()
+        await waveformLoader.block(meetingID)
+        let engine = PlaybackEngineSpy()
+        let controller = makeController(
+            sourceLoader: ControlledAudioSourceLoader(
+                sources: [meetingID: makeSource(meetingID: meetingID)]
+            ),
+            waveformLoader: waveformLoader,
+            engine: engine
+        )
+        let completion = AsyncCompletionFlag()
+
+        let preparation = Task {
+            await controller.prepare(meetingID: meetingID)
+        }
+        await waveformLoader.waitUntilStarted(meetingID)
+        let shutdown = Task {
+            await controller.stopAndWait(meetingID: meetingID)
+            await completion.markCompleted()
+        }
+        await Task.yield()
+
+        assertIdle(controller)
+        XCTAssertEqual(engine.stopCallCount, 1)
+        let completedBeforeRelease = await completion.isCompleted()
+        XCTAssertFalse(completedBeforeRelease)
+
+        await waveformLoader.resume(meetingID)
+        await preparation.value
+        await shutdown.value
+
+        let completedAfterRelease = await completion.isCompleted()
+        XCTAssertTrue(completedAfterRelease)
+        assertIdle(controller)
+    }
+
+    func testStopAndWaitForUnrelatedMeetingIsImmediateNoOp() async {
+        let meetingID = UUID()
+        let engine = PlaybackEngineSpy()
+        let controller = makeController(
+            sources: [meetingID: makeSource(meetingID: meetingID)],
+            engine: engine
+        )
+        await controller.prepare(meetingID: meetingID)
+
+        await controller.stopAndWait(meetingID: UUID())
+
+        XCTAssertEqual(controller.meetingID, meetingID)
+        XCTAssertEqual(controller.state, .ready)
+        XCTAssertEqual(engine.stopCallCount, 0)
+    }
+
+    func testStopAndWaitJoinsPreparationAlreadyCancelledBySynchronousStop() async {
+        let meetingID = UUID()
+        let waveformLoader = ControlledWaveformLoader()
+        await waveformLoader.block(meetingID)
+        let controller = makeController(
+            sourceLoader: ControlledAudioSourceLoader(
+                sources: [meetingID: makeSource(meetingID: meetingID)]
+            ),
+            waveformLoader: waveformLoader
+        )
+        let completion = AsyncCompletionFlag()
+
+        let preparation = Task {
+            await controller.prepare(meetingID: meetingID)
+        }
+        await waveformLoader.waitUntilStarted(meetingID)
+        controller.stop(meetingID: meetingID)
+        let shutdown = Task {
+            await controller.stopAndWait(meetingID: meetingID)
+            await completion.markCompleted()
+        }
+        await Task.yield()
+
+        let completedBeforeRelease = await completion.isCompleted()
+        XCTAssertFalse(completedBeforeRelease)
+
+        await waveformLoader.resume(meetingID)
+        await preparation.value
+        await shutdown.value
+
+        let completedAfterRelease = await completion.isCompleted()
+        XCTAssertTrue(completedAfterRelease)
+        assertIdle(controller)
+    }
+
+    func testLateCancelledWaiterCannotStopNewGeneration() async {
+        let firstID = UUID()
+        let secondID = UUID()
+        let sourceLoader = ControlledAudioSourceLoader(sources: [
+            firstID: makeSource(meetingID: firstID, duration: 20),
+            secondID: makeSource(meetingID: secondID, duration: 7)
+        ])
+        await sourceLoader.block(firstID)
+        let engine = PlaybackEngineSpy()
+        let controller = makeController(
+            sourceLoader: sourceLoader,
+            waveformLoader: ControlledWaveformLoader(),
+            engine: engine
+        )
+
+        let first = Task { await controller.prepare(meetingID: firstID) }
+        await sourceLoader.waitUntilStarted(firstID)
+        first.cancel()
+        controller.stop(meetingID: firstID)
+        await controller.prepare(meetingID: secondID)
+        let oldShutdown = Task {
+            await controller.stopAndWait(meetingID: firstID)
+        }
+        await Task.yield()
+
+        XCTAssertEqual(controller.meetingID, secondID)
+        XCTAssertEqual(controller.state, .ready)
+        XCTAssertEqual(controller.duration, 7, accuracy: 0.000_001)
+
+        await sourceLoader.resume(firstID)
+        await first.value
+        await oldShutdown.value
+
+        XCTAssertEqual(controller.meetingID, secondID)
+        XCTAssertEqual(controller.state, .ready)
         XCTAssertEqual(engine.stopCallCount, 1)
     }
 
@@ -423,6 +660,65 @@ final class MeetingAudioPlayerControllerTests: XCTestCase {
         }
 
         XCTAssertTrue(player.currentItem?.asset === secondComposition)
+    }
+
+    func testLiveEngineEndObserverFiltersOldItemsAndIsRemovedOnStop() async throws {
+        let firstID = UUID()
+        let secondID = UUID()
+        let firstComposition = AVMutableComposition()
+        let secondComposition = AVMutableComposition()
+        let builder = ControlledCompositionBuilder(compositions: [
+            firstID: firstComposition,
+            secondID: secondComposition
+        ])
+        let player = AVPlayer()
+        let recorder = EndCallbackRecorder()
+        let engine = AVFoundationMeetingAudioPlaybackEngine(
+            player: player,
+            compositionBuilder: { source in
+                try await builder.build(for: source)
+            }
+        )
+
+        _ = try await engine.prepare(
+            source: makeSource(meetingID: firstID),
+            onPeriodicTime: { _ in },
+            onEnd: { recorder.recordFirst() }
+        )
+        let firstItem = try XCTUnwrap(player.currentItem)
+        _ = try await engine.prepare(
+            source: makeSource(meetingID: secondID),
+            onPeriodicTime: { _ in },
+            onEnd: { recorder.recordSecond() }
+        )
+        let secondItem = try XCTUnwrap(player.currentItem)
+
+        NotificationCenter.default.post(
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: firstItem
+        )
+        NotificationCenter.default.post(
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: AVPlayerItem(asset: AVMutableComposition())
+        )
+        await Task.yield()
+        XCTAssertEqual(recorder.firstCount, 0)
+        XCTAssertEqual(recorder.secondCount, 0)
+
+        NotificationCenter.default.post(
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: secondItem
+        )
+        await Task.yield()
+        XCTAssertEqual(recorder.secondCount, 1)
+
+        engine.stop()
+        NotificationCenter.default.post(
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: secondItem
+        )
+        await Task.yield()
+        XCTAssertEqual(recorder.secondCount, 1)
     }
 
     private func makeController(
@@ -541,6 +837,32 @@ final class MeetingAudioPlayerControllerTests: XCTestCase {
 private enum PlaybackTestError: Error {
     case audioPrepare
     case waveform
+}
+
+private actor AsyncCompletionFlag {
+    private var completed = false
+
+    func markCompleted() {
+        completed = true
+    }
+
+    func isCompleted() -> Bool {
+        completed
+    }
+}
+
+@MainActor
+private final class EndCallbackRecorder {
+    private(set) var firstCount = 0
+    private(set) var secondCount = 0
+
+    func recordFirst() {
+        firstCount += 1
+    }
+
+    func recordSecond() {
+        secondCount += 1
+    }
 }
 
 @MainActor

@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import XCTest
 @testable import MeetingNotes
@@ -411,6 +412,86 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         XCTAssertTrue(playback.stoppedMeetingIDs.isEmpty)
     }
 
+    func testDeleteWaitsForWaveformCacheWriterBeforeRemovingDirectory() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "MeetingDeleteQuiescenceTests-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fileStore = MeetingFileStore(rootURL: root)
+        let meeting = makeMeeting(seconds: 100)
+        let meetingDirectory = try await makeAudioFixture(
+            fileStore: fileStore,
+            meetingID: meeting.id
+        )
+        let source = try await MeetingAudioSourceLoader(fileStore: fileStore)
+            .load(meetingID: meeting.id)
+        let events = DeletionEventRecorder()
+        let cacheWriter = BlockingRecreatingWaveformCacheWriter(
+            fileStore: fileStore,
+            events: events
+        )
+        let analyzer = WaveformAnalyzer(
+            fileStore: fileStore,
+            cacheWriter: { snapshot, meetingID in
+                try await cacheWriter.write(snapshot, meetingID: meetingID)
+            }
+        )
+        let engine = QuiescencePlaybackEngineSpy()
+        let controller = MeetingAudioPlayerController(
+            sourceLoader: FixedMeetingAudioSourceLoader(source: source),
+            waveformLoader: analyzer,
+            engine: engine,
+            waveformBucketCount: 8
+        )
+        let fileDeleter = TrackingMeetingFileDeleter(
+            fileStore: fileStore,
+            events: events
+        )
+        let repository = OrderedDeletionRepositorySpy(
+            meetings: [meeting],
+            events: events
+        )
+        let viewModel = MeetingLibraryViewModel(
+            repository: repository,
+            fileDeleter: fileDeleter,
+            starter: MeetingStarterSpy(),
+            titleUpdater: TitleUpdaterSpy(),
+            operationGate: MeetingOperationGate(),
+            playbackStopper: controller,
+            systemRequirements: SystemRequirementsStub.supported
+        )
+        viewModel.load()
+
+        let preparation = Task {
+            await controller.prepare(meetingID: meeting.id)
+        }
+        await cacheWriter.waitUntilStarted()
+        let deletion = Task {
+            await viewModel.deleteMeeting(id: meeting.id)
+        }
+        await engine.waitUntilStopped()
+        let deletedBeforeCacheRelease = await fileDeleter.hasStarted()
+
+        XCTAssertFalse(deletedBeforeCacheRelease)
+        XCTAssertTrue(repository.deletedIDs.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: meetingDirectory.path))
+
+        await cacheWriter.release()
+        await preparation.value
+        await deletion.value
+
+        XCTAssertEqual(events.values, [
+            .cacheWrite(meeting.id),
+            .deleteFiles(meeting.id),
+            .deleteRepository(meeting.id)
+        ])
+        XCTAssertEqual(repository.deletedIDs, [meeting.id])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: meetingDirectory.path))
+        await Task.yield()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: meetingDirectory.path))
+    }
+
     func testStartEntriesPassOfflineAndOnlineModesToCoordinator() async {
         let repository = LibraryRepositorySpy()
         let starter = MeetingStarterSpy()
@@ -719,6 +800,60 @@ final class MeetingLibraryViewModelTests: XCTestCase {
             updatedAt: Date(timeIntervalSince1970: seconds)
         )
     }
+
+    private func makeAudioFixture(
+        fileStore: MeetingFileStore,
+        meetingID: UUID
+    ) async throws -> URL {
+        let directory = try await fileStore.prepareMeetingDirectory(for: meetingID)
+        let fileName = "segment-0001.caf"
+        let samples = (0..<4_096).map { index in
+            Float(sin(Double(index) * 0.05) * 0.4)
+        }
+        try writeCAF(
+            samples: samples,
+            to: directory.appendingPathComponent(fileName)
+        )
+        try await fileStore.saveManifest(
+            AudioSegmentManifest(segments: [
+                .init(
+                    fileName: fileName,
+                    startTime: 0,
+                    endTime: Double(samples.count) / 16_000,
+                    frameCount: Int64(samples.count),
+                    isComplete: true
+                )
+            ]),
+            meetingID: meetingID
+        )
+        return directory
+    }
+
+    private func writeCAF(samples: [Float], to url: URL) throws {
+        let format = try XCTUnwrap(AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ))
+        let file = try AVAudioFile(
+            forWriting: url,
+            settings: format.settings,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(samples.count)
+        ))
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        let channel = try XCTUnwrap(buffer.floatChannelData?[0])
+        for (index, sample) in samples.enumerated() {
+            channel[index] = sample
+        }
+        try file.write(from: buffer)
+        file.close()
+    }
 }
 
 @MainActor
@@ -822,9 +957,117 @@ private enum TestFailure: Error {
 }
 
 private enum DeletionEvent: Equatable {
+    case cacheWrite(UUID)
     case stop(UUID)
     case deleteFiles(UUID)
     case deleteRepository(UUID)
+}
+
+private struct FixedMeetingAudioSourceLoader: MeetingAudioSourceLoading {
+    let source: MeetingAudioSource
+
+    func load(meetingID: UUID) async throws -> MeetingAudioSource {
+        guard source.meetingID == meetingID else {
+            throw MeetingAudioSourceLoaderError.manifestNotFound
+        }
+        return source
+    }
+}
+
+private actor BlockingRecreatingWaveformCacheWriter {
+    private let fileStore: MeetingFileStore
+    private let events: DeletionEventRecorder
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    init(fileStore: MeetingFileStore, events: DeletionEventRecorder) {
+        self.fileStore = fileStore
+        self.events = events
+    }
+
+    func write(
+        _ snapshot: WaveformSnapshot,
+        meetingID: UUID
+    ) async throws {
+        started = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+        }
+        try await fileStore.saveWaveformSnapshot(
+            snapshot,
+            meetingID: meetingID
+        )
+        events.append(.cacheWrite(meetingID))
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+private actor TrackingMeetingFileDeleter: MeetingFileDeleting {
+    private let fileStore: MeetingFileStore
+    private let events: DeletionEventRecorder
+    private var started = false
+
+    init(fileStore: MeetingFileStore, events: DeletionEventRecorder) {
+        self.fileStore = fileStore
+        self.events = events
+    }
+
+    func deleteMeetingDirectory(for meetingID: UUID) async throws {
+        started = true
+        events.append(.deleteFiles(meetingID))
+        try await fileStore.deleteMeetingDirectory(for: meetingID)
+    }
+
+    func hasStarted() -> Bool {
+        started
+    }
+}
+
+@MainActor
+private final class QuiescencePlaybackEngineSpy: MeetingAudioPlaybackEngine {
+    private var stopCount = 0
+    private var stopWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func prepare(
+        source: MeetingAudioSource,
+        onPeriodicTime: @escaping @MainActor @Sendable (TimeInterval) -> Void,
+        onEnd: @escaping @MainActor @Sendable () -> Void
+    ) async throws -> TimeInterval {
+        _ = onPeriodicTime
+        _ = onEnd
+        return source.duration
+    }
+
+    func play() {}
+    func pause() {}
+    func seek(to time: TimeInterval) { _ = time }
+
+    func stop() {
+        stopCount += 1
+        stopWaiters.forEach { $0.resume() }
+        stopWaiters.removeAll()
+    }
+
+    func waitUntilStopped() async {
+        if stopCount > 0 { return }
+        await withCheckedContinuation { continuation in
+            stopWaiters.append(continuation)
+        }
+    }
 }
 
 private final class DeletionEventRecorder: @unchecked Sendable {
@@ -849,7 +1092,7 @@ private final class PlaybackStopperSpy: MeetingPlaybackStopping {
         self.events = events
     }
 
-    func stop(meetingID: UUID?) {
+    func stopAndWait(meetingID: UUID?) async {
         guard let meetingID else { return }
         stoppedMeetingIDs.append(meetingID)
         events?.append(.stop(meetingID))
