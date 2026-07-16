@@ -80,15 +80,34 @@ struct CapturePermissionClient: Sendable {
     }
 }
 
-final class LiveCapturePermissionSystem: CapturePermissionSystem, @unchecked Sendable {
-    private enum Key {
-        static let requestedScreenRecording = "permissions.requestedScreenRecording"
-    }
+final class LiveCapturePermissionSystem: CapturePermissionSystem, Sendable {
+    private let microphoneStatus: @Sendable () -> AVAuthorizationStatus
+    private let microphoneRequest: @Sendable () async -> Bool
+    private let screenPreflight: @Sendable () -> Bool
+    private let screenRequest: @Sendable () -> Bool
 
-    private let defaults: UserDefaults
-
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
+    init(
+        microphoneStatus: @escaping @Sendable () -> AVAuthorizationStatus = {
+            AVCaptureDevice.authorizationStatus(for: .audio)
+        },
+        microphoneRequest: @escaping @Sendable () async -> Bool = {
+            await withCheckedContinuation { continuation in
+                AVCaptureDevice.requestAccess(for: .audio) { granted in
+                    continuation.resume(returning: granted)
+                }
+            }
+        },
+        screenPreflight: @escaping @Sendable () -> Bool = {
+            CGPreflightScreenCaptureAccess()
+        },
+        screenRequest: @escaping @Sendable () -> Bool = {
+            CGRequestScreenCaptureAccess()
+        }
+    ) {
+        self.microphoneStatus = microphoneStatus
+        self.microphoneRequest = microphoneRequest
+        self.screenPreflight = screenPreflight
+        self.screenRequest = screenRequest
     }
 
     func status(
@@ -96,16 +115,9 @@ final class LiveCapturePermissionSystem: CapturePermissionSystem, @unchecked Sen
     ) async -> CapturePermissionStatus {
         switch permission {
         case .microphone:
-            return CapturePermissionStatus(
-                AVCaptureDevice.authorizationStatus(for: .audio)
-            )
+            return CapturePermissionStatus(microphoneStatus())
         case .screenRecording:
-            if CGPreflightScreenCaptureAccess() {
-                return .authorized
-            }
-            return defaults.bool(forKey: Key.requestedScreenRecording)
-                ? .denied
-                : .notDetermined
+            return screenPreflight() ? .authorized : .notDetermined
         }
     }
 
@@ -114,15 +126,10 @@ final class LiveCapturePermissionSystem: CapturePermissionSystem, @unchecked Sen
     ) async -> CapturePermissionStatus {
         switch permission {
         case .microphone:
-            let granted = await withCheckedContinuation { continuation in
-                AVCaptureDevice.requestAccess(for: .audio) { granted in
-                    continuation.resume(returning: granted)
-                }
-            }
+            let granted = await microphoneRequest()
             return granted ? .authorized : .denied
         case .screenRecording:
-            let granted = CGRequestScreenCaptureAccess()
-            defaults.set(true, forKey: Key.requestedScreenRecording)
+            let granted = screenRequest()
             return granted ? .authorized : .denied
         }
     }

@@ -104,6 +104,21 @@ struct RootView: View {
                             .controlSize(.small)
                         }
                     }
+                    if !viewModel.permissionRepairPermissions.isEmpty {
+                        Button {
+                            Task {
+                                await viewModel.retryLastStart()
+                            }
+                        } label: {
+                            Label("重新检测", systemImage: "arrow.clockwise")
+                        }
+                        .controlSize(.small)
+                        .disabled(
+                            viewModel.isStarting
+                                || viewModel.lastFailedStartMode == nil
+                        )
+                        .accessibilityIdentifier("permission.recheck")
+                    }
                     Button("关闭") {
                         viewModel.dismissError()
                     }

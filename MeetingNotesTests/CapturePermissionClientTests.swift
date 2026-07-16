@@ -35,6 +35,123 @@ final class CapturePermissionClientTests: XCTestCase {
             [.microphone, .screenRecording]
         )
     }
+
+    func testLiveScreenPermissionRemainsRetryableAfterDeniedRequest() async {
+        let calls = PermissionInvocationRecorder()
+        let system = LiveCapturePermissionSystem(
+            microphoneStatus: { .authorized },
+            microphoneRequest: { true },
+            screenPreflight: {
+                calls.recordScreenPreflight()
+                return false
+            },
+            screenRequest: {
+                calls.recordScreenRequest()
+                return false
+            }
+        )
+
+        let firstStatus = await system.status(for: .screenRecording)
+        let firstRequest = await system.requestAccess(for: .screenRecording)
+        let secondStatus = await system.status(for: .screenRecording)
+        let secondRequest = await system.requestAccess(for: .screenRecording)
+
+        XCTAssertEqual(firstStatus, .notDetermined)
+        XCTAssertEqual(firstRequest, .denied)
+        XCTAssertEqual(secondStatus, .notDetermined)
+        XCTAssertEqual(secondRequest, .denied)
+        XCTAssertEqual(calls.screenPreflightCount, 2)
+        XCTAssertEqual(calls.screenRequestCount, 2)
+    }
+
+    func testEveryOnlineRetryRequestsScreenPermissionAgain() async {
+        let calls = PermissionInvocationRecorder()
+        let system = LiveCapturePermissionSystem(
+            microphoneStatus: { .authorized },
+            microphoneRequest: { true },
+            screenPreflight: {
+                calls.recordScreenPreflight()
+                return false
+            },
+            screenRequest: {
+                calls.recordScreenRequest()
+                return false
+            }
+        )
+        let client = CapturePermissionClient(system: system)
+
+        _ = await client.requestRequiredPermissions(for: .online)
+        _ = await client.requestRequiredPermissions(for: .online)
+
+        XCTAssertEqual(calls.screenPreflightCount, 2)
+        XCTAssertEqual(calls.screenRequestCount, 2)
+    }
+
+    func testLiveOfflineRequestNeverTouchesScreenPermission() async {
+        let calls = PermissionInvocationRecorder()
+        let system = LiveCapturePermissionSystem(
+            microphoneStatus: {
+                calls.recordMicrophoneStatus()
+                return .notDetermined
+            },
+            microphoneRequest: {
+                calls.recordMicrophoneRequest()
+                return true
+            },
+            screenPreflight: {
+                calls.recordScreenPreflight()
+                return false
+            },
+            screenRequest: {
+                calls.recordScreenRequest()
+                return false
+            }
+        )
+        let client = CapturePermissionClient(system: system)
+
+        let statuses = await client.requestRequiredPermissions(for: .offline)
+
+        XCTAssertEqual(statuses, [.microphone: .authorized])
+        XCTAssertEqual(calls.microphoneStatusCount, 1)
+        XCTAssertEqual(calls.microphoneRequestCount, 1)
+        XCTAssertEqual(calls.screenPreflightCount, 0)
+        XCTAssertEqual(calls.screenRequestCount, 0)
+    }
+}
+
+private final class PermissionInvocationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var microphoneStatuses = 0
+    private var microphoneRequests = 0
+    private var screenPreflights = 0
+    private var screenRequests = 0
+
+    var microphoneStatusCount: Int { withLock { microphoneStatuses } }
+    var microphoneRequestCount: Int { withLock { microphoneRequests } }
+    var screenPreflightCount: Int { withLock { screenPreflights } }
+    var screenRequestCount: Int { withLock { screenRequests } }
+
+    func recordMicrophoneStatus() {
+        withLock { microphoneStatuses += 1 }
+    }
+
+    func recordMicrophoneRequest() {
+        withLock { microphoneRequests += 1 }
+    }
+
+    func recordScreenPreflight() {
+        withLock { screenPreflights += 1 }
+    }
+
+    func recordScreenRequest() {
+        withLock { screenRequests += 1 }
+    }
+
+    private func withLock<T>(_ operation: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return operation()
+    }
 }
 
 private actor RecordingPermissionSystem: CapturePermissionSystem {

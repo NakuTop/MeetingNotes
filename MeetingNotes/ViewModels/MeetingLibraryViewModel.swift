@@ -42,6 +42,7 @@ final class MeetingLibraryViewModel {
     private(set) var renamingMeetingIDs: Set<UUID> = []
     private(set) var errorMessage: String?
     private(set) var permissionRepairPermissions: [CapturePermission] = []
+    private(set) var lastFailedStartMode: MeetingMode?
     private(set) var systemRequirementsSnapshot: SystemRequirementsSnapshot
 
     init(
@@ -147,6 +148,7 @@ final class MeetingLibraryViewModel {
     func startMeeting(mode: MeetingMode) async {
         guard !isStarting else { return }
         permissionRepairPermissions = []
+        lastFailedStartMode = nil
         refreshSystemRequirements()
         guard systemRequirementsSnapshot.isSupportedPlatform else {
             errorMessage = "仅支持 macOS 15 或更高版本的 Apple Silicon Mac。"
@@ -170,9 +172,18 @@ final class MeetingLibraryViewModel {
                 permissionRepairPermissions = permissions.sorted {
                     Self.permissionRank($0) < Self.permissionRank($1)
                 }
+                lastFailedStartMode = mode
             }
             errorMessage = Self.message(for: error, operation: .start)
         }
+    }
+
+    func retryLastStart() async {
+        guard !isStarting, let mode = lastFailedStartMode else { return }
+        errorMessage = nil
+        permissionRepairPermissions = []
+        lastFailedStartMode = nil
+        await startMeeting(mode: mode)
     }
 
     func deleteMeeting(id: UUID) async {
@@ -246,6 +257,7 @@ final class MeetingLibraryViewModel {
     func dismissError() {
         errorMessage = nil
         permissionRepairPermissions = []
+        lastFailedStartMode = nil
     }
 
     func reportControlFailure(_ error: Error) {
@@ -274,13 +286,18 @@ final class MeetingLibraryViewModel {
         operation: Operation
     ) -> String {
         if case let MeetingCoordinatorError.permissionDenied(permissions) = error {
-            let names = permissions.map {
+            let names = permissions.sorted {
+                permissionRank($0) < permissionRank($1)
+            }.map {
                 switch $0 {
                 case .microphone: "麦克风"
                 case .screenRecording: "屏幕与系统音频录制"
                 }
-            }.sorted().joined(separator: "、")
-            return "缺少\(names)权限，请在系统设置中允许后重试。"
+            }.joined(separator: "、")
+            let relaunchHint = permissions.contains(.screenRecording)
+                ? "屏幕录制权限更改后，macOS 可能要求完全退出并重新打开 App。"
+                : ""
+            return "缺少\(names)权限，请在系统设置中允许后重试。\(relaunchHint)"
         }
 
         switch operation {

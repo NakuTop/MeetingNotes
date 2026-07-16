@@ -401,6 +401,72 @@ final class MeetingLibraryViewModelTests: XCTestCase {
             viewModel.permissionRepairPermissions,
             [.microphone, .screenRecording]
         )
+        XCTAssertEqual(viewModel.lastFailedStartMode, .online)
+        XCTAssertEqual(
+            viewModel.errorMessage,
+            "缺少麦克风、屏幕与系统音频录制权限，请在系统设置中允许后重试。屏幕录制权限更改后，macOS 可能要求完全退出并重新打开 App。"
+        )
+    }
+
+    func testRetryLastStartUsesSameFailedModeOnceAndClearsRepairOnSuccess() async {
+        let meetingID = UUID()
+        let starter = SequencedMeetingStarterSpy(
+            outcomes: [
+                .failure(.permissionDenied([.screenRecording])),
+                .success(meetingID)
+            ]
+        )
+        let viewModel = makeViewModel(starter: starter)
+
+        await viewModel.startMeeting(mode: .online)
+        XCTAssertEqual(viewModel.lastFailedStartMode, .online)
+        XCTAssertEqual(viewModel.permissionRepairPermissions, [.screenRecording])
+
+        await viewModel.retryLastStart()
+
+        let startedModes = await starter.modes()
+        XCTAssertEqual(startedModes, [.online, .online])
+        XCTAssertNil(viewModel.lastFailedStartMode)
+        XCTAssertTrue(viewModel.permissionRepairPermissions.isEmpty)
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertEqual(viewModel.selectedMeetingID, meetingID)
+    }
+
+    func testRetryLastStartWithoutFailedModeIsNoOp() async {
+        let starter = MeetingStarterSpy()
+        let viewModel = makeViewModel(starter: starter)
+
+        await viewModel.retryLastStart()
+
+        let startedModes = await starter.modes()
+        XCTAssertTrue(startedModes.isEmpty)
+        XCTAssertFalse(viewModel.isStarting)
+    }
+
+    func testRetryClearsStaleRepairImmediatelyAndRejectsReentrantRetry() async {
+        let starter = BlockingRetryMeetingStarterSpy()
+        let viewModel = makeViewModel(starter: starter)
+        await viewModel.startMeeting(mode: .online)
+
+        let retry = Task {
+            await viewModel.retryLastStart()
+        }
+        await starter.waitUntilRetryStarted()
+
+        XCTAssertTrue(viewModel.isStarting)
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertTrue(viewModel.permissionRepairPermissions.isEmpty)
+        XCTAssertNil(viewModel.lastFailedStartMode)
+
+        await viewModel.retryLastStart()
+        let startedModes = await starter.modes()
+        XCTAssertEqual(startedModes, [.online, .online])
+
+        await starter.finishRetry()
+        await retry.value
+
+        XCTAssertFalse(viewModel.isStarting)
+        XCTAssertNil(viewModel.lastFailedStartMode)
     }
 
     func testSummaryActionIsDisabledBeforeReady() {
@@ -635,6 +701,70 @@ private actor MeetingStarterSpy: MeetingStarting {
         if let error { throw error }
         startedModes.append(mode)
         return meetingID
+    }
+
+    func modes() -> [MeetingMode] {
+        startedModes
+    }
+}
+
+private actor SequencedMeetingStarterSpy: MeetingStarting {
+    private var outcomes: [Result<UUID, MeetingCoordinatorError>]
+    private var startedModes: [MeetingMode] = []
+
+    init(outcomes: [Result<UUID, MeetingCoordinatorError>]) {
+        self.outcomes = outcomes
+    }
+
+    func start(mode: MeetingMode) async throws -> UUID {
+        startedModes.append(mode)
+        guard !outcomes.isEmpty else {
+            throw MeetingCoordinatorError.sessionUnavailable
+        }
+        switch outcomes.removeFirst() {
+        case let .success(meetingID):
+            return meetingID
+        case let .failure(error):
+            throw error
+        }
+    }
+
+    func modes() -> [MeetingMode] {
+        startedModes
+    }
+}
+
+private actor BlockingRetryMeetingStarterSpy: MeetingStarting {
+    private let meetingID = UUID()
+    private var startedModes: [MeetingMode] = []
+    private var retryStarted = false
+    private var retryStartWaiters: [CheckedContinuation<Void, Never>] = []
+    private var retryFinishContinuation: CheckedContinuation<Void, Never>?
+
+    func start(mode: MeetingMode) async throws -> UUID {
+        startedModes.append(mode)
+        if startedModes.count == 1 {
+            throw MeetingCoordinatorError.permissionDenied([.screenRecording])
+        }
+        retryStarted = true
+        retryStartWaiters.forEach { $0.resume() }
+        retryStartWaiters.removeAll()
+        await withCheckedContinuation { continuation in
+            retryFinishContinuation = continuation
+        }
+        return meetingID
+    }
+
+    func waitUntilRetryStarted() async {
+        if retryStarted { return }
+        await withCheckedContinuation { continuation in
+            retryStartWaiters.append(continuation)
+        }
+    }
+
+    func finishRetry() {
+        retryFinishContinuation?.resume()
+        retryFinishContinuation = nil
     }
 
     func modes() -> [MeetingMode] {
