@@ -1,6 +1,58 @@
 import Foundation
 @preconcurrency import WhisperKit
 
+enum WhisperDecodingPolicy {
+    static var options: DecodingOptions {
+        DecodingOptions(
+            task: .transcribe,
+            language: nil,
+            detectLanguage: true,
+            skipSpecialTokens: true
+        )
+    }
+}
+
+struct WhisperTranscriptSegment: Equatable, Sendable {
+    let start: TimeInterval
+    let end: TimeInterval
+    let text: String
+}
+
+enum WhisperTranscriptDraftBuilder {
+    static func makeDrafts(
+        resultText: String,
+        segments: [WhisperTranscriptSegment],
+        sampleCount: Int,
+        startingAt: TimeInterval
+    ) -> [TranscriptDraft] {
+        if segments.isEmpty {
+            guard let text = TranscriptTextSanitizer.nonEmpty(resultText) else {
+                return []
+            }
+            return [
+                TranscriptDraft(
+                    startTime: startingAt,
+                    endTime: startingAt
+                        + Double(sampleCount)
+                        / WhisperKitTranscriptionService.sampleRate,
+                    text: text
+                )
+            ]
+        }
+
+        return segments.compactMap { segment in
+            guard let text = TranscriptTextSanitizer.nonEmpty(segment.text) else {
+                return nil
+            }
+            return TranscriptDraft(
+                startTime: startingAt + segment.start,
+                endTime: startingAt + segment.end,
+                text: text
+            )
+        }
+    }
+}
+
 actor WhisperKitTranscriptionService:
     TranscriptionService,
     TranscriptionModelPreparing {
@@ -52,39 +104,26 @@ actor WhisperKitTranscriptionService:
             return []
         }
 
-        let results = try await whisperKit.transcribe(audioArray: samples)
+        let results = try await whisperKit.transcribe(
+            audioArray: samples,
+            decodeOptions: WhisperDecodingPolicy.options
+        )
         var drafts: [TranscriptDraft] = []
         for result in results {
-            if result.segments.isEmpty {
-                let text = result.text.trimmingCharacters(
-                    in: .whitespacesAndNewlines
-                )
-                if !text.isEmpty {
-                    drafts.append(
-                        TranscriptDraft(
-                            startTime: startingAt,
-                            endTime: startingAt
-                                + Double(samples.count) / Self.sampleRate,
-                            text: text
+            drafts.append(
+                contentsOf: WhisperTranscriptDraftBuilder.makeDrafts(
+                    resultText: result.text,
+                    segments: result.segments.map {
+                        WhisperTranscriptSegment(
+                            start: Double($0.start),
+                            end: Double($0.end),
+                            text: $0.text
                         )
-                    )
-                }
-                continue
-            }
-
-            drafts.append(contentsOf: result.segments.compactMap { segment in
-                let text = segment.text.trimmingCharacters(
-                    in: .whitespacesAndNewlines
+                    },
+                    sampleCount: samples.count,
+                    startingAt: startingAt
                 )
-                guard !text.isEmpty else {
-                    return nil
-                }
-                return TranscriptDraft(
-                    startTime: startingAt + Double(segment.start),
-                    endTime: startingAt + Double(segment.end),
-                    text: text
-                )
-            })
+            )
         }
         return TranscriptMerger().merge(drafts)
     }
