@@ -1,8 +1,22 @@
+import Darwin
 import Foundation
 
 enum MeetingFileStoreError: Error, Equatable, Sendable {
     case invalidRelativePath(String)
     case manifestNotFound(UUID)
+    case segmentNotFound
+    case segmentIdentityChanged
+}
+
+struct MeetingRecordingFileIdentity: Equatable, Sendable {
+    let deviceID: UInt64
+    let inodeNumber: UInt64
+}
+
+struct ResolvedMeetingRecordingSegment: Equatable, Sendable {
+    let url: URL
+    let fileIdentity: MeetingRecordingFileIdentity
+    let meetingDirectoryIdentity: MeetingRecordingFileIdentity
 }
 
 actor MeetingFileStore {
@@ -80,6 +94,13 @@ actor MeetingFileStore {
     }
 
     func resolveSegmentURL(meetingID: UUID, fileName: String) throws -> URL {
+        try resolveSegment(meetingID: meetingID, fileName: fileName).url
+    }
+
+    func resolveSegment(
+        meetingID: UUID,
+        fileName: String
+    ) throws -> ResolvedMeetingRecordingSegment {
         let path = fileName as NSString
         guard !fileName.isEmpty,
               !path.isAbsolutePath,
@@ -93,18 +114,55 @@ actor MeetingFileStore {
         let expectedMeetingDirectory = rootURL
             .appendingPathComponent(meetingID.uuidString)
             .standardizedFileURL
-        let meetingDirectory = try resolve(relativePath: meetingID.uuidString)
-        guard meetingDirectory.path == expectedMeetingDirectory.path else {
-            throw MeetingFileStoreError.invalidRelativePath(fileName)
-        }
-        let segmentURL = try resolve(
-            relativePath: "\(meetingID.uuidString)/\(fileName)"
+        let meetingIdentity = try identity(
+            at: expectedMeetingDirectory,
+            expectedFileType: mode_t(S_IFDIR),
+            missingError: .segmentNotFound,
+            invalidError: .invalidRelativePath(fileName)
         )
-        guard segmentURL.deletingLastPathComponent().path
-                == expectedMeetingDirectory.path else {
-            throw MeetingFileStoreError.invalidRelativePath(fileName)
+        let segmentURL = expectedMeetingDirectory
+            .appendingPathComponent(fileName)
+            .standardizedFileURL
+        let fileIdentity = try identity(
+            at: segmentURL,
+            expectedFileType: mode_t(S_IFREG),
+            missingError: .segmentNotFound,
+            invalidError: .invalidRelativePath(fileName)
+        )
+        return ResolvedMeetingRecordingSegment(
+            url: segmentURL,
+            fileIdentity: fileIdentity,
+            meetingDirectoryIdentity: meetingIdentity
+        )
+    }
+
+    func confirmIdentity(
+        of segment: ResolvedMeetingRecordingSegment
+    ) throws {
+        let directoryURL = segment.url.deletingLastPathComponent()
+        let currentDirectoryIdentity: MeetingRecordingFileIdentity
+        let currentFileIdentity: MeetingRecordingFileIdentity
+        do {
+            currentDirectoryIdentity = try identity(
+                at: directoryURL,
+                expectedFileType: mode_t(S_IFDIR),
+                missingError: .segmentIdentityChanged,
+                invalidError: .segmentIdentityChanged
+            )
+            currentFileIdentity = try identity(
+                at: segment.url,
+                expectedFileType: mode_t(S_IFREG),
+                missingError: .segmentIdentityChanged,
+                invalidError: .segmentIdentityChanged
+            )
+        } catch {
+            throw MeetingFileStoreError.segmentIdentityChanged
         }
-        return segmentURL
+
+        guard currentDirectoryIdentity == segment.meetingDirectoryIdentity,
+              currentFileIdentity == segment.fileIdentity else {
+            throw MeetingFileStoreError.segmentIdentityChanged
+        }
     }
 
     func resolve(relativePath: String) throws -> URL {
@@ -149,5 +207,35 @@ actor MeetingFileStore {
 
     private func isWithinRoot(_ url: URL) -> Bool {
         url.path == rootURL.path || url.path.hasPrefix(rootURL.path + "/")
+    }
+
+    private func identity(
+        at url: URL,
+        expectedFileType: mode_t,
+        missingError: MeetingFileStoreError,
+        invalidError: MeetingFileStoreError
+    ) throws -> MeetingRecordingFileIdentity {
+        var information = stat()
+        let status = url.withUnsafeFileSystemRepresentation { path in
+            guard let path else {
+                return Int32(-1)
+            }
+            return Darwin.lstat(path, &information)
+        }
+        guard status == 0 else {
+            if errno == ENOENT || errno == ENOTDIR {
+                throw missingError
+            }
+            throw invalidError
+        }
+
+        let actualFileType = information.st_mode & mode_t(S_IFMT)
+        guard actualFileType == expectedFileType else {
+            throw invalidError
+        }
+        return MeetingRecordingFileIdentity(
+            deviceID: UInt64(bitPattern: Int64(information.st_dev)),
+            inodeNumber: UInt64(information.st_ino)
+        )
     }
 }

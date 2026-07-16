@@ -29,6 +29,8 @@ enum MeetingAudioSourceLoaderError: Error, Equatable, Sendable {
     case invalidSegmentPath(index: Int)
     case segmentFileMissing(index: Int)
     case unreadableSegment(index: Int)
+    case incompleteSegmentData(index: Int)
+    case segmentIdentityChanged(index: Int)
     case segmentSampleRateMismatch(index: Int, expected: Double, actual: Double)
     case segmentChannelCountMismatch(index: Int, expected: Int, actual: Int)
     case segmentFrameCountMismatch(index: Int, expected: Int64, actual: Int64)
@@ -57,6 +59,10 @@ extension MeetingAudioSourceLoaderError: LocalizedError {
             "该会议的部分录音文件已丢失。"
         case .unreadableSegment:
             "该会议的部分录音无法读取。"
+        case .incompleteSegmentData:
+            "该会议的部分录音数据不完整。"
+        case .segmentIdentityChanged:
+            "该会议的录音文件在读取时发生了变化。"
         case .segmentSampleRateMismatch,
              .segmentChannelCountMismatch,
              .segmentFrameCountMismatch:
@@ -66,15 +72,17 @@ extension MeetingAudioSourceLoaderError: LocalizedError {
 }
 
 actor MeetingAudioSourceLoader {
+    typealias BeforeOpeningSegment = @Sendable (URL, Int) async throws -> Void
+
     private let fileStore: MeetingFileStore
-    private let fileManager: FileManager
+    private let beforeOpeningSegment: BeforeOpeningSegment
 
     init(
         fileStore: MeetingFileStore,
-        fileManager: FileManager = .default
+        beforeOpeningSegment: @escaping BeforeOpeningSegment = { _, _ in }
     ) {
         self.fileStore = fileStore
-        self.fileManager = fileManager
+        self.beforeOpeningSegment = beforeOpeningSegment
     }
 
     func load(meetingID: UUID) async throws -> MeetingAudioSource {
@@ -113,26 +121,34 @@ actor MeetingAudioSourceLoader {
         segmentURLs.reserveCapacity(manifest.segments.count)
 
         for (index, segment) in manifest.segments.enumerated() {
-            let url: URL
+            let resolvedSegment: ResolvedMeetingRecordingSegment
             do {
-                url = try await fileStore.resolveSegmentURL(
+                resolvedSegment = try await fileStore.resolveSegment(
                     meetingID: meetingID,
                     fileName: segment.fileName
+                )
+            } catch MeetingFileStoreError.segmentNotFound {
+                throw MeetingAudioSourceLoaderError.segmentFileMissing(
+                    index: index
                 )
             } catch is MeetingFileStoreError {
                 throw MeetingAudioSourceLoaderError.invalidSegmentPath(index: index)
             }
 
-            guard fileManager.fileExists(atPath: url.path) else {
-                throw MeetingAudioSourceLoaderError.segmentFileMissing(index: index)
-            }
+            try await beforeOpeningSegment(resolvedSegment.url, index)
+            try await confirmIdentity(of: resolvedSegment, segmentIndex: index)
 
             let audioFile: AVAudioFile
             do {
-                audioFile = try AVAudioFile(forReading: url)
+                audioFile = try AVAudioFile(forReading: resolvedSegment.url)
             } catch {
+                try await confirmIdentity(
+                    of: resolvedSegment,
+                    segmentIndex: index
+                )
                 throw MeetingAudioSourceLoaderError.unreadableSegment(index: index)
             }
+            try await confirmIdentity(of: resolvedSegment, segmentIndex: index)
 
             let actualSampleRate = audioFile.fileFormat.sampleRate
             guard actualSampleRate == manifest.sampleRate else {
@@ -160,7 +176,21 @@ actor MeetingAudioSourceLoader {
                     actual: actualFrameCount
                 )
             }
-            segmentURLs.append(url)
+            do {
+                try Self.validateDecodableFrames(
+                    audioFile,
+                    expectedFrameCount: segment.frameCount,
+                    segmentIndex: index
+                )
+            } catch {
+                try await confirmIdentity(
+                    of: resolvedSegment,
+                    segmentIndex: index
+                )
+                throw error
+            }
+            try await confirmIdentity(of: resolvedSegment, segmentIndex: index)
+            segmentURLs.append(resolvedSegment.url)
         }
 
         return MeetingAudioSource(
@@ -207,6 +237,78 @@ actor MeetingAudioSourceLoader {
         guard manifest.channelCount == AudioSegmentManifest.transcriptionChannelCount else {
             throw MeetingAudioSourceLoaderError.invalidManifestChannelCount(
                 manifest.channelCount
+            )
+        }
+    }
+
+    private func confirmIdentity(
+        of segment: ResolvedMeetingRecordingSegment,
+        segmentIndex: Int
+    ) async throws {
+        do {
+            try await fileStore.confirmIdentity(of: segment)
+        } catch {
+            throw MeetingAudioSourceLoaderError.segmentIdentityChanged(
+                index: segmentIndex
+            )
+        }
+    }
+
+    private static func validateDecodableFrames(
+        _ audioFile: AVAudioFile,
+        expectedFrameCount: Int64,
+        segmentIndex: Int
+    ) throws {
+        let maximumFramesPerRead: AVAudioFrameCount = 4_096
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: audioFile.processingFormat,
+            frameCapacity: maximumFramesPerRead
+        ) else {
+            throw MeetingAudioSourceLoaderError.unreadableSegment(
+                index: segmentIndex
+            )
+        }
+
+        var decodedFrames: Int64 = 0
+        while decodedFrames < expectedFrameCount {
+            let remainingFrames = expectedFrameCount - decodedFrames
+            let requestedFrames = AVAudioFrameCount(
+                min(Int64(maximumFramesPerRead), remainingFrames)
+            )
+            buffer.frameLength = 0
+
+            do {
+                try audioFile.read(
+                    into: buffer,
+                    frameCount: requestedFrames
+                )
+            } catch {
+                throw MeetingAudioSourceLoaderError.incompleteSegmentData(
+                    index: segmentIndex
+                )
+            }
+
+            let decodedThisRead = Int64(buffer.frameLength)
+            guard decodedThisRead > 0 else {
+                throw MeetingAudioSourceLoaderError.incompleteSegmentData(
+                    index: segmentIndex
+                )
+            }
+            let addition = decodedFrames.addingReportingOverflow(
+                decodedThisRead
+            )
+            guard !addition.overflow,
+                  addition.partialValue <= expectedFrameCount else {
+                throw MeetingAudioSourceLoaderError.incompleteSegmentData(
+                    index: segmentIndex
+                )
+            }
+            decodedFrames = addition.partialValue
+        }
+
+        guard decodedFrames == expectedFrameCount else {
+            throw MeetingAudioSourceLoaderError.incompleteSegmentData(
+                index: segmentIndex
             )
         }
     }

@@ -247,6 +247,34 @@ final class MeetingAudioSourceLoaderTests: XCTestCase {
         )
     }
 
+    func testRejectsTruncatedCAFWhoseHeaderStillReportsManifestLength() async throws {
+        let fixture = try await makeSingleSegmentFixture(frameCount: 1_000)
+        let segmentURL = try await fixture.fileStore.resolveSegmentURL(
+            meetingID: fixture.meetingID,
+            fileName: "segment-0001.caf"
+        )
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: segmentURL.path
+        )
+        let originalSize = try XCTUnwrap(attributes[.size] as? NSNumber)
+            .uint64Value
+        let handle = try FileHandle(forWritingTo: segmentURL)
+        try handle.truncate(atOffset: originalSize - 400)
+        try handle.close()
+
+        let headerOnlyFile = try AVAudioFile(forReading: segmentURL)
+        XCTAssertEqual(headerOnlyFile.length, 1_000)
+        headerOnlyFile.close()
+        let actuallyDecodable = try decodableFrameCount(at: segmentURL)
+        XCTAssertEqual(actuallyDecodable, 900)
+
+        let loader = MeetingAudioSourceLoader(fileStore: fixture.fileStore)
+        await assertLoaderError(
+            try await loader.load(meetingID: fixture.meetingID),
+            equals: .incompleteSegmentData(index: 0)
+        )
+    }
+
     func testRejectsManifestFrameCountThatDiffersFromCAFLength() async throws {
         let fixture = try await makeThreeSegmentFixture()
         var manifest = try await fixture.fileStore.loadManifest(
@@ -377,6 +405,60 @@ final class MeetingAudioSourceLoaderTests: XCTestCase {
         )
     }
 
+    func testRejectsSegmentReplacedAfterResolutionBeforeOpen() async throws {
+        let fixture = try await makeSingleSegmentFixture(frameCount: 3)
+        let replacementURL = fixture.root.appendingPathComponent(
+            "replacement.caf"
+        )
+        try writeAudioFile(
+            at: replacementURL,
+            sampleRate: 16_000,
+            channelCount: 1
+        )
+        let loader = MeetingAudioSourceLoader(
+            fileStore: fixture.fileStore,
+            beforeOpeningSegment: { segmentURL, _ in
+                try FileManager.default.removeItem(at: segmentURL)
+                try FileManager.default.moveItem(
+                    at: replacementURL,
+                    to: segmentURL
+                )
+            }
+        )
+
+        await assertLoaderError(
+            try await loader.load(meetingID: fixture.meetingID),
+            equals: .segmentIdentityChanged(index: 0)
+        )
+    }
+
+    func testRejectsMeetingDirectoryReplacedBySymlinkBeforeOpen() async throws {
+        let fixture = try await makeSingleSegmentFixture(frameCount: 3)
+        let root = fixture.root
+        let loader = MeetingAudioSourceLoader(
+            fileStore: fixture.fileStore,
+            beforeOpeningSegment: { segmentURL, _ in
+                let meetingDirectory = segmentURL.deletingLastPathComponent()
+                let movedDirectory = root.appendingPathComponent(
+                    "moved-meeting"
+                )
+                try FileManager.default.moveItem(
+                    at: meetingDirectory,
+                    to: movedDirectory
+                )
+                try FileManager.default.createSymbolicLink(
+                    at: meetingDirectory,
+                    withDestinationURL: movedDirectory
+                )
+            }
+        )
+
+        await assertLoaderError(
+            try await loader.load(meetingID: fixture.meetingID),
+            equals: .segmentIdentityChanged(index: 0)
+        )
+    }
+
     private func signatureManifest() -> AudioSegmentManifest {
         AudioSegmentManifest(segments: [
             segment(fileName: "segment-0001.caf", frameCount: 3)
@@ -409,6 +491,24 @@ final class MeetingAudioSourceLoaderTests: XCTestCase {
                 timestamp: 0,
                 sampleRate: 16_000,
                 samples: (0..<7).map { Float($0) / 7 }
+            )
+        )
+        _ = try await writer.finish()
+        return fixture
+    }
+
+    private func makeSingleSegmentFixture(frameCount: Int) async throws -> Fixture {
+        let fixture = try makeFixture()
+        let writer = try SegmentedPCMWriter(
+            meetingID: fixture.meetingID,
+            fileStore: fixture.fileStore,
+            frameLimit: frameCount
+        )
+        try await writer.append(
+            CapturedAudioFrame(
+                timestamp: 0,
+                sampleRate: 16_000,
+                samples: (0..<frameCount).map { Float($0) / Float(frameCount) }
             )
         )
         _ = try await writer.finish()
@@ -476,6 +576,29 @@ final class MeetingAudioSourceLoaderTests: XCTestCase {
         }
         try file.write(from: buffer)
         file.close()
+    }
+
+    private func decodableFrameCount(at url: URL) throws -> Int64 {
+        let file = try AVAudioFile(forReading: url)
+        let buffer = try XCTUnwrap(
+            AVAudioPCMBuffer(
+                pcmFormat: file.processingFormat,
+                frameCapacity: 100
+            )
+        )
+        var total: Int64 = 0
+        while true {
+            buffer.frameLength = 0
+            do {
+                try file.read(into: buffer, frameCount: 100)
+            } catch {
+                return total + Int64(buffer.frameLength)
+            }
+            guard buffer.frameLength > 0 else {
+                return total
+            }
+            total += Int64(buffer.frameLength)
+        }
     }
 
     private func assertLoaderError<T>(
