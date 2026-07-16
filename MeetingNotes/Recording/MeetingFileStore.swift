@@ -4,6 +4,7 @@ import Foundation
 enum MeetingFileStoreError: Error, Equatable, Sendable {
     case invalidRelativePath(String)
     case manifestNotFound(UUID)
+    case waveformNotFound(UUID)
     case segmentNotFound
     case segmentIdentityChanged
 }
@@ -21,6 +22,7 @@ struct ResolvedMeetingRecordingSegment: Equatable, Sendable {
 
 actor MeetingFileStore {
     static let manifestFileName = "manifest.json"
+    static let waveformFileName = "waveform-v1.json"
 
     private let rootURL: URL
     private let fileManager: FileManager
@@ -85,6 +87,45 @@ actor MeetingFileStore {
         }
         return try decoder.decode(
             AudioSegmentManifest.self,
+            from: Data(contentsOf: url)
+        )
+    }
+
+    func saveWaveformSnapshot(
+        _ snapshot: WaveformSnapshot,
+        meetingID: UUID
+    ) throws {
+        let directory = try prepareMeetingDirectory(for: meetingID)
+        let destination = directory.appendingPathComponent(Self.waveformFileName)
+        let temporary = directory.appendingPathComponent(
+            ".waveform-\(UUID().uuidString).tmp"
+        )
+        let data = try encoder.encode(snapshot)
+
+        do {
+            try data.write(to: temporary, options: .withoutOverwriting)
+            if fileManager.fileExists(atPath: destination.path) {
+                _ = try fileManager.replaceItemAt(
+                    destination,
+                    withItemAt: temporary
+                )
+            } else {
+                try fileManager.moveItem(at: temporary, to: destination)
+            }
+        } catch {
+            try? fileManager.removeItem(at: temporary)
+            throw error
+        }
+    }
+
+    func loadWaveformSnapshot(meetingID: UUID) throws -> WaveformSnapshot {
+        let relativePath = "\(meetingID.uuidString)/\(Self.waveformFileName)"
+        let url = try resolve(relativePath: relativePath)
+        guard fileManager.fileExists(atPath: url.path) else {
+            throw MeetingFileStoreError.waveformNotFound(meetingID)
+        }
+        return try decoder.decode(
+            WaveformSnapshot.self,
             from: Data(contentsOf: url)
         )
     }
