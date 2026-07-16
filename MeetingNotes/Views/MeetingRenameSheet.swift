@@ -9,6 +9,8 @@ struct MeetingRenameSheet: View {
 
     @State private var title: String
     @State private var isSubmitting = false
+    @State private var renameTask: Task<Void, Never>?
+    @State private var renameGeneration = 0
     @FocusState private var isTitleFocused: Bool
 
     init(
@@ -55,7 +57,6 @@ struct MeetingRenameSheet: View {
                 Spacer()
                 Button("取消", action: cancel)
                     .keyboardShortcut(.cancelAction)
-                    .disabled(isSubmitting)
                     .accessibilityIdentifier("meeting.rename.cancel")
 
                 Button(action: submit) {
@@ -81,6 +82,9 @@ struct MeetingRenameSheet: View {
                 isTitleFocused = true
             }
         }
+        .onDisappear {
+            invalidateRenameTask(resetDraft: true)
+        }
     }
 
     private var trimmedTitle: String {
@@ -90,11 +94,22 @@ struct MeetingRenameSheet: View {
     private func submit() {
         guard !trimmedTitle.isEmpty, !isSubmitting else { return }
         isSubmitting = true
-        Task { @MainActor in
+        renameGeneration &+= 1
+        let generation = renameGeneration
+        let submittedMeetingID = meetingID
+        let submittedTitle = trimmedTitle
+        renameTask = Task { @MainActor in
+            guard !Task.isCancelled else { return }
             let succeeded = await viewModel.renameMeeting(
-                id: meetingID,
-                title: trimmedTitle
+                id: submittedMeetingID,
+                title: submittedTitle
             )
+            guard !Task.isCancelled,
+                  generation == renameGeneration,
+                  submittedMeetingID == meetingID else {
+                return
+            }
+            renameTask = nil
             isSubmitting = false
             if succeeded {
                 dismiss()
@@ -105,9 +120,19 @@ struct MeetingRenameSheet: View {
     }
 
     private func cancel() {
-        guard !isSubmitting else { return }
-        title = originalTitle
-        viewModel.dismissError()
+        invalidateRenameTask(resetDraft: true)
         dismiss()
+    }
+
+    private func invalidateRenameTask(resetDraft: Bool) {
+        renameGeneration &+= 1
+        renameTask?.cancel()
+        renameTask = nil
+        isSubmitting = false
+        isTitleFocused = false
+        if resetDraft {
+            title = originalTitle
+        }
+        viewModel.dismissError()
     }
 }

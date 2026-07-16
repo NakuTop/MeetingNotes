@@ -101,6 +101,7 @@ final class MeetingTitleUpdateUseCase: MeetingTitleUpdating {
             throw MeetingTitleUpdateError.operationInProgress
         }
         defer { operationGate.release(.rename, for: meetingID) }
+        try Task.checkCancellation()
 
         let canonicalTitle = MeetingTitlePolicy.canonicalize(title)
         guard !canonicalTitle.isEmpty else {
@@ -151,6 +152,16 @@ final class MeetingTitleUpdateUseCase: MeetingTitleUpdating {
                 pageID: pageID,
                 title: canonicalTitle
             )
+            guard !Task.isCancelled else {
+                await restoreNotionTitle(
+                    token: token,
+                    pageID: pageID,
+                    title: previousTitle
+                )
+                throw CancellationError()
+            }
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as NotionClientError {
             throw MeetingTitleUpdateError.notion(error)
         } catch {
@@ -200,11 +211,14 @@ final class MeetingTitleUpdateUseCase: MeetingTitleUpdating {
         pageID: String,
         title: String
     ) async {
-        try? await notionTitleUpdater.updatePageTitle(
-            token: token,
-            pageID: pageID,
-            title: title
-        )
+        let updater = notionTitleUpdater
+        await Task { @MainActor in
+            try? await updater.updatePageTitle(
+                token: token,
+                pageID: pageID,
+                title: title
+            )
+        }.value
     }
 
     private func updateLocalTitle(meetingID: UUID, title: String) throws {

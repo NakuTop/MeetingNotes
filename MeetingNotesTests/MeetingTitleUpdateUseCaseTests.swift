@@ -450,6 +450,57 @@ final class MeetingTitleUpdateUseCaseTests: XCTestCase {
         XCTAssertEqual(repository.updateTitles, ["第一个标题"])
     }
 
+    func testCancelledRemoteRenameRestoresOldTitleAndReleasesGateForRetry() async throws {
+        let gate = MeetingOperationGate()
+        let meeting = makeMeeting(
+            state: .archived,
+            notionPageID: "notion-page"
+        )
+        let repository = TitleRepositorySpy(meeting: meeting)
+        let remoteStarted = expectation(description: "remote rename started")
+        let updater = CancellationReturningNotionTitleUpdater(
+            startedExpectation: remoteStarted
+        )
+        let useCase = makeUseCase(
+            repository: repository,
+            credentials: TitleCredentialStore(notionToken: "notion-token"),
+            updater: updater,
+            operationGate: gate
+        )
+
+        let cancelledRename = Task { @MainActor in
+            try await useCase.updateTitle(
+                meetingID: meeting.id,
+                title: "不应保存的标题"
+            )
+        }
+        await fulfillment(of: [remoteStarted], timeout: 1)
+        cancelledRename.cancel()
+
+        do {
+            try await cancelledRename.value
+            XCTFail("Expected cancellation to escape unchanged")
+        } catch is CancellationError {
+            // Expected: cancellation is a control-flow outcome, not a user error.
+        } catch {
+            XCTFail("Expected CancellationError, received \(error)")
+        }
+
+        XCTAssertEqual(updater.titles, ["不应保存的标题", "旧标题"])
+        XCTAssertTrue(repository.updateTitles.isEmpty)
+        XCTAssertEqual(meeting.title, "旧标题")
+        XCTAssertFalse(gate.isActive(for: meeting.id))
+
+        try await useCase.updateTitle(
+            meetingID: meeting.id,
+            title: "重试成功"
+        )
+
+        XCTAssertEqual(updater.titles, ["不应保存的标题", "旧标题", "重试成功"])
+        XCTAssertEqual(repository.updateTitles, ["重试成功"])
+        XCTAssertEqual(meeting.title, "重试成功")
+    }
+
     func testSummaryGateRejectsRenameBeforeRemoteOrLocalUpdate() async throws {
         let gate = MeetingOperationGate()
         let meeting = makeMeeting(
@@ -738,5 +789,35 @@ private final class BlockingNotionTitleUpdater: MeetingNotionTitleUpdating {
     func resume() {
         continuation?.resume()
         continuation = nil
+    }
+}
+
+@MainActor
+private final class CancellationReturningNotionTitleUpdater:
+    MeetingNotionTitleUpdating {
+    private let startedExpectation: XCTestExpectation
+    private(set) var titles: [String] = []
+
+    init(startedExpectation: XCTestExpectation) {
+        self.startedExpectation = startedExpectation
+    }
+
+    func updatePageTitle(
+        token: String,
+        pageID: String,
+        title: String
+    ) async throws {
+        _ = token
+        _ = pageID
+        try Task.checkCancellation()
+        titles.append(title)
+        guard titles.count == 1 else { return }
+        startedExpectation.fulfill()
+        do {
+            try await Task.sleep(for: .seconds(30))
+        } catch is CancellationError {
+            // Simulate a server that committed before its client noticed cancel.
+            return
+        }
     }
 }

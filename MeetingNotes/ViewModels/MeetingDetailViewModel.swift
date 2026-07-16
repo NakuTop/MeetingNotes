@@ -132,6 +132,8 @@ final class MeetingDetailViewModel {
             )
             load()
             return true
+        } catch is CancellationError {
+            return false
         } catch let error as MeetingTitleUpdateError {
             renameErrorMessage = error.userMessage
             return false

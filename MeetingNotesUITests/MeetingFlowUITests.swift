@@ -176,12 +176,11 @@ final class MeetingFlowUITests: XCTestCase {
         XCTAssertTrue(renameField.waitForExistence(timeout: 3))
         XCTAssertEqual(renameField.value as? String, "未命名会议")
         replaceText(in: renameField, with: "侧栏重命名会议")
-        app.buttons["meeting.rename.save"].click()
-        XCTAssertTrue(
-            app.staticTexts["侧栏重命名会议"]
-                .firstMatch
-                .waitForExistence(timeout: 5)
-        )
+        renameField.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitForLabelContaining("侧栏重命名会议", on: historyRow))
+        let detailTitle = app.staticTexts["meeting.detail.title"]
+        XCTAssertTrue(detailTitle.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForValue("侧栏重命名会议", on: detailTitle))
 
         historyRow.rightClick()
         let pin = app.descendants(matching: .any)["meeting.context.pin"]
@@ -219,12 +218,18 @@ final class MeetingFlowUITests: XCTestCase {
         detailRename.click()
         XCTAssertTrue(detailRenameField.waitForExistence(timeout: 3))
         replaceText(in: detailRenameField, with: "详情重命名会议")
-        app.buttons["meeting.detail.renameSave"].click()
-        XCTAssertTrue(
-            app.staticTexts["详情重命名会议"]
-                .firstMatch
-                .waitForExistence(timeout: 5)
-        )
+        detailRenameField.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitForValue("详情重命名会议", on: detailTitle))
+        XCTAssertTrue(waitForLabelContaining("详情重命名会议", on: historyRow))
+
+        detailRename.click()
+        XCTAssertTrue(detailRenameField.waitForExistence(timeout: 3))
+        replaceText(in: detailRenameField, with: "按 Esc 取消的草稿")
+        detailRenameField.typeKey(.escape, modifierFlags: [])
+        XCTAssertTrue(detailRenameField.waitForNonExistence(timeout: 3))
+        XCTAssertTrue(waitForValue("详情重命名会议", on: detailTitle))
+        XCTAssertTrue(waitForLabelContaining("详情重命名会议", on: historyRow))
+        XCTAssertEqual(historyRow.value as? String, "未置顶")
 
         historyRow.rightClick()
         app.descendants(matching: .any)["meeting.context.delete"].click()
@@ -242,10 +247,71 @@ final class MeetingFlowUITests: XCTestCase {
         XCTAssertTrue(historyRow.waitForNonExistence(timeout: 5))
     }
 
-    private func launchApp() -> XCUIApplication {
+    func testSlowArchivedRenameCanBeCancelledAndRetried() {
+        let app = launchApp(
+            environment: ["MEETING_NOTES_UI_SLOW_RENAME": "1"]
+        )
+        let historyRow = app.descendants(matching: .any)[
+            "meeting.historyRow"
+        ].firstMatch
+        XCTAssertTrue(historyRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForLabelContaining("慢速归档会议", on: historyRow))
+        historyRow.click()
+
+        let detailTitle = app.staticTexts["meeting.detail.title"]
+        XCTAssertTrue(detailTitle.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForValue("慢速归档会议", on: detailTitle))
+
+        historyRow.rightClick()
+        app.descendants(matching: .any)["meeting.context.rename"].click()
+        let sheetField = app.textFields["meeting.rename.field"]
+        XCTAssertTrue(sheetField.waitForExistence(timeout: 3))
+        replaceText(in: sheetField, with: "不应保存的侧栏草稿")
+        app.buttons["meeting.rename.save"].click()
+
+        let sheetCancel = app.buttons["meeting.rename.cancel"]
+        XCTAssertTrue(sheetCancel.exists)
+        XCTAssertTrue(sheetCancel.isEnabled)
+        sheetCancel.click()
+        XCTAssertTrue(sheetField.waitForNonExistence(timeout: 1))
+        assertStaysAbsent(sheetField, for: 2)
+        XCTAssertTrue(waitForValue("慢速归档会议", on: detailTitle))
+        XCTAssertTrue(waitForLabelContaining("慢速归档会议", on: historyRow))
+
+        historyRow.rightClick()
+        app.descendants(matching: .any)["meeting.context.rename"].click()
+        XCTAssertTrue(sheetField.waitForExistence(timeout: 3))
+        replaceText(in: sheetField, with: "取消后重试成功")
+        sheetField.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(waitForValue("取消后重试成功", on: detailTitle, timeout: 5))
+        XCTAssertTrue(
+            waitForLabelContaining("取消后重试成功", on: historyRow, timeout: 5)
+        )
+
+        let detailRename = app.buttons["meeting.detail.rename"]
+        XCTAssertTrue(detailRename.waitForExistence(timeout: 3))
+        detailRename.click()
+        let detailField = app.textFields["meeting.detail.renameField"]
+        XCTAssertTrue(detailField.waitForExistence(timeout: 3))
+        replaceText(in: detailField, with: "不应保存的详情草稿")
+        app.buttons["meeting.detail.renameSave"].click()
+
+        let detailCancel = app.buttons["meeting.detail.renameCancel"]
+        XCTAssertTrue(detailCancel.exists)
+        XCTAssertTrue(detailCancel.isEnabled)
+        detailCancel.click()
+        XCTAssertTrue(detailField.waitForNonExistence(timeout: 1))
+        XCTAssertTrue(waitForValue("取消后重试成功", on: detailTitle))
+        XCTAssertTrue(waitForLabelContaining("取消后重试成功", on: historyRow))
+    }
+
+    private func launchApp(
+        environment: [String: String] = [:]
+    ) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["-uiTesting"]
+        app.launchEnvironment = environment
         app.launch()
         return app
     }
@@ -325,6 +391,57 @@ final class MeetingFlowUITests: XCTestCase {
             for: [expectation],
             timeout: timeout
         ) == .completed
+    }
+
+    private func waitForValue(
+        _ value: String,
+        on element: XCUIElement,
+        timeout: TimeInterval = 3
+    ) -> Bool {
+        let predicate = NSPredicate(format: "value == %@", value)
+        let expectation = XCTNSPredicateExpectation(
+            predicate: predicate,
+            object: element
+        )
+        return XCTWaiter.wait(
+            for: [expectation],
+            timeout: timeout
+        ) == .completed
+    }
+
+    private func waitForLabelContaining(
+        _ text: String,
+        on element: XCUIElement,
+        timeout: TimeInterval = 3
+    ) -> Bool {
+        let predicate = NSPredicate(format: "label CONTAINS %@", text)
+        let expectation = XCTNSPredicateExpectation(
+            predicate: predicate,
+            object: element
+        )
+        return XCTWaiter.wait(
+            for: [expectation],
+            timeout: timeout
+        ) == .completed
+    }
+
+    private func assertStaysAbsent(
+        _ element: XCUIElement,
+        for duration: TimeInterval,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true"),
+            object: element
+        )
+        expectation.isInverted = true
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [expectation], timeout: duration),
+            .completed,
+            file: file,
+            line: line
+        )
     }
 
     private func waitForButton(

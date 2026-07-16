@@ -227,6 +227,27 @@ final class MeetingDetailViewModelTests: XCTestCase {
         }
     }
 
+    func testCancelledRenameIsSilentAndClearsInFlightState() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy(error: CancellationError())
+        )
+
+        let succeeded = await viewModel.rename(to: "不应保存")
+
+        XCTAssertFalse(succeeded)
+        XCTAssertNil(viewModel.renameErrorMessage)
+        XCTAssertFalse(viewModel.isRenaming)
+        XCTAssertEqual(viewModel.meeting?.title, MeetingRecord.defaultTitle)
+    }
+
     func testRenameDoesNotSubmitTwiceWhileRequestIsRunning() async throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(

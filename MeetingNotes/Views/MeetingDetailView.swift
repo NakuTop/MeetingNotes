@@ -4,6 +4,8 @@ struct MeetingDetailView: View {
     @State private var viewModel: MeetingDetailViewModel
     @State private var isEditingTitle = false
     @State private var titleDraft = ""
+    @State private var renameTask: Task<Void, Never>?
+    @State private var renameGeneration = 0
     @FocusState private var isTitleFieldFocused: Bool
     private let onReturnHome: () -> Void
     private let onMeetingChanged: () -> Void
@@ -42,6 +44,9 @@ struct MeetingDetailView: View {
         }
         .task {
             viewModel.load()
+        }
+        .onDisappear {
+            invalidateRenameTask()
         }
     }
 
@@ -164,7 +169,6 @@ struct MeetingDetailView: View {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(.borderless)
-                .disabled(viewModel.isRenaming)
                 .accessibilityLabel("取消重命名")
                 .accessibilityIdentifier("meeting.detail.renameCancel")
 
@@ -178,6 +182,7 @@ struct MeetingDetailView: View {
                 Text(meeting.title)
                     .font(.largeTitle.bold())
                     .textSelection(.enabled)
+                    .accessibilityIdentifier("meeting.detail.title")
 
                 Button {
                     beginTitleEditing(meeting)
@@ -213,7 +218,7 @@ struct MeetingDetailView: View {
     }
 
     private func cancelTitleEditing(_ meeting: MeetingRecord) {
-        guard !viewModel.isRenaming else { return }
+        invalidateRenameTask()
         titleDraft = meeting.title
         isEditingTitle = false
         viewModel.dismissRenameError()
@@ -226,8 +231,20 @@ struct MeetingDetailView: View {
             return
         }
         let title = trimmedTitleDraft
-        Task { @MainActor in
-            if await viewModel.rename(to: title) {
+        renameGeneration &+= 1
+        let generation = renameGeneration
+        let submittedMeetingID = meeting.id
+        renameTask = Task { @MainActor in
+            guard !Task.isCancelled else { return }
+            let succeeded = await viewModel.rename(to: title)
+            guard !Task.isCancelled,
+                  generation == renameGeneration,
+                  submittedMeetingID == viewModel.meetingID,
+                  viewModel.meeting?.id == submittedMeetingID else {
+                return
+            }
+            renameTask = nil
+            if succeeded {
                 titleDraft = title
                 isEditingTitle = false
                 onMeetingChanged()
@@ -235,6 +252,13 @@ struct MeetingDetailView: View {
                 isTitleFieldFocused = true
             }
         }
+    }
+
+    private func invalidateRenameTask() {
+        renameGeneration &+= 1
+        renameTask?.cancel()
+        renameTask = nil
+        isTitleFieldFocused = false
     }
 
     private func audioSection(_ meeting: MeetingRecord) -> some View {

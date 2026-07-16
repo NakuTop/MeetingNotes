@@ -177,7 +177,7 @@ private struct MeetingSidebarRow: View {
             "\(meeting.title)，\(meeting.isPinned ? "已置顶" : "未置顶")，\(meeting.mode == .offline ? "线下会议" : "在线会议")，\(MeetingDisplayFormat.duration(meeting.activeDuration))，\(meeting.state == .archived ? "已归档" : "未归档")"
         )
         .accessibilityValue(
-            "\(meeting.id.uuidString)，\(meeting.isPinned ? "已置顶" : "未置顶")"
+            meeting.isPinned ? "已置顶" : "未置顶"
         )
         .accessibilityIdentifier("meeting.historyRow")
     }

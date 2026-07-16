@@ -159,6 +159,25 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.renamingMeetingIDs.isEmpty)
     }
 
+    func testCancelledRenameIsSilentAndClearsInFlightState() async {
+        let meeting = makeMeeting(seconds: 100, title: "旧标题")
+        let viewModel = makeViewModel(
+            repository: LibraryRepositorySpy(meetings: [meeting]),
+            titleUpdater: TitleUpdaterSpy(error: CancellationError())
+        )
+        viewModel.load()
+
+        let succeeded = await viewModel.renameMeeting(
+            id: meeting.id,
+            title: "不应保存"
+        )
+
+        XCTAssertFalse(succeeded)
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertTrue(viewModel.renamingMeetingIDs.isEmpty)
+        XCTAssertEqual(viewModel.meetings.first?.title, "旧标题")
+    }
+
     func testRenameDoesNotSubmitSameMeetingTwice() async {
         let meeting = makeMeeting(seconds: 100)
         let updater = BlockingTitleUpdater()

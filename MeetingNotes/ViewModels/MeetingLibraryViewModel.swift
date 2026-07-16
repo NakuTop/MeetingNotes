@@ -133,6 +133,8 @@ final class MeetingLibraryViewModel {
             try await titleUpdater.updateTitle(meetingID: id, title: title)
             load()
             return true
+        } catch is CancellationError {
+            return false
         } catch let error as MeetingTitleUpdateError {
             errorMessage = error.userMessage
             return false

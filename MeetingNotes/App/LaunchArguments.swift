@@ -2,11 +2,19 @@ import Foundation
 
 enum LaunchArguments {
     static let uiTesting = "-uiTesting"
+    static let uiTestingSlowRenameEnvironment =
+        "MEETING_NOTES_UI_SLOW_RENAME"
 
     static func isUITesting(
         _ arguments: [String] = ProcessInfo.processInfo.arguments
     ) -> Bool {
         arguments.contains(uiTesting)
+    }
+
+    static func usesSlowRenameUITestFixture(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        environment[uiTestingSlowRenameEnvironment] == "1"
     }
 }
 
@@ -15,6 +23,27 @@ enum LaunchArguments {
 extension AppContainer {
     static func uiTesting() throws -> AppContainer {
         let repository = try MeetingRepository.inMemory()
+        let usesSlowRenameFixture =
+            LaunchArguments.usesSlowRenameUITestFixture()
+        if usesSlowRenameFixture {
+            let startedAt = Date(timeIntervalSince1970: 1_000)
+            let meetingID = try repository.createMeeting(
+                mode: .offline,
+                startedAt: startedAt,
+                title: "慢速归档会议"
+            )
+            try repository.finalizeMeeting(
+                id: meetingID,
+                endedAt: startedAt.addingTimeInterval(60),
+                activeDuration: 60
+            )
+            try repository.setNotionPage(
+                meetingID: meetingID,
+                pageID: "ui-test-slow-rename-page",
+                pageURL: "https://www.notion.so/ui-test-slow-rename-page"
+            )
+            try repository.updateMeetingState(id: meetingID, state: .archived)
+        }
         let recordingsURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "MeetingNotes-UITesting-\(ProcessInfo.processInfo.processIdentifier)",
@@ -60,10 +89,27 @@ extension AppContainer {
             notionTester: UITestNotionTester(),
             summaryGenerator: UITestSummaryGenerator(),
             notionArchiver: UITestNotionArchiver(repository: repository),
-            notionTitleUpdater: NoopMeetingNotionTitleUpdater(),
+            notionTitleUpdater: usesSlowRenameFixture
+                ? UITestDelayedNotionTitleUpdater()
+                : NoopMeetingNotionTitleUpdater(),
             onboardingState: onboarding,
             systemRequirements: UITestSystemRequirements()
         )
+    }
+}
+
+@MainActor
+private final class UITestDelayedNotionTitleUpdater:
+    MeetingNotionTitleUpdating {
+    func updatePageTitle(
+        token: String,
+        pageID: String,
+        title: String
+    ) async throws {
+        _ = token
+        _ = pageID
+        _ = title
+        try await Task.sleep(for: .milliseconds(1_500))
     }
 }
 
