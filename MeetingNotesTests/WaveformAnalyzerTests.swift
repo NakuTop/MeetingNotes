@@ -45,6 +45,26 @@ final class WaveformAnalyzerTests: XCTestCase {
         XCTAssertEqual(values[2], 1, accuracy: 0.000_001)
     }
 
+    func testExtremelyQuietSignalUsesAbsoluteMinus50DBFSNormalizationFloor() async throws {
+        let amplitude: Float = 0.000_001
+        let fixture = try await makeFixture(segments: [
+            sine(amplitude: amplitude, frameCount: 400)
+        ])
+        let analyzer = WaveformAnalyzer(fileStore: fixture.fileStore)
+
+        let values = try await analyzer.values(
+            for: fixture.source,
+            bucketCount: 1
+        )
+
+        let signalRMS = Double(amplitude) / sqrt(2)
+        let minus50DBFSRMS = pow(10, -50.0 / 20.0)
+        let expected = Float(sqrt(signalRMS / minus50DBFSRMS))
+        XCTAssertGreaterThan(values[0], 0)
+        XCTAssertLessThan(values[0], 0.05)
+        XCTAssertEqual(values[0], expected, accuracy: 0.003)
+    }
+
     func testGlobalFrameMappingContinuesAcrossSegmentBoundaries() async throws {
         let fixture = try await makeFixture(segments: [
             [0, 0],
@@ -127,6 +147,7 @@ final class WaveformAnalyzerTests: XCTestCase {
             WaveformSnapshot(
                 version: WaveformSnapshot.currentVersion,
                 manifestSignature: fixture.source.manifestSignature,
+                sourceIdentitySignature: fixture.source.identitySignature,
                 values: cachedValues
             ),
             meetingID: fixture.meetingID
@@ -147,6 +168,130 @@ final class WaveformAnalyzerTests: XCTestCase {
 
         XCTAssertEqual(values, cachedValues)
         XCTAssertEqual(opener.count, 0)
+    }
+
+    func testMatchingCacheRejectsAReplacedSegmentWithoutOpeningAudio() async throws {
+        let fixture = try await makeFixture(segments: [[0.25, 0.5, 1]])
+        let cachedValues: [Float] = [0.1, 0.2, 0.3]
+        try await fixture.fileStore.saveWaveformSnapshot(
+            WaveformSnapshot(
+                version: WaveformSnapshot.currentVersion,
+                manifestSignature: fixture.source.manifestSignature,
+                sourceIdentitySignature: fixture.source.identitySignature,
+                values: cachedValues
+            ),
+            meetingID: fixture.meetingID
+        )
+        try replaceCAF(
+            at: fixture.source.segmentURLs[0],
+            samples: [1, 0.5, 0.25]
+        )
+        let opener = AudioOpenCounter()
+        let analyzer = WaveformAnalyzer(
+            fileStore: fixture.fileStore,
+            openAudioFile: { url in
+                opener.recordOpen()
+                return try AVAudioFile(forReading: url)
+            }
+        )
+
+        do {
+            _ = try await analyzer.values(
+                for: fixture.source,
+                bucketCount: cachedValues.count
+            )
+            XCTFail("Expected the replaced segment identity to be rejected")
+        } catch {
+            XCTAssertEqual(
+                error as? WaveformAnalyzerError,
+                .segmentIdentityChanged(index: 0)
+            )
+        }
+        XCTAssertEqual(opener.count, 0)
+    }
+
+    func testReloadedSourceAfterReplacementInvalidatesOldIdentityCache() async throws {
+        let fixture = try await makeFixture(segments: [[0, 0, 1, 1]])
+        let initialAnalyzer = WaveformAnalyzer(fileStore: fixture.fileStore)
+        let initialValues = try await initialAnalyzer.values(
+            for: fixture.source,
+            bucketCount: 2
+        )
+        try replaceCAF(
+            at: fixture.source.segmentURLs[0],
+            samples: [1, 1, 0, 0]
+        )
+        let reloadedSource = try await MeetingAudioSourceLoader(
+            fileStore: fixture.fileStore
+        ).load(meetingID: fixture.meetingID)
+        XCTAssertEqual(
+            reloadedSource.manifestSignature,
+            fixture.source.manifestSignature
+        )
+        XCTAssertNotEqual(
+            reloadedSource.resolvedSegments[0].fileIdentity,
+            fixture.source.resolvedSegments[0].fileIdentity
+        )
+        XCTAssertNotEqual(
+            reloadedSource.identitySignature,
+            fixture.source.identitySignature
+        )
+        let opener = AudioOpenCounter()
+        let analyzer = WaveformAnalyzer(
+            fileStore: fixture.fileStore,
+            openAudioFile: { url in
+                opener.recordOpen()
+                return try AVAudioFile(forReading: url)
+            }
+        )
+
+        let reloadedValues = try await analyzer.values(
+            for: reloadedSource,
+            bucketCount: 2
+        )
+
+        XCTAssertEqual(opener.count, 1)
+        XCTAssertNotEqual(reloadedValues, initialValues)
+        XCTAssertEqual(reloadedValues[0], 1, accuracy: 0.000_001)
+        XCTAssertEqual(reloadedValues[1], 0, accuracy: 0.000_001)
+    }
+
+    func testSegmentReplacedDuringAnalysisIsRejectedAndWritesNoCache() async throws {
+        let fixture = try await makeFixture(
+            segments: [sine(amplitude: 0.5, frameCount: 8_000)]
+        )
+        let replacer = AudioFileReplacer(
+            destination: fixture.source.segmentURLs[0],
+            replacementSamples: sine(amplitude: 0.25, frameCount: 8_000)
+        )
+        let analyzer = WaveformAnalyzer(
+            fileStore: fixture.fileStore,
+            beforeReadingChunk: { _ in
+                try replacer.replaceOnce()
+            }
+        )
+
+        do {
+            _ = try await analyzer.values(for: fixture.source, bucketCount: 20)
+            XCTFail("Expected the replaced segment identity to be rejected")
+        } catch {
+            XCTAssertEqual(
+                error as? WaveformAnalyzerError,
+                .segmentIdentityChanged(index: 0)
+            )
+        }
+        XCTAssertEqual(replacer.count, 1)
+        do {
+            _ = try await fixture.fileStore.loadWaveformSnapshot(
+                meetingID: fixture.meetingID
+            )
+            XCTFail("Expected no cache for an identity-changed segment")
+        } catch {
+            XCTAssertEqual(
+                error as? MeetingFileStoreError,
+                .waveformNotFound(fixture.meetingID)
+            )
+        }
     }
 
     func testSignatureAndBucketCountChangesInvalidateCache() async throws {
@@ -189,6 +334,7 @@ final class WaveformAnalyzerTests: XCTestCase {
             WaveformSnapshot(
                 version: WaveformSnapshot.currentVersion + 1,
                 manifestSignature: fixture.source.manifestSignature,
+                sourceIdentitySignature: fixture.source.identitySignature,
                 values: [0.2, 0.4]
             ),
             meetingID: fixture.meetingID
@@ -200,6 +346,7 @@ final class WaveformAnalyzerTests: XCTestCase {
             WaveformSnapshot(
                 version: WaveformSnapshot.currentVersion,
                 manifestSignature: fixture.source.manifestSignature,
+                sourceIdentitySignature: fixture.source.identitySignature,
                 values: [-0.1, 1.1]
             ),
             meetingID: fixture.meetingID
@@ -229,11 +376,13 @@ final class WaveformAnalyzerTests: XCTestCase {
         let first = WaveformSnapshot(
             version: WaveformSnapshot.currentVersion,
             manifestSignature: "first",
+            sourceIdentitySignature: "first-identity",
             values: [0.25]
         )
         let replacement = WaveformSnapshot(
             version: WaveformSnapshot.currentVersion,
             manifestSignature: "replacement",
+            sourceIdentitySignature: "replacement-identity",
             values: [0.5, 1]
         )
 
@@ -258,6 +407,70 @@ final class WaveformAnalyzerTests: XCTestCase {
         )
         XCTAssertTrue(names.contains(MeetingFileStore.waveformFileName))
         XCTAssertFalse(names.contains { $0.hasPrefix(".waveform-") })
+    }
+
+    func testNonCancellationCacheWriteFailureStillReturnsGeneratedWaveform() async throws {
+        let fixture = try await makeFixture(segments: [[0, 0, 1, 1]])
+        let writes = InvocationCounter()
+        let analyzer = WaveformAnalyzer(
+            fileStore: fixture.fileStore,
+            cacheWriter: { _, _ in
+                writes.record()
+                throw CocoaError(.fileWriteNoPermission)
+            }
+        )
+
+        let values = try await analyzer.values(
+            for: fixture.source,
+            bucketCount: 2
+        )
+
+        XCTAssertEqual(values, [0, 1])
+        XCTAssertEqual(writes.count, 1)
+        do {
+            _ = try await fixture.fileStore.loadWaveformSnapshot(
+                meetingID: fixture.meetingID
+            )
+            XCTFail("Expected the failed writer to leave no cache")
+        } catch {
+            XCTAssertEqual(
+                error as? MeetingFileStoreError,
+                .waveformNotFound(fixture.meetingID)
+            )
+        }
+    }
+
+    func testCancellationFromCacheWriterIsPropagated() async throws {
+        let fixture = try await makeFixture(segments: [[0, 0, 1, 1]])
+        let writes = InvocationCounter()
+        let analyzer = WaveformAnalyzer(
+            fileStore: fixture.fileStore,
+            cacheWriter: { _, _ in
+                writes.record()
+                throw CancellationError()
+            }
+        )
+
+        do {
+            _ = try await analyzer.values(for: fixture.source, bucketCount: 2)
+            XCTFail("Expected cache-writer cancellation")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+        XCTAssertEqual(writes.count, 1)
+        do {
+            _ = try await fixture.fileStore.loadWaveformSnapshot(
+                meetingID: fixture.meetingID
+            )
+            XCTFail("Expected the cancelled writer to leave no cache")
+        } catch {
+            XCTAssertEqual(
+                error as? MeetingFileStoreError,
+                .waveformNotFound(fixture.meetingID)
+            )
+        }
     }
 
     func testConcurrentRequestsShareTheCachedResult() async throws {
@@ -322,7 +535,7 @@ final class WaveformAnalyzerTests: XCTestCase {
         }
     }
 
-    func testCancellingAJoinedRequestCancelsSharedAnalysisAndWritesNoCache() async throws {
+    func testCancellingOneJoinedRequestDoesNotCancelAnotherWaiter() async throws {
         let fixture = try await makeFixture(
             segments: [sine(amplitude: 0.5, frameCount: 10_000)]
         )
@@ -345,18 +558,78 @@ final class WaveformAnalyzerTests: XCTestCase {
         blocker.release()
 
         await assertCancelled(joined)
+        let values = try await first.value
+        XCTAssertEqual(values.count, 20)
+        let cached = try await fixture.fileStore.loadWaveformSnapshot(
+            meetingID: fixture.meetingID
+        )
+        XCTAssertEqual(cached.values, values)
+    }
+
+    func testCancellingEveryWaiterCancelsAnalysisAndWritesNoCache() async throws {
+        let fixture = try await makeFixture(
+            segments: [sine(amplitude: 0.5, frameCount: 10_000)]
+        )
+        let blocker = ChunkBlocker()
+        let analyzer = WaveformAnalyzer(
+            fileStore: fixture.fileStore,
+            beforeReadingChunk: { _ in
+                blocker.blockFirstChunk()
+            }
+        )
+        let first = Task {
+            try await analyzer.values(for: fixture.source, bucketCount: 20)
+        }
+        XCTAssertTrue(blocker.waitUntilBlocked(timeout: 2))
+        let second = Task {
+            try await analyzer.values(for: fixture.source, bucketCount: 20)
+        }
+
+        first.cancel()
+        second.cancel()
+        blocker.release()
+
         await assertCancelled(first)
+        await assertCancelled(second)
         do {
             _ = try await fixture.fileStore.loadWaveformSnapshot(
                 meetingID: fixture.meetingID
             )
-            XCTFail("Expected no cache after shared cancellation")
+            XCTFail("Expected no cache after all waiters cancel")
         } catch {
             XCTAssertEqual(
                 error as? MeetingFileStoreError,
                 .waveformNotFound(fixture.meetingID)
             )
         }
+    }
+
+    func testFailedSharedAnalysisIsRemovedSoANewRequestCanStart() async throws {
+        let fixture = try await makeFixture(segments: [[0.25, 0.5, 1, 0.5]])
+        let opener = FailOnceAudioOpener()
+        let analyzer = WaveformAnalyzer(
+            fileStore: fixture.fileStore,
+            openAudioFile: { url in
+                try opener.open(url)
+            }
+        )
+
+        do {
+            _ = try await analyzer.values(for: fixture.source, bucketCount: 2)
+            XCTFail("Expected the first analysis to fail")
+        } catch {
+            XCTAssertEqual(
+                error as? WaveformAnalyzerError,
+                .unreadableSegment(index: 0)
+            )
+        }
+
+        let values = try await analyzer.values(
+            for: fixture.source,
+            bucketCount: 2
+        )
+        XCTAssertEqual(values.count, 2)
+        XCTAssertEqual(opener.count, 2)
     }
 
     private func makeFixture(segments: [[Float]]) async throws -> Fixture {
@@ -474,6 +747,19 @@ final class WaveformAnalyzerTests: XCTestCase {
         file.close()
     }
 
+    private func replaceCAF(at destination: URL, samples: [Float]) throws {
+        let replacement = destination.deletingLastPathComponent()
+            .appendingPathComponent("replacement-\(UUID().uuidString).caf")
+        try writeCAF(samples: samples, to: replacement)
+        do {
+            try FileManager.default.removeItem(at: destination)
+            try FileManager.default.moveItem(at: replacement, to: destination)
+        } catch {
+            try? FileManager.default.removeItem(at: replacement)
+            throw error
+        }
+    }
+
     private func sine(amplitude: Float, frameCount: Int) -> [Float] {
         (0..<frameCount).map { index in
             amplitude * sin(2 * .pi * Float(index) / 4)
@@ -501,6 +787,19 @@ private final class AudioOpenCounter: @unchecked Sendable {
     }
 }
 
+private final class InvocationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedCount = 0
+
+    var count: Int {
+        lock.withLock { storedCount }
+    }
+
+    func record() {
+        lock.withLock { storedCount += 1 }
+    }
+}
+
 private final class ChunkRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var requestedFrameCounts: [AVAudioFrameCount] = []
@@ -515,6 +814,26 @@ private final class ChunkRecorder: @unchecked Sendable {
 
     func record(_ requestedFrameCount: AVAudioFrameCount) {
         lock.withLock { requestedFrameCounts.append(requestedFrameCount) }
+    }
+}
+
+private final class FailOnceAudioOpener: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedCount = 0
+
+    var count: Int {
+        lock.withLock { storedCount }
+    }
+
+    func open(_ url: URL) throws -> AVAudioFile {
+        let shouldFail = lock.withLock {
+            storedCount += 1
+            return storedCount == 1
+        }
+        if shouldFail {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return try AVAudioFile(forReading: url)
     }
 }
 
@@ -541,5 +860,73 @@ private final class ChunkBlocker: @unchecked Sendable {
 
     func release() {
         resume.signal()
+    }
+}
+
+private final class AudioFileReplacer: @unchecked Sendable {
+    private let lock = NSLock()
+    private let destination: URL
+    private let replacementSamples: [Float]
+    private var didReplace = false
+
+    init(
+        destination: URL,
+        replacementSamples: [Float]
+    ) {
+        self.destination = destination
+        self.replacementSamples = replacementSamples
+    }
+
+    var count: Int {
+        lock.withLock { didReplace ? 1 : 0 }
+    }
+
+    func replaceOnce() throws {
+        let shouldReplace = lock.withLock {
+            guard !didReplace else { return false }
+            didReplace = true
+            return true
+        }
+        guard shouldReplace else { return }
+
+        let replacement = destination.deletingLastPathComponent()
+            .appendingPathComponent("replacement-\(UUID().uuidString).caf")
+        try Self.writeCAF(samples: replacementSamples, to: replacement)
+        do {
+            try FileManager.default.removeItem(at: destination)
+            try FileManager.default.moveItem(at: replacement, to: destination)
+        } catch {
+            try? FileManager.default.removeItem(at: replacement)
+            throw error
+        }
+    }
+
+    private static func writeCAF(samples: [Float], to url: URL) throws {
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16_000,
+            channels: 1,
+            interleaved: false
+        ), let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(samples.count)
+        ) else {
+            throw CocoaError(.featureUnsupported)
+        }
+        let file = try AVAudioFile(
+            forWriting: url,
+            settings: format.settings,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        guard let channel = buffer.floatChannelData?[0] else {
+            throw CocoaError(.featureUnsupported)
+        }
+        for (index, sample) in samples.enumerated() {
+            channel[index] = sample
+        }
+        try file.write(from: buffer)
+        file.close()
     }
 }

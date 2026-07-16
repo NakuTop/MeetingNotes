@@ -6,6 +6,7 @@ struct WaveformSnapshot: Codable, Equatable, Sendable {
 
     let version: Int
     let manifestSignature: String
+    let sourceIdentitySignature: String
     let values: [Float]
 }
 
@@ -15,35 +16,59 @@ enum WaveformAnalyzerError: Error, Equatable, Sendable {
     case unreadableSegment(index: Int)
     case incompleteSegment(index: Int)
     case unsupportedAudioBuffer(index: Int)
+    case segmentIdentityChanged(index: Int)
 }
 
 actor WaveformAnalyzer {
     typealias AudioFileOpener = @Sendable (URL) throws -> AVAudioFile
     typealias BeforeReadingChunk = @Sendable (AVAudioFrameCount) throws -> Void
+    typealias CacheWriter = @Sendable (WaveformSnapshot, UUID) async throws -> Void
 
     private struct AnalysisKey: Hashable, Sendable {
         let meetingID: UUID
         let manifestSignature: String
+        let sourceIdentitySignature: String
         let bucketCount: Int
+    }
+
+    private struct InFlightAnalysis {
+        let task: Task<[Float], Error>
+        var waiters: Set<UUID>
     }
 
     private static let maximumFramesPerRead: AVAudioFrameCount = 4_096
 
+    /// Caps automatic waveform gain at 50 dB so inaudible numerical noise is
+    /// preserved as a tiny value instead of being expanded to full scale.
+    static let minimumNormalizationDecibelsFullScale = -50.0
+    static let minimumNormalizationRMS = pow(
+        10,
+        minimumNormalizationDecibelsFullScale / 20
+    )
+
     private let fileStore: MeetingFileStore
     private let openAudioFile: AudioFileOpener
     private let beforeReadingChunk: BeforeReadingChunk
-    private var inFlight: [AnalysisKey: Task<[Float], Error>] = [:]
+    private let cacheWriter: CacheWriter
+    private var inFlight: [AnalysisKey: InFlightAnalysis] = [:]
 
     init(
         fileStore: MeetingFileStore,
         openAudioFile: @escaping AudioFileOpener = { url in
             try AVAudioFile(forReading: url)
         },
-        beforeReadingChunk: @escaping BeforeReadingChunk = { _ in }
+        beforeReadingChunk: @escaping BeforeReadingChunk = { _ in },
+        cacheWriter: CacheWriter? = nil
     ) {
         self.fileStore = fileStore
         self.openAudioFile = openAudioFile
         self.beforeReadingChunk = beforeReadingChunk
+        self.cacheWriter = cacheWriter ?? { snapshot, meetingID in
+            try await fileStore.saveWaveformSnapshot(
+                snapshot,
+                meetingID: meetingID
+            )
+        }
     }
 
     func values(
@@ -56,59 +81,107 @@ actor WaveformAnalyzer {
         let key = AnalysisKey(
             meetingID: source.meetingID,
             manifestSignature: source.manifestSignature,
+            sourceIdentitySignature: source.identitySignature,
             bucketCount: bucketCount
         )
-        if let existing = inFlight[key] {
-            return try await withTaskCancellationHandler {
-                try await existing.value
-            } onCancel: {
-                existing.cancel()
-            }
-        }
+        let waiterID = UUID()
+        let analysis: Task<[Float], Error>
+        if var existing = inFlight[key] {
+            existing.waiters.insert(waiterID)
+            inFlight[key] = existing
+            analysis = existing.task
+        } else {
+            let fileStore = fileStore
+            let openAudioFile = openAudioFile
+            let beforeReadingChunk = beforeReadingChunk
+            let cacheWriter = cacheWriter
+            analysis = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+                if let cached = try await Self.cachedValues(
+                    fileStore: fileStore,
+                    source: source,
+                    bucketCount: bucketCount
+                ) {
+                    return cached
+                }
 
-        let fileStore = fileStore
-        let openAudioFile = openAudioFile
-        let beforeReadingChunk = beforeReadingChunk
-        let analysis = Task<[Float], Error> {
-            try Task.checkCancellation()
-            if let cached = try await Self.cachedValues(
-                fileStore: fileStore,
-                source: source,
-                bucketCount: bucketCount
-            ) {
-                return cached
-            }
-
-            let generated = try Self.generateValues(
-                source: source,
-                bucketCount: bucketCount,
-                openAudioFile: openAudioFile,
-                beforeReadingChunk: beforeReadingChunk
-            )
-            try Task.checkCancellation()
-            try await fileStore.saveWaveformSnapshot(
-                WaveformSnapshot(
+                let generated = try await Self.generateValues(
+                    fileStore: fileStore,
+                    source: source,
+                    bucketCount: bucketCount,
+                    openAudioFile: openAudioFile,
+                    beforeReadingChunk: beforeReadingChunk
+                )
+                try Task.checkCancellation()
+                try await Self.confirmIdentities(
+                    fileStore: fileStore,
+                    segments: source.resolvedSegments
+                )
+                let snapshot = WaveformSnapshot(
                     version: WaveformSnapshot.currentVersion,
                     manifestSignature: source.manifestSignature,
+                    sourceIdentitySignature: source.identitySignature,
                     values: generated
-                ),
-                meetingID: source.meetingID
+                )
+                do {
+                    try await cacheWriter(snapshot, source.meetingID)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    // The waveform is already complete and usable. A cache
+                    // failure should only make the next load recompute it.
+                    try Task.checkCancellation()
+                }
+                try Task.checkCancellation()
+                return generated
+            }
+            inFlight[key] = InFlightAnalysis(
+                task: analysis,
+                waiters: [waiterID]
             )
-            return generated
         }
-        inFlight[key] = analysis
 
         do {
             let result = try await withTaskCancellationHandler {
                 try await analysis.value
             } onCancel: {
-                analysis.cancel()
+                Task {
+                    await self.releaseWaiter(
+                        waiterID,
+                        for: key,
+                        cancelled: true
+                    )
+                }
             }
-            inFlight[key] = nil
+            try Task.checkCancellation()
+            releaseWaiter(waiterID, for: key, cancelled: false)
             return result
         } catch {
-            inFlight[key] = nil
+            releaseWaiter(
+                waiterID,
+                for: key,
+                cancelled: Task.isCancelled
+            )
             throw error
+        }
+    }
+
+    private func releaseWaiter(
+        _ waiterID: UUID,
+        for key: AnalysisKey,
+        cancelled: Bool
+    ) {
+        guard var current = inFlight[key],
+              current.waiters.remove(waiterID) != nil else {
+            return
+        }
+        if current.waiters.isEmpty {
+            inFlight[key] = nil
+            if cancelled {
+                current.task.cancel()
+            }
+        } else {
+            inFlight[key] = current
         }
     }
 
@@ -141,6 +214,9 @@ actor WaveformAnalyzer {
         source: MeetingAudioSource,
         bucketCount: Int
     ) async throws -> [Float]? {
+        guard source.resolvedSegments.count == source.segmentFrameCounts.count else {
+            throw WaveformAnalyzerError.invalidAudioSource
+        }
         let snapshot: WaveformSnapshot
         do {
             snapshot = try await fileStore.loadWaveformSnapshot(
@@ -152,6 +228,7 @@ actor WaveformAnalyzer {
 
         guard snapshot.version == WaveformSnapshot.currentVersion,
               snapshot.manifestSignature == source.manifestSignature,
+              snapshot.sourceIdentitySignature == source.identitySignature,
               snapshot.values.count == bucketCount,
               snapshot.values.allSatisfy({ value in
                   value.isFinite && (0...1).contains(value)
@@ -159,16 +236,21 @@ actor WaveformAnalyzer {
             return nil
         }
         try Task.checkCancellation()
+        try await confirmIdentities(
+            fileStore: fileStore,
+            segments: source.resolvedSegments
+        )
         return snapshot.values
     }
 
     private static func generateValues(
+        fileStore: MeetingFileStore,
         source: MeetingAudioSource,
         bucketCount: Int,
         openAudioFile: AudioFileOpener,
         beforeReadingChunk: BeforeReadingChunk
-    ) throws -> [Float] {
-        guard source.segmentURLs.count == source.segmentFrameCounts.count,
+    ) async throws -> [Float] {
+        guard source.resolvedSegments.count == source.segmentFrameCounts.count,
               source.totalFrames >= 0,
               source.sampleRate.isFinite,
               source.sampleRate > 0,
@@ -192,6 +274,10 @@ actor WaveformAnalyzer {
         guard validatedTotalFrames == source.totalFrames else {
             throw WaveformAnalyzerError.invalidAudioSource
         }
+        try await confirmIdentities(
+            fileStore: fileStore,
+            segments: source.resolvedSegments
+        )
         guard source.totalFrames > 0 else {
             return Array(repeating: 0, count: bucketCount)
         }
@@ -200,14 +286,29 @@ actor WaveformAnalyzer {
         var sampleCounts = Array(repeating: Int64(0), count: bucketCount)
         var globalFrame: Int64 = 0
 
-        for (segmentIndex, segmentURL) in source.segmentURLs.enumerated() {
+        for (segmentIndex, segment) in source.resolvedSegments.enumerated() {
             try Task.checkCancellation()
+            try await confirmIdentity(
+                fileStore: fileStore,
+                segment: segment,
+                index: segmentIndex
+            )
             let audioFile: AVAudioFile
             do {
-                audioFile = try openAudioFile(segmentURL)
+                audioFile = try openAudioFile(segment.url)
             } catch {
+                try await confirmIdentity(
+                    fileStore: fileStore,
+                    segment: segment,
+                    index: segmentIndex
+                )
                 throw WaveformAnalyzerError.unreadableSegment(index: segmentIndex)
             }
+            try await confirmIdentity(
+                fileStore: fileStore,
+                segment: segment,
+                index: segmentIndex
+            )
             let format = audioFile.processingFormat
             let channelCount = Int(format.channelCount)
             guard format.sampleRate == source.sampleRate,
@@ -236,6 +337,11 @@ actor WaveformAnalyzer {
                 do {
                     try audioFile.read(into: buffer, frameCount: requested)
                 } catch {
+                    try await confirmIdentity(
+                        fileStore: fileStore,
+                        segment: segment,
+                        index: segmentIndex
+                    )
                     throw WaveformAnalyzerError.incompleteSegment(
                         index: segmentIndex
                     )
@@ -281,11 +387,20 @@ actor WaveformAnalyzer {
                 throw WaveformAnalyzerError.incompleteSegment(index: segmentIndex)
             }
             audioFile.close()
+            try await confirmIdentity(
+                fileStore: fileStore,
+                segment: segment,
+                index: segmentIndex
+            )
         }
 
         guard globalFrame == source.totalFrames else {
             throw WaveformAnalyzerError.invalidAudioSource
         }
+        try await confirmIdentities(
+            fileStore: fileStore,
+            segments: source.resolvedSegments
+        )
         let rootMeanSquares = zip(sumSquares, sampleCounts).map { sum, count in
             guard count > 0 else { return 0.0 }
             return sqrt(sum / Double(count))
@@ -295,12 +410,48 @@ actor WaveformAnalyzer {
               maximum > 0 else {
             return Array(repeating: 0, count: bucketCount)
         }
+        let normalizationDenominator = max(
+            maximum,
+            minimumNormalizationRMS
+        )
 
         return rootMeanSquares.map { rootMeanSquare in
-            let normalized = min(1, max(0, rootMeanSquare / maximum))
+            let normalized = min(
+                1,
+                max(0, rootMeanSquare / normalizationDenominator)
+            )
             let curved = sqrt(normalized)
             guard curved.isFinite else { return 0 }
             return Float(min(1, max(0, curved)))
         }
+    }
+
+    private static func confirmIdentities(
+        fileStore: MeetingFileStore,
+        segments: [ResolvedMeetingRecordingSegment]
+    ) async throws {
+        for (index, segment) in segments.enumerated() {
+            try await confirmIdentity(
+                fileStore: fileStore,
+                segment: segment,
+                index: index
+            )
+        }
+    }
+
+    private static func confirmIdentity(
+        fileStore: MeetingFileStore,
+        segment: ResolvedMeetingRecordingSegment,
+        index: Int
+    ) async throws {
+        try Task.checkCancellation()
+        do {
+            try await fileStore.confirmIdentity(of: segment)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw WaveformAnalyzerError.segmentIdentityChanged(index: index)
+        }
+        try Task.checkCancellation()
     }
 }

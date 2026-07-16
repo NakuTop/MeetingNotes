@@ -15,6 +15,17 @@ final class MeetingAudioSourceLoaderTests: XCTestCase {
             source.segmentURLs.map(\.lastPathComponent),
             ["segment-0001.caf", "segment-0002.caf", "segment-0003.caf"]
         )
+        XCTAssertEqual(source.resolvedSegments.count, 3)
+        XCTAssertEqual(
+            source.resolvedSegments.map(\.url),
+            source.segmentURLs
+        )
+        let meetingDirectoryIdentity = try XCTUnwrap(
+            source.resolvedSegments.first?.meetingDirectoryIdentity
+        )
+        XCTAssertTrue(source.resolvedSegments.allSatisfy {
+            $0.meetingDirectoryIdentity == meetingDirectoryIdentity
+        })
         XCTAssertEqual(source.segmentFrameCounts, [3, 3, 1])
         XCTAssertEqual(source.sampleRate, 16_000, accuracy: 0.001)
         XCTAssertEqual(source.channelCount, 1)
@@ -22,6 +33,8 @@ final class MeetingAudioSourceLoaderTests: XCTestCase {
         XCTAssertEqual(source.duration, 7.0 / 16_000.0, accuracy: 0.000_000_1)
         XCTAssertFalse(source.manifestSignature.isEmpty)
         XCTAssertEqual(source.manifestSignature, secondLoad.manifestSignature)
+        XCTAssertFalse(source.identitySignature.isEmpty)
+        XCTAssertEqual(source.identitySignature, secondLoad.identitySignature)
     }
 
     func testManifestSignatureIsStableAndIncludesEveryPlaybackRelevantField() {

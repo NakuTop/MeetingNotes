@@ -4,12 +4,17 @@ import Foundation
 
 struct MeetingAudioSource: Equatable, Sendable {
     let meetingID: UUID
-    let segmentURLs: [URL]
+    let resolvedSegments: [ResolvedMeetingRecordingSegment]
     let segmentFrameCounts: [Int64]
     let sampleRate: Double
     let channelCount: Int
     let totalFrames: Int64
     let manifestSignature: String
+    let identitySignature: String
+
+    var segmentURLs: [URL] {
+        resolvedSegments.map(\.url)
+    }
 
     var duration: TimeInterval {
         Double(totalFrames) / sampleRate
@@ -117,8 +122,8 @@ actor MeetingAudioSourceLoader {
             totalFrames = addition.partialValue
         }
 
-        var segmentURLs: [URL] = []
-        segmentURLs.reserveCapacity(manifest.segments.count)
+        var resolvedSegments: [ResolvedMeetingRecordingSegment] = []
+        resolvedSegments.reserveCapacity(manifest.segments.count)
 
         for (index, segment) in manifest.segments.enumerated() {
             let resolvedSegment: ResolvedMeetingRecordingSegment
@@ -190,18 +195,37 @@ actor MeetingAudioSourceLoader {
                 throw error
             }
             try await confirmIdentity(of: resolvedSegment, segmentIndex: index)
-            segmentURLs.append(resolvedSegment.url)
+            resolvedSegments.append(resolvedSegment)
         }
 
         return MeetingAudioSource(
             meetingID: meetingID,
-            segmentURLs: segmentURLs,
+            resolvedSegments: resolvedSegments,
             segmentFrameCounts: manifest.segments.map(\.frameCount),
             sampleRate: manifest.sampleRate,
             channelCount: manifest.channelCount,
             totalFrames: totalFrames,
-            manifestSignature: Self.manifestSignature(for: manifest)
+            manifestSignature: Self.manifestSignature(for: manifest),
+            identitySignature: Self.identitySignature(
+                for: resolvedSegments
+            )
         )
+    }
+
+    static func identitySignature(
+        for segments: [ResolvedMeetingRecordingSegment]
+    ) -> String {
+        var canonical = "segmentCount:\(segments.count)\n"
+        for (index, segment) in segments.enumerated() {
+            canonical += "segment:\(index)\n"
+            canonical += "directoryDevice:\(segment.meetingDirectoryIdentity.deviceID)\n"
+            canonical += "directoryInode:\(segment.meetingDirectoryIdentity.inodeNumber)\n"
+            canonical += "fileDevice:\(segment.fileIdentity.deviceID)\n"
+            canonical += "fileInode:\(segment.fileIdentity.inodeNumber)\n"
+        }
+
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     static func manifestSignature(
