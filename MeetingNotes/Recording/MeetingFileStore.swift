@@ -79,6 +79,34 @@ actor MeetingFileStore {
         "\(meetingID.uuidString)/\(Self.manifestFileName)"
     }
 
+    func resolveSegmentURL(meetingID: UUID, fileName: String) throws -> URL {
+        let path = fileName as NSString
+        guard !fileName.isEmpty,
+              !path.isAbsolutePath,
+              path.pathComponents.count == 1,
+              path.lastPathComponent == fileName,
+              fileName != ".",
+              fileName != ".." else {
+            throw MeetingFileStoreError.invalidRelativePath(fileName)
+        }
+
+        let expectedMeetingDirectory = rootURL
+            .appendingPathComponent(meetingID.uuidString)
+            .standardizedFileURL
+        let meetingDirectory = try resolve(relativePath: meetingID.uuidString)
+        guard meetingDirectory.path == expectedMeetingDirectory.path else {
+            throw MeetingFileStoreError.invalidRelativePath(fileName)
+        }
+        let segmentURL = try resolve(
+            relativePath: "\(meetingID.uuidString)/\(fileName)"
+        )
+        guard segmentURL.deletingLastPathComponent().path
+                == expectedMeetingDirectory.path else {
+            throw MeetingFileStoreError.invalidRelativePath(fileName)
+        }
+        return segmentURL
+    }
+
     func resolve(relativePath: String) throws -> URL {
         let path = relativePath as NSString
         guard !relativePath.isEmpty, !path.isAbsolutePath else {
