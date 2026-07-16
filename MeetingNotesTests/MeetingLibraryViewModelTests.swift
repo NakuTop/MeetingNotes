@@ -469,6 +469,102 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.lastFailedStartMode)
     }
 
+    func testUnrelatedPinFailureClearsPermissionRepairAndMakesRetryNoOp() async {
+        let meeting = makeMeeting(seconds: 100)
+        let repository = LibraryRepositorySpy(
+            meetings: [meeting],
+            pinError: TestFailure.expected
+        )
+        let starter = SequencedMeetingStarterSpy(
+            outcomes: [
+                .failure(.permissionDenied([.screenRecording]))
+            ]
+        )
+        let viewModel = makeViewModel(
+            repository: repository,
+            starter: starter
+        )
+        viewModel.load()
+        await viewModel.startMeeting(mode: .online)
+
+        viewModel.togglePinned(id: meeting.id)
+
+        XCTAssertEqual(viewModel.errorMessage, "无法置顶会议，请重试。")
+        XCTAssertTrue(viewModel.permissionRepairPermissions.isEmpty)
+        XCTAssertNil(viewModel.lastFailedStartMode)
+
+        await viewModel.retryLastStart()
+        let startedModes = await starter.modes()
+        XCTAssertEqual(startedModes, [.online])
+    }
+
+    func testSuccessfulLoadClearsPermissionErrorAndRepairContext() async {
+        let starter = SequencedMeetingStarterSpy(
+            outcomes: [
+                .failure(.permissionDenied([.screenRecording]))
+            ]
+        )
+        let viewModel = makeViewModel(starter: starter)
+        await viewModel.startMeeting(mode: .online)
+
+        viewModel.load()
+
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertTrue(viewModel.permissionRepairPermissions.isEmpty)
+        XCTAssertNil(viewModel.lastFailedStartMode)
+
+        viewModel.reportControlFailure(TestFailure.expected)
+        XCTAssertEqual(
+            viewModel.errorMessage,
+            "录音操作未完成，请返回主窗口重试。"
+        )
+        XCTAssertTrue(viewModel.permissionRepairPermissions.isEmpty)
+        XCTAssertNil(viewModel.lastFailedStartMode)
+    }
+
+    func testDismissErrorClearsPermissionRepairContextAndMakesRetryNoOp() async {
+        let starter = SequencedMeetingStarterSpy(
+            outcomes: [
+                .failure(.permissionDenied([.screenRecording]))
+            ]
+        )
+        let viewModel = makeViewModel(starter: starter)
+        await viewModel.startMeeting(mode: .online)
+
+        viewModel.dismissError()
+
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertTrue(viewModel.permissionRepairPermissions.isEmpty)
+        XCTAssertNil(viewModel.lastFailedStartMode)
+
+        await viewModel.retryLastStart()
+        let startedModes = await starter.modes()
+        XCTAssertEqual(startedModes, [.online])
+    }
+
+    func testControlFailureReplacesPermissionErrorAndClearsRepairContext() async {
+        let starter = SequencedMeetingStarterSpy(
+            outcomes: [
+                .failure(.permissionDenied([.microphone, .screenRecording]))
+            ]
+        )
+        let viewModel = makeViewModel(starter: starter)
+        await viewModel.startMeeting(mode: .online)
+
+        viewModel.reportControlFailure(TestFailure.expected)
+
+        XCTAssertEqual(
+            viewModel.errorMessage,
+            "录音操作未完成，请返回主窗口重试。"
+        )
+        XCTAssertTrue(viewModel.permissionRepairPermissions.isEmpty)
+        XCTAssertNil(viewModel.lastFailedStartMode)
+
+        await viewModel.retryLastStart()
+        let startedModes = await starter.modes()
+        XCTAssertEqual(startedModes, [.online])
+    }
+
     func testSummaryActionIsDisabledBeforeReady() {
         let viewModel = makeViewModel()
 

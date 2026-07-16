@@ -26,6 +26,12 @@ extension MeetingCoordinator: MeetingStarting {}
 @MainActor
 @Observable
 final class MeetingLibraryViewModel {
+    private struct ErrorPresentation: Equatable {
+        var message: String?
+        var repairPermissions: [CapturePermission] = []
+        var failedStartMode: MeetingMode?
+    }
+
     private let repository: any MeetingLibraryRepository
     private let fileDeleter: any MeetingFileDeleting
     private let starter: any MeetingStarting
@@ -40,10 +46,16 @@ final class MeetingLibraryViewModel {
     private(set) var deletingMeetingIDs: Set<UUID> = []
     private(set) var pinningMeetingIDs: Set<UUID> = []
     private(set) var renamingMeetingIDs: Set<UUID> = []
-    private(set) var errorMessage: String?
-    private(set) var permissionRepairPermissions: [CapturePermission] = []
-    private(set) var lastFailedStartMode: MeetingMode?
+    private var errorPresentation = ErrorPresentation()
     private(set) var systemRequirementsSnapshot: SystemRequirementsSnapshot
+
+    var errorMessage: String? { errorPresentation.message }
+    var permissionRepairPermissions: [CapturePermission] {
+        errorPresentation.repairPermissions
+    }
+    var lastFailedStartMode: MeetingMode? {
+        errorPresentation.failedStartMode
+    }
 
     init(
         repository: any MeetingLibraryRepository,
@@ -79,9 +91,9 @@ final class MeetingLibraryViewModel {
                !meetings.contains(where: { $0.id == selectedMeetingID }) {
                 self.selectedMeetingID = nil
             }
-            errorMessage = nil
+            setErrorPresentation()
         } catch {
-            errorMessage = "无法加载会议记录，请重试。"
+            setErrorPresentation(message: "无法加载会议记录，请重试。")
         }
     }
 
@@ -96,38 +108,42 @@ final class MeetingLibraryViewModel {
     func togglePinned(id: UUID, at date: Date = .now) {
         guard !pinningMeetingIDs.contains(id) else { return }
         guard let meeting = meetingForOperation(id: id) else {
-            errorMessage = "找不到要置顶的会议，请刷新后重试。"
+            setErrorPresentation(message: "找不到要置顶的会议，请刷新后重试。")
             return
         }
         let targetDate: Date? = meeting.isPinned ? nil : date
         pinningMeetingIDs.insert(id)
-        errorMessage = nil
+        setErrorPresentation()
         defer { pinningMeetingIDs.remove(id) }
 
         do {
             try repository.setPinned(meetingID: id, pinnedAt: targetDate)
             load()
         } catch {
-            errorMessage = targetDate == nil
-                ? "无法取消置顶会议，请重试。"
-                : "无法置顶会议，请重试。"
+            setErrorPresentation(
+                message: targetDate == nil
+                    ? "无法取消置顶会议，请重试。"
+                    : "无法置顶会议，请重试。"
+            )
         }
     }
 
     func renameMeeting(id: UUID, title: String) async -> Bool {
         guard !renamingMeetingIDs.contains(id) else { return false }
         guard let meeting = meetingForOperation(id: id) else {
-            errorMessage = "找不到要重命名的会议，请刷新后重试。"
+            setErrorPresentation(message: "找不到要重命名的会议，请刷新后重试。")
             return false
         }
         guard canRename(meeting) else {
-            errorMessage = MeetingTitleUpdateError
-                .invalidState(meeting.state)
-                .userMessage
+            setErrorPresentation(
+                message: MeetingTitleUpdateError
+                    .invalidState(meeting.state)
+                    .userMessage
+            )
             return false
         }
         renamingMeetingIDs.insert(id)
-        errorMessage = nil
+        setErrorPresentation()
         defer { renamingMeetingIDs.remove(id) }
 
         do {
@@ -137,29 +153,31 @@ final class MeetingLibraryViewModel {
         } catch is CancellationError {
             return false
         } catch let error as MeetingTitleUpdateError {
-            errorMessage = error.userMessage
+            setErrorPresentation(message: error.userMessage)
             return false
         } catch {
-            errorMessage = "无法重命名会议，请稍后重试。"
+            setErrorPresentation(message: "无法重命名会议，请稍后重试。")
             return false
         }
     }
 
     func startMeeting(mode: MeetingMode) async {
         guard !isStarting else { return }
-        permissionRepairPermissions = []
-        lastFailedStartMode = nil
+        setErrorPresentation()
         refreshSystemRequirements()
         guard systemRequirementsSnapshot.isSupportedPlatform else {
-            errorMessage = "仅支持 macOS 15 或更高版本的 Apple Silicon Mac。"
+            setErrorPresentation(
+                message: "仅支持 macOS 15 或更高版本的 Apple Silicon Mac。"
+            )
             return
         }
         guard systemRequirementsSnapshot.hasEnoughDiskSpace else {
-            errorMessage = "可用磁盘空间不足 2 GB，无法安全开始录音。"
+            setErrorPresentation(
+                message: "可用磁盘空间不足 2 GB，无法安全开始录音。"
+            )
             return
         }
         isStarting = true
-        errorMessage = nil
         defer { isStarting = false }
 
         do {
@@ -167,42 +185,45 @@ final class MeetingLibraryViewModel {
             load()
             selectedMeetingID = createdMeetingID
         } catch {
+            let message = Self.message(for: error, operation: .start)
             if case let MeetingCoordinatorError.permissionDenied(permissions) =
                 error {
-                permissionRepairPermissions = permissions.sorted {
-                    Self.permissionRank($0) < Self.permissionRank($1)
-                }
-                lastFailedStartMode = mode
+                setErrorPresentation(
+                    message: message,
+                    repairPermissions: permissions.sorted {
+                        Self.permissionRank($0) < Self.permissionRank($1)
+                    },
+                    failedStartMode: mode
+                )
+            } else {
+                setErrorPresentation(message: message)
             }
-            errorMessage = Self.message(for: error, operation: .start)
         }
     }
 
     func retryLastStart() async {
         guard !isStarting, let mode = lastFailedStartMode else { return }
-        errorMessage = nil
-        permissionRepairPermissions = []
-        lastFailedStartMode = nil
+        setErrorPresentation()
         await startMeeting(mode: mode)
     }
 
     func deleteMeeting(id: UUID) async {
         guard !deletingMeetingIDs.contains(id) else { return }
         guard let meeting = meetingForOperation(id: id) else {
-            errorMessage = "找不到要删除的会议，请刷新后重试。"
+            setErrorPresentation(message: "找不到要删除的会议，请刷新后重试。")
             return
         }
         guard canDelete(meeting) else {
-            errorMessage = "会议正在录制或处理中，暂时不能删除。"
+            setErrorPresentation(message: "会议正在录制或处理中，暂时不能删除。")
             return
         }
         guard operationGate.acquire(.delete, for: id) else {
-            errorMessage = "会议正在执行其他操作，暂时不能删除。"
+            setErrorPresentation(message: "会议正在执行其他操作，暂时不能删除。")
             return
         }
         defer { operationGate.release(.delete, for: id) }
         deletingMeetingIDs.insert(id)
-        errorMessage = nil
+        setErrorPresentation()
         defer { deletingMeetingIDs.remove(id) }
 
         do {
@@ -213,7 +234,9 @@ final class MeetingLibraryViewModel {
             }
             load()
         } catch {
-            errorMessage = Self.message(for: error, operation: .delete)
+            setErrorPresentation(
+                message: Self.message(for: error, operation: .delete)
+            )
         }
     }
 
@@ -255,13 +278,13 @@ final class MeetingLibraryViewModel {
     }
 
     func dismissError() {
-        errorMessage = nil
-        permissionRepairPermissions = []
-        lastFailedStartMode = nil
+        setErrorPresentation()
     }
 
     func reportControlFailure(_ error: Error) {
-        errorMessage = Self.message(for: error, operation: .control)
+        setErrorPresentation(
+            message: Self.message(for: error, operation: .control)
+        )
     }
 
     func refreshSystemRequirements() {
@@ -273,6 +296,18 @@ final class MeetingLibraryViewModel {
     private func meetingForOperation(id: UUID) -> MeetingRecord? {
         meetings.first(where: { $0.id == id })
             ?? (try? repository.meetings().first { $0.id == id })
+    }
+
+    private func setErrorPresentation(
+        message: String? = nil,
+        repairPermissions: [CapturePermission] = [],
+        failedStartMode: MeetingMode? = nil
+    ) {
+        errorPresentation = ErrorPresentation(
+            message: message,
+            repairPermissions: repairPermissions,
+            failedStartMode: failedStartMode
+        )
     }
 
     private enum Operation {
