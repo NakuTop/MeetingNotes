@@ -272,20 +272,24 @@ final class MeetingFlowUITests: XCTestCase {
         let sheetCancel = app.buttons["meeting.rename.cancel"]
         XCTAssertTrue(sheetCancel.exists)
         XCTAssertTrue(sheetCancel.isEnabled)
-        sheetCancel.click()
+        XCTAssertTrue(waitForDisabled(sheetField))
+        app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(sheetField.waitForNonExistence(timeout: 1))
-        assertStaysAbsent(sheetField, for: 2)
+        assertStaysAbsent(sheetField, for: 5.5)
         XCTAssertTrue(waitForValue("慢速归档会议", on: detailTitle))
         XCTAssertTrue(waitForLabelContaining("慢速归档会议", on: historyRow))
+        XCTAssertFalse(
+            app.staticTexts["无法重命名会议，请稍后重试。"].exists
+        )
 
         historyRow.rightClick()
         app.descendants(matching: .any)["meeting.context.rename"].click()
         XCTAssertTrue(sheetField.waitForExistence(timeout: 3))
         replaceText(in: sheetField, with: "取消后重试成功")
         sheetField.typeKey(.return, modifierFlags: [])
-        XCTAssertTrue(waitForValue("取消后重试成功", on: detailTitle, timeout: 5))
+        XCTAssertTrue(waitForValue("取消后重试成功", on: detailTitle, timeout: 8))
         XCTAssertTrue(
-            waitForLabelContaining("取消后重试成功", on: historyRow, timeout: 5)
+            waitForLabelContaining("取消后重试成功", on: historyRow, timeout: 8)
         )
 
         let detailRename = app.buttons["meeting.detail.rename"]
@@ -299,10 +303,15 @@ final class MeetingFlowUITests: XCTestCase {
         let detailCancel = app.buttons["meeting.detail.renameCancel"]
         XCTAssertTrue(detailCancel.exists)
         XCTAssertTrue(detailCancel.isEnabled)
-        detailCancel.click()
+        XCTAssertTrue(waitForDisabled(detailField))
+        app.typeKey(.escape, modifierFlags: [])
         XCTAssertTrue(detailField.waitForNonExistence(timeout: 1))
+        assertStaysAbsent(detailField, for: 5.5)
         XCTAssertTrue(waitForValue("取消后重试成功", on: detailTitle))
         XCTAssertTrue(waitForLabelContaining("取消后重试成功", on: historyRow))
+        XCTAssertFalse(
+            app.descendants(matching: .any)["meeting.detail.renameError"].exists
+        )
     }
 
     private func launchApp(
@@ -401,6 +410,20 @@ final class MeetingFlowUITests: XCTestCase {
         let predicate = NSPredicate(format: "value == %@", value)
         let expectation = XCTNSPredicateExpectation(
             predicate: predicate,
+            object: element
+        )
+        return XCTWaiter.wait(
+            for: [expectation],
+            timeout: timeout
+        ) == .completed
+    }
+
+    private func waitForDisabled(
+        _ element: XCUIElement,
+        timeout: TimeInterval = 3
+    ) -> Bool {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "enabled == false"),
             object: element
         )
         return XCTWaiter.wait(

@@ -501,6 +501,51 @@ final class MeetingTitleUpdateUseCaseTests: XCTestCase {
         XCTAssertEqual(meeting.title, "重试成功")
     }
 
+    func testRemoteCancellationAfterCommitRestoresOldTitleAndAllowsRetry() async throws {
+        let gate = MeetingOperationGate()
+        let meeting = makeMeeting(
+            state: .archived,
+            notionPageID: "notion-page"
+        )
+        let repository = TitleRepositorySpy(meeting: meeting)
+        let updater = CancellationThrowingNotionTitleUpdater()
+        let useCase = makeUseCase(
+            repository: repository,
+            credentials: TitleCredentialStore(notionToken: "notion-token"),
+            updater: updater,
+            operationGate: gate
+        )
+
+        do {
+            try await useCase.updateTitle(
+                meetingID: meeting.id,
+                title: "远端已提交但随后取消"
+            )
+            XCTFail("Expected cancellation to escape")
+        } catch is CancellationError {
+            // Expected control-flow cancellation.
+        } catch {
+            XCTFail("Expected CancellationError, received \(error)")
+        }
+
+        XCTAssertEqual(updater.titles, ["远端已提交但随后取消", "旧标题"])
+        XCTAssertTrue(repository.updateTitles.isEmpty)
+        XCTAssertEqual(meeting.title, "旧标题")
+        XCTAssertFalse(gate.isActive(for: meeting.id))
+
+        try await useCase.updateTitle(
+            meetingID: meeting.id,
+            title: "取消后再次成功"
+        )
+
+        XCTAssertEqual(
+            updater.titles,
+            ["远端已提交但随后取消", "旧标题", "取消后再次成功"]
+        )
+        XCTAssertEqual(repository.updateTitles, ["取消后再次成功"])
+        XCTAssertEqual(meeting.title, "取消后再次成功")
+    }
+
     func testSummaryGateRejectsRenameBeforeRemoteOrLocalUpdate() async throws {
         let gate = MeetingOperationGate()
         let meeting = makeMeeting(
@@ -818,6 +863,25 @@ private final class CancellationReturningNotionTitleUpdater:
         } catch is CancellationError {
             // Simulate a server that committed before its client noticed cancel.
             return
+        }
+    }
+}
+
+@MainActor
+private final class CancellationThrowingNotionTitleUpdater:
+    MeetingNotionTitleUpdating {
+    private(set) var titles: [String] = []
+
+    func updatePageTitle(
+        token: String,
+        pageID: String,
+        title: String
+    ) async throws {
+        _ = token
+        _ = pageID
+        titles.append(title)
+        if titles.count == 1 {
+            throw CancellationError()
         }
     }
 }

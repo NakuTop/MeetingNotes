@@ -109,7 +109,7 @@ private final class UITestDelayedNotionTitleUpdater:
         _ = token
         _ = pageID
         _ = title
-        try await Task.sleep(for: .milliseconds(1_500))
+        try await Task.sleep(for: .seconds(5))
     }
 }
 

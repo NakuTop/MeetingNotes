@@ -169,6 +169,7 @@ struct MeetingDetailView: View {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(.borderless)
+                .keyboardShortcut(.cancelAction)
                 .accessibilityLabel("取消重命名")
                 .accessibilityIdentifier("meeting.detail.renameCancel")
 

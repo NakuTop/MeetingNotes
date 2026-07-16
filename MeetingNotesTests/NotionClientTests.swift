@@ -236,6 +236,38 @@ final class NotionClientTests: XCTestCase {
         }
     }
 
+    func testUpdatePageTitlePropagatesCancellationError() async throws {
+        let httpClient = QueuedNotionHTTPClient(responses: [
+            .failure(CancellationError())
+        ])
+        let client = NotionClient(token: "test-token", httpClient: httpClient)
+
+        do {
+            try await client.updatePageTitle(pageID: "page-id", title: "新标题")
+            XCTFail("Expected cancellation to escape")
+        } catch is CancellationError {
+            // Expected control-flow cancellation.
+        } catch {
+            XCTFail("Expected CancellationError, received \(error)")
+        }
+    }
+
+    func testUpdatePageTitleMapsCancelledURLErrorToCancellationError() async throws {
+        let httpClient = QueuedNotionHTTPClient(responses: [
+            .failure(URLError(.cancelled))
+        ])
+        let client = NotionClient(token: "test-token", httpClient: httpClient)
+
+        do {
+            try await client.updatePageTitle(pageID: "page-id", title: "新标题")
+            XCTFail("Expected URL cancellation to escape as CancellationError")
+        } catch is CancellationError {
+            // Expected control-flow cancellation.
+        } catch {
+            XCTFail("Expected CancellationError, received \(error)")
+        }
+    }
+
     private static func jsonBody(_ request: URLRequest) throws -> [String: Any] {
         let data = try XCTUnwrap(request.httpBody)
         return try XCTUnwrap(

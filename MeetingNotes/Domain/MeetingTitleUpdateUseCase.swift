@@ -152,15 +152,13 @@ final class MeetingTitleUpdateUseCase: MeetingTitleUpdating {
                 pageID: pageID,
                 title: canonicalTitle
             )
-            guard !Task.isCancelled else {
-                await restoreNotionTitle(
-                    token: token,
-                    pageID: pageID,
-                    title: previousTitle
-                )
-                throw CancellationError()
-            }
+            try Task.checkCancellation()
         } catch is CancellationError {
+            await restoreNotionTitle(
+                token: token,
+                pageID: pageID,
+                title: previousTitle
+            )
             throw CancellationError()
         } catch let error as NotionClientError {
             throw MeetingTitleUpdateError.notion(error)

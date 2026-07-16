@@ -152,6 +152,10 @@ struct NotionClient: NotionAPIClient, Sendable {
     private func perform(_ request: URLRequest) async throws -> Data {
         do {
             return try await httpClient.data(for: request).0
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch let error as NotionClientError {
             throw error
         } catch HTTPClientError.unacceptableStatus(let status) {
