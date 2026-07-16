@@ -289,8 +289,7 @@ actor MeetingCoordinator {
             var readyMachine = stateMachine
             try readyMachine.send(.finalized)
             stateMachine = readyMachine
-            finalActiveDuration = activeDuration
-            releaseActiveResources()
+            resetAfterSuccessfulStop()
         } catch {
             finalActiveDuration = activeDuration
             await transcriber.drain()
@@ -383,6 +382,16 @@ actor MeetingCoordinator {
         pendingTranscriptionSamples.removeAll(keepingCapacity: true)
         nextTranscriptionSampleOffset = 0
         totalSampleCount = 0
+        bookmarkCount = 0
+        finalActiveDuration = 0
+        captureFailed = false
+    }
+
+    private func resetAfterSuccessfulStop() {
+        stateMachine = RecordingStateMachine()
+        meetingID = nil
+        mode = nil
+        releaseActiveResources()
         bookmarkCount = 0
         finalActiveDuration = 0
         captureFailed = false

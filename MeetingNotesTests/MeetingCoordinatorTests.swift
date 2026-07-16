@@ -90,7 +90,7 @@ final class MeetingCoordinatorTests: XCTestCase {
 
     func testStopUsesSafeOrderAndRejectsDuplicateLifecycleCommands() async throws {
         let fixture = makeFixture()
-        try await fixture.coordinator.start(mode: .offline)
+        let meetingID = try await fixture.coordinator.start(mode: .offline)
 
         do {
             try await fixture.coordinator.start(mode: .online)
@@ -110,6 +110,7 @@ final class MeetingCoordinatorTests: XCTestCase {
         let events = await fixture.events.values()
         let snapshot = await fixture.coordinator.snapshot()
         let savedFinalization = await fixture.repository.finalization()
+        let persistedState = await fixture.repository.savedState(for: meetingID)
         let finalization = try XCTUnwrap(savedFinalization)
         XCTAssertEqual(
             events,
@@ -122,8 +123,13 @@ final class MeetingCoordinatorTests: XCTestCase {
                 "repository.finalize"
             ]
         )
-        XCTAssertEqual(snapshot.state, .ready)
-        XCTAssertEqual(snapshot.activeTime, 25, accuracy: 0.001)
+        XCTAssertEqual(snapshot.state, .idle)
+        XCTAssertNil(snapshot.meetingID)
+        XCTAssertNil(snapshot.mode)
+        XCTAssertEqual(snapshot.activeTime, 0, accuracy: 0.001)
+        XCTAssertEqual(snapshot.bookmarkCount, 0)
+        XCTAssertFalse(snapshot.captureFailed)
+        XCTAssertEqual(persistedState, .ready)
         XCTAssertEqual(finalization.activeDuration, 25, accuracy: 0.001)
         XCTAssertEqual(
             finalization.endedAt,
@@ -136,9 +142,98 @@ final class MeetingCoordinatorTests: XCTestCase {
         } catch {
             XCTAssertEqual(
                 error as? RecordingStateError,
-                .invalidTransition(.ready, .stop)
+                .invalidTransition(.idle, .stop)
             )
         }
+    }
+
+    func testStartsOfflineAgainAfterSuccessfulOfflineMeeting() async throws {
+        let fixture = makeFixture()
+
+        let firstID = try await fixture.coordinator.start(mode: .offline)
+        try await fixture.coordinator.stop()
+        let secondID = try await fixture.coordinator.start(mode: .offline)
+        let captureModes = await fixture.captureModes.values()
+        let meetings = await fixture.repository.savedMeetings()
+
+        XCTAssertNotEqual(firstID, secondID)
+        XCTAssertEqual(captureModes, [.offline, .offline])
+        XCTAssertEqual(
+            meetings,
+            [
+                .init(id: firstID, mode: .offline, state: .ready),
+                .init(id: secondID, mode: .offline, state: .recording)
+            ]
+        )
+    }
+
+    func testStartsOnlineAfterSuccessfulOfflineMeeting() async throws {
+        let fixture = makeFixture()
+
+        let firstID = try await fixture.coordinator.start(mode: .offline)
+        try await fixture.coordinator.stop()
+        let secondID = try await fixture.coordinator.start(mode: .online)
+        let captureModes = await fixture.captureModes.values()
+        let meetings = await fixture.repository.savedMeetings()
+
+        XCTAssertNotEqual(firstID, secondID)
+        XCTAssertEqual(captureModes, [.offline, .online])
+        XCTAssertEqual(
+            meetings,
+            [
+                .init(id: firstID, mode: .offline, state: .ready),
+                .init(id: secondID, mode: .online, state: .recording)
+            ]
+        )
+    }
+
+    func testStartsOfflineAfterSuccessfulOnlineMeeting() async throws {
+        let fixture = makeFixture()
+
+        let firstID = try await fixture.coordinator.start(mode: .online)
+        try await fixture.coordinator.stop()
+        let secondID = try await fixture.coordinator.start(mode: .offline)
+        let captureModes = await fixture.captureModes.values()
+        let meetings = await fixture.repository.savedMeetings()
+
+        XCTAssertNotEqual(firstID, secondID)
+        XCTAssertEqual(captureModes, [.online, .offline])
+        XCTAssertEqual(
+            meetings,
+            [
+                .init(id: firstID, mode: .online, state: .ready),
+                .init(id: secondID, mode: .offline, state: .recording)
+            ]
+        )
+    }
+
+    func testSuccessfulStopClearsSessionDiagnosticsAfterFinalizingReadyMeeting() async throws {
+        let frame = CapturedAudioFrame(
+            timestamp: 0,
+            sampleRate: 16_000,
+            samples: [0, 1, 2, 3]
+        )
+        let fixture = makeFixture(frames: [frame], writerFailsAppend: true)
+        let meetingID = try await fixture.coordinator.start(mode: .offline)
+        try await fixture.coordinator.bookmark()
+        for _ in 0..<100 {
+            if await fixture.coordinator.snapshot().captureFailed {
+                break
+            }
+            await Task.yield()
+        }
+
+        try await fixture.coordinator.stop()
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let persistedState = await fixture.repository.savedState(for: meetingID)
+        XCTAssertEqual(snapshot.state, .idle)
+        XCTAssertNil(snapshot.meetingID)
+        XCTAssertNil(snapshot.mode)
+        XCTAssertEqual(snapshot.activeTime, 0, accuracy: 0.001)
+        XCTAssertEqual(snapshot.bookmarkCount, 0)
+        XCTAssertFalse(snapshot.captureFailed)
+        XCTAssertEqual(persistedState, .ready)
     }
 
     func testRoutesNormalizedAudioToWriterAndFixedTranscriptionChunks() async throws {
@@ -228,6 +323,29 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertTrue(updatesFinished)
         XCTAssertEqual(panelCalls, ["show", "hide"])
         XCTAssertEqual(snapshot.state, .finalizing)
+        XCTAssertNotNil(snapshot.meetingID)
+        XCTAssertEqual(snapshot.mode, .offline)
+    }
+
+    func testRepositoryFinalizeFailurePreservesFailedSessionDiagnostics() async throws {
+        let fixture = makeFixture(repositoryFailsFinalize: true)
+        let meetingID = try await fixture.coordinator.start(mode: .online)
+        await fixture.clock.setMonotonic(125)
+
+        do {
+            try await fixture.coordinator.stop()
+            XCTFail("Expected repository finalize failure")
+        } catch {
+            XCTAssertEqual(error as? CoordinatorTestError, .repositoryFinalize)
+        }
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let persistedState = await fixture.repository.savedState(for: meetingID)
+        XCTAssertEqual(snapshot.state, .finalizing)
+        XCTAssertEqual(snapshot.meetingID, meetingID)
+        XCTAssertEqual(snapshot.mode, .online)
+        XCTAssertEqual(snapshot.activeTime, 25, accuracy: 0.001)
+        XCTAssertEqual(persistedState, .finalizing)
     }
 
     func testFinalizingPersistenceFailureKeepsRecorderVisibleForRetry() async throws {
@@ -243,8 +361,12 @@ final class MeetingCoordinatorTests: XCTestCase {
 
         let panelCalls = await fixture.panel.calls()
         let events = await fixture.events.values()
+        let snapshot = await fixture.coordinator.snapshot()
         XCTAssertEqual(panelCalls, ["show"])
         XCTAssertFalse(events.contains("capture.stop"))
+        XCTAssertEqual(snapshot.state, .recording)
+        XCTAssertNotNil(snapshot.meetingID)
+        XCTAssertEqual(snapshot.mode, .offline)
     }
 
     func testRejectsOverlappingPauseAndStopOperations() async throws {
@@ -290,9 +412,11 @@ final class MeetingCoordinatorTests: XCTestCase {
         writerFailsAppend: Bool = false,
         writerFailsFinish: Bool = false,
         repositoryFailsFinalizingUpdate: Bool = false,
+        repositoryFailsFinalize: Bool = false,
         captureSuspendsPause: Bool = false
     ) -> CoordinatorFixture {
         let events = CoordinatorEventLog()
+        let captureModes = CoordinatorModeLog()
         let capture = FakeCoordinatorCapture(
             events: events,
             failsToStart: captureFailsToStart,
@@ -310,7 +434,8 @@ final class MeetingCoordinatorTests: XCTestCase {
         )
         let repository = FakeCoordinatorRepository(
             events: events,
-            failsFinalizingUpdate: repositoryFailsFinalizingUpdate
+            failsFinalizingUpdate: repositoryFailsFinalizingUpdate,
+            failsFinalize: repositoryFailsFinalize
         )
         let panel = FakeCoordinatorPanel(events: events)
         let clock = ManualCoordinatorClock(
@@ -319,7 +444,10 @@ final class MeetingCoordinatorTests: XCTestCase {
         )
         let dependencies = MeetingCoordinatorDependencies(
             permissions: FakeCoordinatorPermissions(statuses: permissions),
-            captureFactory: FakeCoordinatorCaptureFactory(capture: capture),
+            captureFactory: FakeCoordinatorCaptureFactory(
+                capture: capture,
+                modes: captureModes
+            ),
             writerFactory: FakeCoordinatorWriterFactory(writer: writer),
             transcriptionFactory: FakeCoordinatorTranscriptionFactory(
                 transcriber: transcriber
@@ -334,6 +462,7 @@ final class MeetingCoordinatorTests: XCTestCase {
                 transcriptionChunkSampleCount: transcriptionChunkSampleCount
             ),
             events: events,
+            captureModes: captureModes,
             capture: capture,
             writer: writer,
             transcriber: transcriber,
@@ -347,6 +476,7 @@ final class MeetingCoordinatorTests: XCTestCase {
 private struct CoordinatorFixture {
     let coordinator: MeetingCoordinator
     let events: CoordinatorEventLog
+    let captureModes: CoordinatorModeLog
     let capture: FakeCoordinatorCapture
     let writer: FakeCoordinatorWriter
     let transcriber: FakeCoordinatorTranscriber
@@ -360,6 +490,7 @@ private enum CoordinatorTestError: Error, Equatable {
     case repositoryUpdate
     case writerAppend
     case writerFinish
+    case repositoryFinalize
 }
 
 private actor CoordinatorEventLog {
@@ -375,6 +506,18 @@ private actor CoordinatorEventLog {
 
     func removeAll() {
         entries.removeAll()
+    }
+}
+
+private actor CoordinatorModeLog {
+    private var modes: [MeetingMode] = []
+
+    func append(_ mode: MeetingMode) {
+        modes.append(mode)
+    }
+
+    func values() -> [MeetingMode] {
+        modes
     }
 }
 
@@ -394,9 +537,10 @@ private struct FakeCoordinatorPermissions: MeetingPermissionAuthorizing {
 
 private struct FakeCoordinatorCaptureFactory: MeetingCaptureSourceFactory {
     let capture: FakeCoordinatorCapture
+    let modes: CoordinatorModeLog
 
     func makeCapture(for mode: MeetingMode) async throws -> any AudioCaptureSource {
-        _ = mode
+        await modes.append(mode)
         return capture
     }
 }
@@ -574,6 +718,12 @@ private actor FakeCoordinatorTranscriber: MeetingTranscriptionQueueing {
 }
 
 private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
+    struct SavedMeeting: Equatable, Sendable {
+        let id: UUID
+        let mode: MeetingMode
+        var state: RecordingState
+    }
+
     struct Finalization: Equatable, Sendable {
         let endedAt: Date
         let activeDuration: TimeInterval
@@ -581,34 +731,41 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
 
     private let events: CoordinatorEventLog
     private let failsFinalizingUpdate: Bool
-    private let meetingID = UUID()
+    private let failsFinalize: Bool
+    private var meetings: [SavedMeeting] = []
     private var bookmarks: [TimeInterval] = []
     private var transcripts: [TranscriptDraft] = []
     private var savedFinalization: Finalization?
 
     init(
         events: CoordinatorEventLog,
-        failsFinalizingUpdate: Bool
+        failsFinalizingUpdate: Bool,
+        failsFinalize: Bool
     ) {
         self.events = events
         self.failsFinalizingUpdate = failsFinalizingUpdate
+        self.failsFinalize = failsFinalize
     }
 
     func createMeeting(mode: MeetingMode, startedAt: Date) async throws -> UUID {
-        _ = mode
         _ = startedAt
         await events.append("repository.create")
+        let meetingID = UUID()
+        meetings.append(
+            SavedMeeting(id: meetingID, mode: mode, state: .preparing)
+        )
         return meetingID
     }
 
     func updateState(meetingID: UUID, state: RecordingState) async throws {
-        _ = meetingID
-        guard state == .finalizing else {
-            return
+        if state == .finalizing {
+            await events.append("repository.finalizing")
+            if failsFinalizingUpdate {
+                throw CoordinatorTestError.repositoryUpdate
+            }
         }
-        await events.append("repository.finalizing")
-        if failsFinalizingUpdate {
-            throw CoordinatorTestError.repositoryUpdate
+        if let index = meetings.firstIndex(where: { $0.id == meetingID }) {
+            meetings[index].state = state
         }
     }
 
@@ -627,16 +784,21 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
         endedAt: Date,
         activeDuration: TimeInterval
     ) async throws {
-        _ = meetingID
+        if failsFinalize {
+            throw CoordinatorTestError.repositoryFinalize
+        }
         savedFinalization = Finalization(
             endedAt: endedAt,
             activeDuration: activeDuration
         )
+        if let index = meetings.firstIndex(where: { $0.id == meetingID }) {
+            meetings[index].state = .ready
+        }
         await events.append("repository.finalize")
     }
 
     func deleteMeeting(meetingID: UUID) async throws {
-        _ = meetingID
+        meetings.removeAll { $0.id == meetingID }
         await events.append("repository.delete")
     }
 
@@ -650,6 +812,14 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
 
     func finalization() -> Finalization? {
         savedFinalization
+    }
+
+    func savedMeetings() -> [SavedMeeting] {
+        meetings
+    }
+
+    func savedState(for meetingID: UUID) -> RecordingState? {
+        meetings.first(where: { $0.id == meetingID })?.state
     }
 }
 

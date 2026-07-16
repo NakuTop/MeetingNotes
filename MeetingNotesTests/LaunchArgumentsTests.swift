@@ -28,8 +28,9 @@ final class LaunchArgumentsTests: XCTestCase {
         container.libraryViewModel.load()
         snapshot = await container.coordinator.snapshot()
 
-        XCTAssertEqual(snapshot.state, .ready)
+        XCTAssertEqual(snapshot.state, .idle)
         let meeting = try XCTUnwrap(container.libraryViewModel.meetings.first)
+        XCTAssertEqual(meeting.state, .ready)
         XCTAssertEqual(
             meeting.transcripts.map(\.text),
             ["UI 测试会议转录"]
