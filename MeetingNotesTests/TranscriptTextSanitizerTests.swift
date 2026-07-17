@@ -23,6 +23,18 @@ final class TranscriptTextSanitizerTests: XCTestCase {
         XCTAssertNil(TranscriptTextSanitizer.nonEmpty("<|endoftext|>"))
     }
 
+    func testDropsUnterminatedTrailingWhisperMarkerWithoutLosingBody() {
+        XCTAssertEqual(
+            TranscriptTextSanitizer.clean("会议结束。 <|endoftext"),
+            "会议结束。"
+        )
+        XCTAssertEqual(
+            TranscriptTextSanitizer.clean("Keep the decision. <|"),
+            "Keep the decision."
+        )
+        XCTAssertNil(TranscriptTextSanitizer.nonEmpty("<|unfinished"))
+    }
+
     func testNormalizesWhitespaceAndPreservesOrdinaryAngleBracketTextAndPunctuation() {
         XCTAssertEqual(
             TranscriptTextSanitizer.clean(

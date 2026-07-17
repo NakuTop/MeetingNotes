@@ -9,7 +9,6 @@ enum TranscriptTextSanitizer {
             fragments.append(remainder[..<opening.lowerBound])
             let afterOpening = remainder[opening.upperBound...]
             guard let closing = afterOpening.range(of: "|>") else {
-                fragments.append(remainder[opening.lowerBound...])
                 remainder = ""[...]
                 break
             }
