@@ -35,10 +35,19 @@ final class MeetingFlowUITests: XCTestCase {
             app.buttons["floating.pause"].waitForExistence(timeout: 5)
         )
         assertExactlyFourFloatingControls(in: app)
+        let liveTranscript = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "label CONTAINS %@",
+                "UI 测试会议转录"
+            )
+        ).firstMatch
         XCTAssertTrue(
-            app.staticTexts["UI 测试会议转录"]
-                .waitForExistence(timeout: 5),
+            liveTranscript.waitForExistence(timeout: 5),
             "录音未结束时应在会议详情中显示已完成的转录分段"
+        )
+        XCTAssertFalse(
+            app.staticTexts["暂无转录"].exists,
+            "实时转录出现后不应继续显示空状态"
         )
         keepScreenshot(named: "02-floating-recorder", of: app)
 
