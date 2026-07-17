@@ -4,6 +4,47 @@ import XCTest
 
 @MainActor
 final class MeetingDetailViewModelTests: XCTestCase {
+    func testRefreshWhileRecordingMakesNewTranscriptVisibleAndStopsWhenReady() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.updateMeetingState(id: meetingID, state: .recording)
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        let refreshTask = Task {
+            await viewModel.refreshWhileRecording(
+                interval: .milliseconds(1)
+            )
+        }
+        defer { refreshTask.cancel() }
+
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "录音中新转录"
+        )
+
+        for _ in 0..<100 where viewModel.meeting?.transcripts.isEmpty == true {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(
+            viewModel.meeting?.transcripts.map(\.text),
+            ["录音中新转录"]
+        )
+
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        await refreshTask.value
+        XCTAssertEqual(viewModel.meeting?.state, .ready)
+    }
+
     func testPrimaryButtonReflectsWorkflowState() throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(

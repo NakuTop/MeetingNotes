@@ -268,7 +268,11 @@ private actor UITestCaptureSource: AudioCaptureSource {
             CapturedAudioFrame(
                 timestamp: 0,
                 sampleRate: AudioSegmentManifest.transcriptionSampleRate,
-                samples: [0.1, -0.1, 0.05, -0.05]
+                samples: Array(
+                    repeating: 0.1,
+                    count: MeetingCoordinator
+                        .productionTranscriptionChunkSampleCount
+                )
             )
         )
         return pair.stream

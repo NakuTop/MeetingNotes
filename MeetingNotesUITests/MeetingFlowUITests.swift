@@ -35,6 +35,11 @@ final class MeetingFlowUITests: XCTestCase {
             app.buttons["floating.pause"].waitForExistence(timeout: 5)
         )
         assertExactlyFourFloatingControls(in: app)
+        XCTAssertTrue(
+            app.staticTexts["UI 测试会议转录"]
+                .waitForExistence(timeout: 5),
+            "录音未结束时应在会议详情中显示已完成的转录分段"
+        )
         keepScreenshot(named: "02-floating-recorder", of: app)
 
         app.buttons["floating.pause"].click()

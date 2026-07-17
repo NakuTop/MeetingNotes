@@ -256,6 +256,32 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertEqual(chunks.map(\.startingAt), [0, 4.0 / 16_000])
     }
 
+    func testProductionTranscriptionEnqueuesAtFiveSecondsWhileRecording() async throws {
+        let fiveSeconds = 5 * Int(AudioSegmentManifest.transcriptionSampleRate)
+        let frame = CapturedAudioFrame(
+            timestamp: 0,
+            sampleRate: AudioSegmentManifest.transcriptionSampleRate,
+            samples: Array(repeating: 0.1, count: fiveSeconds)
+        )
+        let fixture = makeFixture(frames: [frame])
+
+        try await fixture.coordinator.start(mode: .offline)
+        for _ in 0..<1_000 {
+            if await fixture.transcriber.chunks().count == 1 {
+                break
+            }
+            await Task.yield()
+        }
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let chunks = await fixture.transcriber.chunks()
+        XCTAssertEqual(snapshot.state, .recording)
+        XCTAssertEqual(chunks.count, 1)
+        XCTAssertEqual(chunks.first?.samples.count, fiveSeconds)
+        XCTAssertEqual(chunks.first?.startingAt, 0)
+        try await fixture.coordinator.stop()
+    }
+
     func testPersistsTranscriptionUpdatesWhileRecordingIsStillActive() async throws {
         let frame = CapturedAudioFrame(
             timestamp: 0,
@@ -407,7 +433,7 @@ final class MeetingCoordinatorTests: XCTestCase {
         ],
         captureFailsToStart: Bool = false,
         frames: [CapturedAudioFrame] = [],
-        transcriptionChunkSampleCount: Int = 240_000,
+        transcriptionChunkSampleCount: Int? = nil,
         transcriberEmitsDrafts: Bool = false,
         writerFailsAppend: Bool = false,
         writerFailsFinish: Bool = false,
@@ -456,11 +482,17 @@ final class MeetingCoordinatorTests: XCTestCase {
             panel: panel,
             clock: clock
         )
-        return CoordinatorFixture(
-            coordinator: MeetingCoordinator(
+        let coordinator: MeetingCoordinator
+        if let transcriptionChunkSampleCount {
+            coordinator = MeetingCoordinator(
                 dependencies: dependencies,
                 transcriptionChunkSampleCount: transcriptionChunkSampleCount
-            ),
+            )
+        } else {
+            coordinator = MeetingCoordinator(dependencies: dependencies)
+        }
+        return CoordinatorFixture(
+            coordinator: coordinator,
             events: events,
             captureModes: captureModes,
             capture: capture,

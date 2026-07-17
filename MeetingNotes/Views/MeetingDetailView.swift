@@ -103,6 +103,7 @@ struct MeetingDetailView: View {
                 audioPlayerController.stop(
                     meetingID: playbackKey.meetingID
                 )
+                await viewModel.refreshWhileRecording()
             }
         }
         .onDisappear {

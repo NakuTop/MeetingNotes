@@ -18,6 +18,9 @@ struct MeetingCoordinatorSnapshot: Equatable, Sendable {
 }
 
 actor MeetingCoordinator {
+    static let productionTranscriptionChunkSampleCount =
+        5 * Int(AudioSegmentManifest.transcriptionSampleRate)
+
     private let dependencies: MeetingCoordinatorDependencies
     private let transcriptionChunkSampleCount: Int
     private var stateMachine = RecordingStateMachine()
@@ -39,7 +42,7 @@ actor MeetingCoordinator {
 
     init(
         dependencies: MeetingCoordinatorDependencies,
-        transcriptionChunkSampleCount: Int = SegmentedPCMWriter.productionFrameLimit
+        transcriptionChunkSampleCount: Int = productionTranscriptionChunkSampleCount
     ) {
         self.dependencies = dependencies
         self.transcriptionChunkSampleCount = max(1, transcriptionChunkSampleCount)

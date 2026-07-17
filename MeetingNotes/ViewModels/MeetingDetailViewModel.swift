@@ -93,6 +93,21 @@ final class MeetingDetailViewModel {
         }
     }
 
+    func refreshWhileRecording(
+        interval: Duration = .milliseconds(400)
+    ) async {
+        load()
+        while !Task.isCancelled, isRecordingActive {
+            do {
+                try await Task.sleep(for: interval)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            load()
+        }
+    }
+
     func performPrimaryAction() async {
         guard primaryAction.isEnabled, !isPerforming, !isRenaming else {
             return
@@ -145,6 +160,11 @@ final class MeetingDetailViewModel {
 
     func dismissRenameError() {
         renameErrorMessage = nil
+    }
+
+    private var isRecordingActive: Bool {
+        guard let state = meeting?.state else { return false }
+        return state == .recording || state == .paused
     }
 
     private static func message(for error: Error) -> String {

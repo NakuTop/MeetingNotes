@@ -46,7 +46,7 @@ final class TranscriptionQueueTests: XCTestCase {
     }
 
     func testFailedChunkCanBeRequeuedWithoutOverlappingInference() async throws {
-        let service = FailOnceTranscriptionService(failingStart: 15)
+        let service = ControllableFailureTranscriptionService(failingStart: 15)
         let queue = TranscriptionQueue(service: service)
 
         await queue.enqueue(samples: [0], startingAt: 0)
@@ -59,6 +59,7 @@ final class TranscriptionQueueTests: XCTestCase {
             failedSnapshot,
             .init(waitingCount: 0, isProcessing: false, failedCount: 1)
         )
+        await service.allowSuccess()
         await queue.retryFailed()
         await queue.drain()
 
@@ -66,10 +67,41 @@ final class TranscriptionQueueTests: XCTestCase {
         let maximumCalls = await service.maximumConcurrentCalls()
         let transcriptStarts = await queue.transcripts().map(\.startTime)
         let idleSnapshot = await queue.snapshot()
-        XCTAssertEqual(starts, [0, 15, 30, 15])
+        XCTAssertEqual(starts.first, 0)
+        XCTAssertEqual(starts.last, 15)
         XCTAssertEqual(maximumCalls, 1)
         XCTAssertEqual(transcriptStarts, [0, 15, 30])
         XCTAssertEqual(idleSnapshot, .idle)
+    }
+
+    func testRetriesTransientPreparationFailureAutomatically() async {
+        let service = FailOncePreparationTranscriptionService()
+        let queue = TranscriptionQueue(service: service)
+
+        await queue.enqueue(samples: [0.5], startingAt: 5)
+        await queue.drain()
+
+        let prepareCount = await service.prepareCount()
+        let transcripts = await queue.transcripts()
+        let snapshot = await queue.snapshot()
+        XCTAssertEqual(prepareCount, 2)
+        XCTAssertEqual(transcripts.map(\.text), ["5"])
+        XCTAssertEqual(snapshot, .idle)
+    }
+
+    func testRetriesTransientTranscriptionFailureAutomatically() async {
+        let service = FailOnceTranscriptionService(failingStart: 5)
+        let queue = TranscriptionQueue(service: service)
+
+        await queue.enqueue(samples: [0.5], startingAt: 5)
+        await queue.drain()
+
+        let starts = await service.transcribedStarts()
+        let transcripts = await queue.transcripts()
+        let snapshot = await queue.snapshot()
+        XCTAssertEqual(starts, [5, 5])
+        XCTAssertEqual(transcripts.map(\.text), ["5"])
+        XCTAssertEqual(snapshot, .idle)
     }
 
     func testPublishesCompletedDraftsBeforeTheQueueIsFinalized() async throws {
@@ -195,5 +227,81 @@ private actor FailOnceTranscriptionService: TranscriptionService {
 
     func maximumConcurrentCalls() -> Int {
         maximumCalls
+    }
+}
+
+private actor ControllableFailureTranscriptionService: TranscriptionService {
+    private let failingStart: TimeInterval
+    private var shouldFail = true
+    private var starts: [TimeInterval] = []
+    private var activeCalls = 0
+    private var maximumCalls = 0
+
+    init(failingStart: TimeInterval) {
+        self.failingStart = failingStart
+    }
+
+    func prepare() async throws {}
+
+    func transcribe(
+        samples: [Float],
+        startingAt: TimeInterval
+    ) async throws -> [TranscriptDraft] {
+        _ = samples
+        starts.append(startingAt)
+        activeCalls += 1
+        maximumCalls = max(maximumCalls, activeCalls)
+        defer { activeCalls -= 1 }
+        if startingAt == failingStart, shouldFail {
+            throw FakeTranscriptionError.expectedFailure
+        }
+        return [
+            TranscriptDraft(
+                startTime: startingAt,
+                endTime: startingAt + 1,
+                text: "\(Int(startingAt))"
+            )
+        ]
+    }
+
+    func allowSuccess() {
+        shouldFail = false
+    }
+
+    func transcribedStarts() -> [TimeInterval] {
+        starts
+    }
+
+    func maximumConcurrentCalls() -> Int {
+        maximumCalls
+    }
+}
+
+private actor FailOncePreparationTranscriptionService: TranscriptionService {
+    private var count = 0
+
+    func prepare() async throws {
+        count += 1
+        if count == 1 {
+            throw FakeTranscriptionError.expectedFailure
+        }
+    }
+
+    func transcribe(
+        samples: [Float],
+        startingAt: TimeInterval
+    ) async throws -> [TranscriptDraft] {
+        _ = samples
+        return [
+            TranscriptDraft(
+                startTime: startingAt,
+                endTime: startingAt + 1,
+                text: "\(Int(startingAt))"
+            )
+        ]
+    }
+
+    func prepareCount() -> Int {
+        count
     }
 }

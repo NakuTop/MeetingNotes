@@ -40,6 +40,7 @@ actor TranscriptionQueue {
     private let service: any TranscriptionService
     private let merger: TranscriptMerger
     private let maximumBufferedChunks: Int
+    private let maximumAutomaticAttempts: Int
     private var waiting: [Chunk] = []
     private var failed: [Chunk] = []
     private var deferred: [DeferredTranscriptionChunk] = []
@@ -52,11 +53,13 @@ actor TranscriptionQueue {
     init(
         service: any TranscriptionService,
         merger: TranscriptMerger = TranscriptMerger(),
-        maximumBufferedChunks: Int = 8
+        maximumBufferedChunks: Int = 8,
+        maximumAutomaticAttempts: Int = 2
     ) {
         self.service = service
         self.merger = merger
         self.maximumBufferedChunks = max(1, maximumBufferedChunks)
+        self.maximumAutomaticAttempts = max(1, maximumAutomaticAttempts)
     }
 
     func enqueue(samples: [Float], startingAt: TimeInterval) {
@@ -134,10 +137,16 @@ actor TranscriptionQueue {
 
     private func consumeWaitingChunks() async {
         if !isPrepared {
-            do {
-                try await service.prepare()
-                isPrepared = true
-            } catch {
+            for _ in 0..<maximumAutomaticAttempts {
+                do {
+                    try await service.prepare()
+                    isPrepared = true
+                    break
+                } catch {
+                    continue
+                }
+            }
+            if !isPrepared {
                 for chunk in waiting {
                     retainFailedChunkOrDefer(chunk)
                 }
@@ -150,16 +159,24 @@ actor TranscriptionQueue {
         while !waiting.isEmpty {
             let chunk = waiting.removeFirst()
             isProcessing = true
-            do {
-                let drafts = try await service.transcribe(
-                    samples: chunk.samples,
-                    startingAt: chunk.startingAt
-                )
-                completed.append(contentsOf: drafts)
-                for draft in drafts {
-                    updateContinuation?.yield(draft)
+            var succeeded = false
+            for _ in 0..<maximumAutomaticAttempts {
+                do {
+                    let drafts = try await service.transcribe(
+                        samples: chunk.samples,
+                        startingAt: chunk.startingAt
+                    )
+                    completed.append(contentsOf: drafts)
+                    for draft in drafts {
+                        updateContinuation?.yield(draft)
+                    }
+                    succeeded = true
+                    break
+                } catch {
+                    continue
                 }
-            } catch {
+            }
+            if !succeeded {
                 retainFailedChunkOrDefer(chunk)
             }
             isProcessing = false
