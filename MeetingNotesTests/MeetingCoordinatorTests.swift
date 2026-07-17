@@ -374,6 +374,43 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertEqual(persistedState, .finalizing)
     }
 
+    func testStartsNewMeetingAfterFinalizeFailureWithoutDeletingRecoveryRecord() async throws {
+        let fixture = makeFixture(repositoryFailsFinalize: true)
+        let failedMeetingID = try await fixture.coordinator.start(mode: .online)
+
+        do {
+            try await fixture.coordinator.stop()
+            XCTFail("Expected repository finalize failure")
+        } catch {
+            XCTAssertEqual(error as? CoordinatorTestError, .repositoryFinalize)
+        }
+
+        let newMeetingID = try await fixture.coordinator.start(mode: .offline)
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let meetings = await fixture.repository.savedMeetings()
+        XCTAssertNotEqual(newMeetingID, failedMeetingID)
+        XCTAssertEqual(snapshot.state, .recording)
+        XCTAssertEqual(snapshot.meetingID, newMeetingID)
+        XCTAssertEqual(snapshot.mode, .offline)
+        XCTAssertEqual(
+            meetings,
+            [
+                .init(
+                    id: failedMeetingID,
+                    mode: .online,
+                    state: .finalizing
+                ),
+                .init(
+                    id: newMeetingID,
+                    mode: .offline,
+                    state: .recording
+                )
+            ],
+            "新录音必须保留失败会话的 finalizing 记录供恢复服务处理"
+        )
+    }
+
     func testFinalizingPersistenceFailureKeepsRecorderVisibleForRetry() async throws {
         let fixture = makeFixture(repositoryFailsFinalizingUpdate: true)
         try await fixture.coordinator.start(mode: .offline)

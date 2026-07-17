@@ -71,6 +71,7 @@ actor MeetingCoordinator {
     func start(mode: MeetingMode) async throws -> UUID {
         try beginLifecycleOperation()
         defer { lifecycleOperationInProgress = false }
+        resetStrandedFinalizationBeforeNewStart()
         var preparingMachine = stateMachine
         try preparingMachine.send(.prepare)
         stateMachine = preparingMachine
@@ -388,6 +389,21 @@ actor MeetingCoordinator {
         bookmarkCount = 0
         finalActiveDuration = 0
         captureFailed = false
+    }
+
+    private func resetStrandedFinalizationBeforeNewStart() {
+        guard stateMachine.state == .finalizing,
+              capture == nil,
+              writer == nil,
+              transcriber == nil,
+              timeline == nil,
+              streamTask == nil,
+              transcriptPersistenceTask == nil else {
+            return
+        }
+        // The persisted meeting remains in `.finalizing` so recovery can
+        // inspect its files. Only the coordinator's released session is reset.
+        resetAfterFailedStart()
     }
 
     private func resetAfterSuccessfulStop() {
