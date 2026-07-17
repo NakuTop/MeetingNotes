@@ -239,8 +239,21 @@ actor MeetingFileStore {
     }
 
     func deleteMeetingDirectory(for meetingID: UUID) throws {
-        let directory = try resolve(relativePath: meetingID.uuidString)
-        guard fileManager.fileExists(atPath: directory.path) else {
+        let relativePath = meetingID.uuidString
+        let directory = rootURL
+            .appendingPathComponent(relativePath)
+            .standardizedFileURL
+        guard isWithinRoot(directory) else {
+            throw MeetingFileStoreError.invalidRelativePath(relativePath)
+        }
+        do {
+            _ = try identity(
+                at: directory,
+                expectedFileType: mode_t(S_IFDIR),
+                missingError: .segmentNotFound,
+                invalidError: .invalidRelativePath(relativePath)
+            )
+        } catch MeetingFileStoreError.segmentNotFound {
             return
         }
         try fileManager.removeItem(at: directory)

@@ -115,6 +115,37 @@ final class MeetingFileStoreTests: XCTestCase {
         XCTAssertEqual(secondManifest, manifest)
     }
 
+    func testDeleteRejectsMeetingDirectorySymlinkWithoutDeletingItsTarget() async throws {
+        let root = try makeTemporaryRoot()
+        let store = MeetingFileStore(rootURL: root)
+        let linkedID = UUID()
+        let targetID = UUID()
+        let targetDirectory = try await store.prepareMeetingDirectory(
+            for: targetID
+        )
+        let sentinel = targetDirectory.appendingPathComponent("keep.txt")
+        try Data("keep".utf8).write(to: sentinel)
+        let link = root.appendingPathComponent(linkedID.uuidString)
+        try FileManager.default.createSymbolicLink(
+            at: link,
+            withDestinationURL: targetDirectory
+        )
+
+        await XCTAssertThrowsErrorAsync(
+            try await store.deleteMeetingDirectory(for: linkedID)
+        ) { error in
+            XCTAssertEqual(
+                error as? MeetingFileStoreError,
+                .invalidRelativePath(linkedID.uuidString)
+            )
+        }
+
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: sentinel.path),
+            "拒绝删除符号链接时，链接目标会议目录必须完整保留"
+        )
+    }
+
     private func makeTemporaryRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("MeetingFileStoreTests-\(UUID().uuidString)")
