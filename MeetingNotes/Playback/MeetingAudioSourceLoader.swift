@@ -21,6 +21,11 @@ struct MeetingAudioSource: Equatable, Sendable {
     }
 }
 
+struct PCMCAFStorageInspection: Equatable, Sendable {
+    let audioDataByteCount: UInt64
+    let metadataBytesRead: Int
+}
+
 enum MeetingAudioSourceLoaderError: Error, Equatable, Sendable {
     case manifestNotFound
     case unreadableManifest
@@ -181,10 +186,17 @@ actor MeetingAudioSourceLoader {
                     actual: actualFrameCount
                 )
             }
+            let streamDescription = audioFile.fileFormat.streamDescription.pointee
+            guard streamDescription.mFormatID == kAudioFormatLinearPCM,
+                  streamDescription.mBytesPerFrame > 0 else {
+                throw MeetingAudioSourceLoaderError.unreadableSegment(index: index)
+            }
+            audioFile.close()
             do {
-                try Self.validateDecodableFrames(
-                    audioFile,
+                _ = try Self.inspectPCMCAFStorage(
+                    at: resolvedSegment.url,
                     expectedFrameCount: segment.frameCount,
+                    bytesPerFrame: streamDescription.mBytesPerFrame,
                     segmentIndex: index
                 )
             } catch {
@@ -278,62 +290,118 @@ actor MeetingAudioSourceLoader {
         }
     }
 
-    private static func validateDecodableFrames(
-        _ audioFile: AVAudioFile,
+    static func inspectPCMCAFStorage(
+        at url: URL,
         expectedFrameCount: Int64,
+        bytesPerFrame: UInt32,
         segmentIndex: Int
-    ) throws {
-        let maximumFramesPerRead: AVAudioFrameCount = 4_096
-        guard let buffer = AVAudioPCMBuffer(
-            pcmFormat: audioFile.processingFormat,
-            frameCapacity: maximumFramesPerRead
-        ) else {
+    ) throws -> PCMCAFStorageInspection {
+        let incompleteData = MeetingAudioSourceLoaderError
+            .incompleteSegmentData(index: segmentIndex)
+        guard expectedFrameCount >= 0, bytesPerFrame > 0 else {
+            throw incompleteData
+        }
+
+        let expectedByteCount = UInt64(expectedFrameCount)
+            .multipliedReportingOverflow(by: UInt64(bytesPerFrame))
+        guard !expectedByteCount.overflow else {
+            throw incompleteData
+        }
+
+        let attributes: [FileAttributeKey: Any]
+        let handle: FileHandle
+        do {
+            attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            handle = try FileHandle(forReadingFrom: url)
+        } catch {
             throw MeetingAudioSourceLoaderError.unreadableSegment(
                 index: segmentIndex
             )
         }
+        defer { try? handle.close() }
 
-        var decodedFrames: Int64 = 0
-        while decodedFrames < expectedFrameCount {
-            let remainingFrames = expectedFrameCount - decodedFrames
-            let requestedFrames = AVAudioFrameCount(
-                min(Int64(maximumFramesPerRead), remainingFrames)
-            )
-            buffer.frameLength = 0
+        guard let fileSizeNumber = attributes[.size] as? NSNumber else {
+            throw incompleteData
+        }
+        let fileSize = fileSizeNumber.uint64Value
 
+        func readMetadata(at offset: UInt64, count: Int) throws -> [UInt8] {
             do {
-                try audioFile.read(
-                    into: buffer,
-                    frameCount: requestedFrames
-                )
+                try handle.seek(toOffset: offset)
+                guard let data = try handle.read(upToCount: count),
+                      data.count == count else {
+                    throw incompleteData
+                }
+                return Array(data)
+            } catch let error as MeetingAudioSourceLoaderError {
+                throw error
             } catch {
-                throw MeetingAudioSourceLoaderError.incompleteSegmentData(
-                    index: segmentIndex
-                )
+                throw incompleteData
             }
-
-            let decodedThisRead = Int64(buffer.frameLength)
-            guard decodedThisRead > 0 else {
-                throw MeetingAudioSourceLoaderError.incompleteSegmentData(
-                    index: segmentIndex
-                )
-            }
-            let addition = decodedFrames.addingReportingOverflow(
-                decodedThisRead
-            )
-            guard !addition.overflow,
-                  addition.partialValue <= expectedFrameCount else {
-                throw MeetingAudioSourceLoaderError.incompleteSegmentData(
-                    index: segmentIndex
-                )
-            }
-            decodedFrames = addition.partialValue
         }
 
-        guard decodedFrames == expectedFrameCount else {
-            throw MeetingAudioSourceLoaderError.incompleteSegmentData(
-                index: segmentIndex
-            )
+        guard fileSize >= 8 else {
+            throw incompleteData
         }
+        let fileHeader = try readMetadata(at: 0, count: 8)
+        guard Array(fileHeader.prefix(4)) == [0x63, 0x61, 0x66, 0x66] else {
+            throw incompleteData
+        }
+
+        var offset: UInt64 = 8
+        var metadataBytesRead = 8
+        var audioDataByteCount: UInt64?
+
+        while offset < fileSize {
+            let headerEnd = offset.addingReportingOverflow(12)
+            guard !headerEnd.overflow, headerEnd.partialValue <= fileSize else {
+                throw incompleteData
+            }
+
+            let chunkHeader = try readMetadata(at: offset, count: 12)
+            metadataBytesRead += 12
+            let chunkType = Array(chunkHeader[0..<4])
+            var rawChunkSize: UInt64 = 0
+            for byte in chunkHeader[4..<12] {
+                rawChunkSize = (rawChunkSize << 8) | UInt64(byte)
+            }
+            let signedChunkSize = Int64(bitPattern: rawChunkSize)
+            let payloadOffset = headerEnd.partialValue
+            let payloadSize: UInt64
+            if signedChunkSize == -1, chunkType == [0x64, 0x61, 0x74, 0x61] {
+                payloadSize = fileSize - payloadOffset
+            } else {
+                guard signedChunkSize >= 0 else {
+                    throw incompleteData
+                }
+                payloadSize = UInt64(signedChunkSize)
+            }
+
+            let chunkEnd = payloadOffset.addingReportingOverflow(payloadSize)
+            guard !chunkEnd.overflow, chunkEnd.partialValue <= fileSize else {
+                throw incompleteData
+            }
+
+            if chunkType == [0x64, 0x61, 0x74, 0x61] {
+                guard audioDataByteCount == nil, payloadSize >= 4 else {
+                    throw incompleteData
+                }
+                let storedAudioBytes = payloadSize - 4
+                guard storedAudioBytes == expectedByteCount.partialValue else {
+                    throw incompleteData
+                }
+                audioDataByteCount = storedAudioBytes
+            }
+
+            offset = chunkEnd.partialValue
+        }
+
+        guard let audioDataByteCount else {
+            throw incompleteData
+        }
+        return PCMCAFStorageInspection(
+            audioDataByteCount: audioDataByteCount,
+            metadataBytesRead: metadataBytesRead
+        )
     }
 }

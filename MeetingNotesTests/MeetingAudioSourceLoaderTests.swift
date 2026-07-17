@@ -288,6 +288,51 @@ final class MeetingAudioSourceLoaderTests: XCTestCase {
         )
     }
 
+    func testStorageInspectionSkipsPCMFramesButStillRejectsTruncation() async throws {
+        let fixture = try await makeSingleSegmentFixture(frameCount: 20_000)
+        let segmentURL = try await fixture.fileStore.resolveSegmentURL(
+            meetingID: fixture.meetingID,
+            fileName: "segment-0001.caf"
+        )
+        let audioFile = try AVAudioFile(forReading: segmentURL)
+        let bytesPerFrame = audioFile.fileFormat.streamDescription.pointee
+            .mBytesPerFrame
+        audioFile.close()
+
+        let inspection = try MeetingAudioSourceLoader.inspectPCMCAFStorage(
+            at: segmentURL,
+            expectedFrameCount: 20_000,
+            bytesPerFrame: bytesPerFrame,
+            segmentIndex: 0
+        )
+
+        XCTAssertEqual(inspection.audioDataByteCount, 20_000 * 4)
+        XCTAssertLessThanOrEqual(inspection.metadataBytesRead, 64)
+
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: segmentURL.path
+        )
+        let originalSize = try XCTUnwrap(attributes[.size] as? NSNumber)
+            .uint64Value
+        let handle = try FileHandle(forWritingTo: segmentURL)
+        try handle.truncate(atOffset: originalSize - 400)
+        try handle.close()
+
+        XCTAssertThrowsError(
+            try MeetingAudioSourceLoader.inspectPCMCAFStorage(
+                at: segmentURL,
+                expectedFrameCount: 20_000,
+                bytesPerFrame: bytesPerFrame,
+                segmentIndex: 0
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? MeetingAudioSourceLoaderError,
+                .incompleteSegmentData(index: 0)
+            )
+        }
+    }
+
     func testRejectsManifestFrameCountThatDiffersFromCAFLength() async throws {
         let fixture = try await makeThreeSegmentFixture()
         var manifest = try await fixture.fileStore.loadManifest(
