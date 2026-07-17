@@ -48,6 +48,10 @@ final class CapturePermissionClientTests: XCTestCase {
             screenRequest: {
                 calls.recordScreenRequest()
                 return false
+            },
+            screenProbe: {
+                calls.recordScreenProbe()
+                return false
             }
         )
 
@@ -60,8 +64,65 @@ final class CapturePermissionClientTests: XCTestCase {
         XCTAssertEqual(firstRequest, .denied)
         XCTAssertEqual(secondStatus, .notDetermined)
         XCTAssertEqual(secondRequest, .denied)
-        XCTAssertEqual(calls.screenPreflightCount, 2)
+        XCTAssertEqual(calls.screenPreflightCount, 4)
         XCTAssertEqual(calls.screenRequestCount, 2)
+        XCTAssertEqual(calls.screenProbeCount, 2)
+    }
+
+    func testLiveScreenRequestTrustsFreshPreflightAfterRequestReturnsFalse() async {
+        let calls = PermissionInvocationRecorder()
+        let preflight = SequencedBool(values: [false, true])
+        let system = LiveCapturePermissionSystem(
+            microphoneStatus: { .authorized },
+            microphoneRequest: { true },
+            screenPreflight: {
+                calls.recordScreenPreflight()
+                return preflight.next()
+            },
+            screenRequest: {
+                calls.recordScreenRequest()
+                return false
+            },
+            screenProbe: {
+                calls.recordScreenProbe()
+                return false
+            }
+        )
+
+        let initialStatus = await system.status(for: .screenRecording)
+        let requestStatus = await system.requestAccess(for: .screenRecording)
+
+        XCTAssertEqual(initialStatus, .notDetermined)
+        XCTAssertEqual(requestStatus, .authorized)
+        XCTAssertEqual(calls.screenPreflightCount, 2)
+        XCTAssertEqual(calls.screenRequestCount, 1)
+    }
+
+    func testLiveScreenRequestAcceptsScreenCaptureKitProbeWhenCGStateIsStale() async {
+        let calls = PermissionInvocationRecorder()
+        let system = LiveCapturePermissionSystem(
+            microphoneStatus: { .authorized },
+            microphoneRequest: { true },
+            screenPreflight: {
+                calls.recordScreenPreflight()
+                return false
+            },
+            screenRequest: {
+                calls.recordScreenRequest()
+                return false
+            },
+            screenProbe: {
+                calls.recordScreenProbe()
+                return true
+            }
+        )
+
+        let status = await system.requestAccess(for: .screenRecording)
+
+        XCTAssertEqual(status, .authorized)
+        XCTAssertEqual(calls.screenPreflightCount, 1)
+        XCTAssertEqual(calls.screenRequestCount, 1)
+        XCTAssertEqual(calls.screenProbeCount, 1)
     }
 
     func testEveryOnlineRetryRequestsScreenPermissionAgain() async {
@@ -76,6 +137,10 @@ final class CapturePermissionClientTests: XCTestCase {
             screenRequest: {
                 calls.recordScreenRequest()
                 return false
+            },
+            screenProbe: {
+                calls.recordScreenProbe()
+                return false
             }
         )
         let client = CapturePermissionClient(system: system)
@@ -83,8 +148,9 @@ final class CapturePermissionClientTests: XCTestCase {
         _ = await client.requestRequiredPermissions(for: .online)
         _ = await client.requestRequiredPermissions(for: .online)
 
-        XCTAssertEqual(calls.screenPreflightCount, 2)
+        XCTAssertEqual(calls.screenPreflightCount, 4)
         XCTAssertEqual(calls.screenRequestCount, 2)
+        XCTAssertEqual(calls.screenProbeCount, 2)
     }
 
     func testLiveOfflineRequestNeverTouchesScreenPermission() async {
@@ -125,11 +191,13 @@ private final class PermissionInvocationRecorder: @unchecked Sendable {
     private var microphoneRequests = 0
     private var screenPreflights = 0
     private var screenRequests = 0
+    private var screenProbes = 0
 
     var microphoneStatusCount: Int { withLock { microphoneStatuses } }
     var microphoneRequestCount: Int { withLock { microphoneRequests } }
     var screenPreflightCount: Int { withLock { screenPreflights } }
     var screenRequestCount: Int { withLock { screenRequests } }
+    var screenProbeCount: Int { withLock { screenProbes } }
 
     func recordMicrophoneStatus() {
         withLock { microphoneStatuses += 1 }
@@ -147,10 +215,29 @@ private final class PermissionInvocationRecorder: @unchecked Sendable {
         withLock { screenRequests += 1 }
     }
 
+    func recordScreenProbe() {
+        withLock { screenProbes += 1 }
+    }
+
     private func withLock<T>(_ operation: () -> T) -> T {
         lock.lock()
         defer { lock.unlock() }
         return operation()
+    }
+}
+
+private final class SequencedBool: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Bool]
+
+    init(values: [Bool]) {
+        self.values = values
+    }
+
+    func next() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return values.isEmpty ? false : values.removeFirst()
     }
 }
 

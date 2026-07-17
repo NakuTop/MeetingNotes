@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreGraphics
 import Foundation
+@preconcurrency import ScreenCaptureKit
 
 enum CapturePermission: Equatable, Hashable, Sendable {
     case microphone
@@ -85,6 +86,7 @@ final class LiveCapturePermissionSystem: CapturePermissionSystem, Sendable {
     private let microphoneRequest: @Sendable () async -> Bool
     private let screenPreflight: @Sendable () -> Bool
     private let screenRequest: @Sendable () -> Bool
+    private let screenProbe: @Sendable () async -> Bool
 
     init(
         microphoneStatus: @escaping @Sendable () -> AVAuthorizationStatus = {
@@ -102,12 +104,24 @@ final class LiveCapturePermissionSystem: CapturePermissionSystem, Sendable {
         },
         screenRequest: @escaping @Sendable () -> Bool = {
             CGRequestScreenCaptureAccess()
+        },
+        screenProbe: @escaping @Sendable () async -> Bool = {
+            do {
+                _ = try await SCShareableContent.excludingDesktopWindows(
+                    false,
+                    onScreenWindowsOnly: true
+                )
+                return true
+            } catch {
+                return false
+            }
         }
     ) {
         self.microphoneStatus = microphoneStatus
         self.microphoneRequest = microphoneRequest
         self.screenPreflight = screenPreflight
         self.screenRequest = screenRequest
+        self.screenProbe = screenProbe
     }
 
     func status(
@@ -130,7 +144,10 @@ final class LiveCapturePermissionSystem: CapturePermissionSystem, Sendable {
             return granted ? .authorized : .denied
         case .screenRecording:
             let granted = screenRequest()
-            return granted ? .authorized : .denied
+            if granted || screenPreflight() {
+                return .authorized
+            }
+            return await screenProbe() ? .authorized : .denied
         }
     }
 }
