@@ -8,18 +8,21 @@ struct RootView: View {
     @Bindable var viewModel: MeetingLibraryViewModel
     @Bindable var onboardingState: OnboardingState
     @Bindable var transcriptionModelViewModel: TranscriptionModelViewModel
+    private let audioPlayerController: MeetingAudioPlayerController
     let makeDetailViewModel: (UUID) -> MeetingDetailViewModel
 
     init(
         viewModel: MeetingLibraryViewModel,
         onboardingState: OnboardingState,
         transcriptionModelViewModel: TranscriptionModelViewModel,
+        audioPlayerController: MeetingAudioPlayerController,
         makeDetailViewModel: @escaping (UUID) -> MeetingDetailViewModel
     ) {
         ownedContainer = nil
         self.viewModel = viewModel
         self.onboardingState = onboardingState
         self.transcriptionModelViewModel = transcriptionModelViewModel
+        self.audioPlayerController = audioPlayerController
         self.makeDetailViewModel = makeDetailViewModel
     }
 
@@ -29,6 +32,7 @@ struct RootView: View {
         viewModel = container.libraryViewModel
         onboardingState = container.onboardingState
         transcriptionModelViewModel = container.transcriptionModelViewModel
+        audioPlayerController = container.audioPlayerController
         makeDetailViewModel = { meetingID in
             container.detailViewModel(for: meetingID)
         }
@@ -45,6 +49,7 @@ struct RootView: View {
                         if let meeting = viewModel.selectedMeeting {
                             MeetingDetailView(
                                 viewModel: makeDetailViewModel(meeting.id),
+                                audioPlayerController: audioPlayerController,
                                 onReturnHome: {
                                     viewModel.returnHome()
                                 },

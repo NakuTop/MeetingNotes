@@ -1,9 +1,12 @@
+import AVFoundation
 import Foundation
 
 enum LaunchArguments {
     static let uiTesting = "-uiTesting"
     static let uiTestingSlowRenameEnvironment =
         "MEETING_NOTES_UI_SLOW_RENAME"
+    static let uiTestingAudioPlayerEnvironment =
+        "MEETING_NOTES_UI_AUDIO_PLAYER"
 
     static func isUITesting(
         _ arguments: [String] = ProcessInfo.processInfo.arguments
@@ -16,6 +19,12 @@ enum LaunchArguments {
     ) -> Bool {
         environment[uiTestingSlowRenameEnvironment] == "1"
     }
+
+    static func usesAudioPlayerUITestFixture(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        environment[uiTestingAudioPlayerEnvironment] == "1"
+    }
 }
 
 #if DEBUG
@@ -25,6 +34,13 @@ extension AppContainer {
         let repository = try MeetingRepository.inMemory()
         let usesSlowRenameFixture =
             LaunchArguments.usesSlowRenameUITestFixture()
+        let usesAudioPlayerFixture =
+            LaunchArguments.usesAudioPlayerUITestFixture()
+        let recordingsURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "MeetingNotes-UITesting-\(ProcessInfo.processInfo.processIdentifier)",
+                isDirectory: true
+            )
         if usesSlowRenameFixture {
             let startedAt = Date(timeIntervalSince1970: 1_000)
             let meetingID = try repository.createMeeting(
@@ -44,11 +60,23 @@ extension AppContainer {
             )
             try repository.updateMeetingState(id: meetingID, state: .archived)
         }
-        let recordingsURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(
-                "MeetingNotes-UITesting-\(ProcessInfo.processInfo.processIdentifier)",
-                isDirectory: true
+        if usesAudioPlayerFixture {
+            let startedAt = Date(timeIntervalSince1970: 2_000)
+            let meetingID = try repository.createMeeting(
+                mode: .offline,
+                startedAt: startedAt,
+                title: "可播放录音会议"
             )
+            try makeAudioPlayerFixture(
+                meetingID: meetingID,
+                recordingsURL: recordingsURL
+            )
+            try repository.finalizeMeeting(
+                id: meetingID,
+                endedAt: startedAt.addingTimeInterval(8),
+                activeDuration: 8
+            )
+        }
         let fileStore = MeetingFileStore(rootURL: recordingsURL)
         let credentials = EphemeralCredentialStore(
             deepSeekAPIKey: "ui-deepseek-key",
@@ -94,6 +122,64 @@ extension AppContainer {
                 : NoopMeetingNotionTitleUpdater(),
             onboardingState: onboarding,
             systemRequirements: UITestSystemRequirements()
+        )
+    }
+
+    private static func makeAudioPlayerFixture(
+        meetingID: UUID,
+        recordingsURL: URL
+    ) throws {
+        let directory = recordingsURL
+            .appendingPathComponent(meetingID.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+
+        let sampleRate = AudioSegmentManifest.transcriptionSampleRate
+        let frameCount = Int(sampleRate * 8)
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: AVAudioChannelCount(
+                AudioSegmentManifest.transcriptionChannelCount
+            ),
+            interleaved: false
+        ), let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(frameCount)
+        ), let channel = buffer.floatChannelData?.pointee else {
+            throw SegmentedPCMWriterError.audioBufferUnavailable
+        }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        channel.initialize(repeating: 0, count: frameCount)
+
+        let fileName = "segment-0001.caf"
+        let audioFile = try AVAudioFile(
+            forWriting: directory.appendingPathComponent(fileName),
+            settings: format.settings,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        try audioFile.write(from: buffer)
+        audioFile.close()
+
+        let manifest = AudioSegmentManifest(segments: [
+            .init(
+                fileName: fileName,
+                startTime: 0,
+                endTime: 8,
+                frameCount: Int64(frameCount),
+                isComplete: true
+            )
+        ])
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(manifest).write(
+            to: directory.appendingPathComponent(
+                MeetingFileStore.manifestFileName
+            ),
+            options: .atomic
         )
     }
 }

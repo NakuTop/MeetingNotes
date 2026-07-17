@@ -36,6 +36,7 @@ struct MeetingNotesApp: App {
                     onboardingState: container.onboardingState,
                     transcriptionModelViewModel:
                         container.transcriptionModelViewModel,
+                    audioPlayerController: container.audioPlayerController,
                     makeDetailViewModel: { meetingID in
                         container.detailViewModel(for: meetingID)
                     }

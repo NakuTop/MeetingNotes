@@ -6,16 +6,19 @@ struct MeetingDetailView: View {
     @State private var titleDraft = ""
     @State private var renameTask: Task<Void, Never>?
     @State private var renameGeneration = 0
+    @Bindable private var audioPlayerController: MeetingAudioPlayerController
     @FocusState private var isTitleFieldFocused: Bool
     private let onReturnHome: () -> Void
     private let onMeetingChanged: () -> Void
 
     init(
         viewModel: MeetingDetailViewModel,
+        audioPlayerController: MeetingAudioPlayerController,
         onReturnHome: @escaping () -> Void,
         onMeetingChanged: @escaping () -> Void = {}
     ) {
         _viewModel = State(initialValue: viewModel)
+        self.audioPlayerController = audioPlayerController
         self.onReturnHome = onReturnHome
         self.onMeetingChanged = onMeetingChanged
     }
@@ -80,6 +83,13 @@ struct MeetingDetailView: View {
             .frame(maxWidth: .infinity)
         }
         .accessibilityIdentifier("meeting.detail")
+        .task(id: meeting.id) {
+            guard meeting.endedAt != nil else { return }
+            await audioPlayerController.prepare(meetingID: meeting.id)
+        }
+        .onDisappear {
+            audioPlayerController.stop(meetingID: meeting.id)
+        }
     }
 
     private func header(_ meeting: MeetingRecord) -> some View {
@@ -262,31 +272,39 @@ struct MeetingDetailView: View {
         isTitleFieldFocused = false
     }
 
+    @ViewBuilder
     private func audioSection(_ meeting: MeetingRecord) -> some View {
-        AdaptiveGlassCard {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("音频")
-                    .font(.headline)
+        if meeting.endedAt != nil {
+            MeetingAudioPlayerView(
+                meetingID: meeting.id,
+                controller: audioPlayerController
+            )
+        } else {
+            AdaptiveGlassCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("音频")
+                        .font(.headline)
 
-                HStack(spacing: 12) {
-                    Image(systemName: "waveform")
-                        .font(.title2)
-                        .foregroundStyle(.tint)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(meeting.endedAt == nil ? "正在录制" : "本地录音")
-                            .font(.headline)
+                    HStack(spacing: 12) {
+                        Image(systemName: "waveform")
+                            .font(.title2)
+                            .foregroundStyle(.tint)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("正在录制")
+                                .font(.headline)
+                            Text("结束会议后可播放完整音频")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
                         Text(
-                            meeting.endedAt == nil
-                                ? "结束会议后可播放完整音频"
-                                : "音频保留在这台 Mac 上"
+                            MeetingDisplayFormat.duration(
+                                meeting.activeDuration
+                            )
                         )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Text(MeetingDisplayFormat.duration(meeting.activeDuration))
                         .font(.body.monospacedDigit())
                         .foregroundStyle(.secondary)
+                    }
                 }
             }
         }

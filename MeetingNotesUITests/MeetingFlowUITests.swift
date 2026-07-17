@@ -314,6 +314,45 @@ final class MeetingFlowUITests: XCTestCase {
         )
     }
 
+    func testLocalRecordingPlayer() {
+        let app = launchApp(
+            environment: ["MEETING_NOTES_UI_AUDIO_PLAYER": "1"]
+        )
+        let historyRow = app.descendants(matching: .any)[
+            "meeting.historyRow"
+        ].firstMatch
+        XCTAssertTrue(historyRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(waitForLabelContaining("可播放录音会议", on: historyRow))
+        historyRow.click()
+
+        let player = app.descendants(matching: .any)[
+            "meeting.audioPlayer"
+        ].firstMatch
+        XCTAssertTrue(player.waitForExistence(timeout: 8))
+
+        let toggle = app.buttons["meeting.audioPlayer.toggle"]
+        let waveform = app.sliders["meeting.audioPlayer.waveform"]
+        let currentTime = app.staticTexts["meeting.audioPlayer.currentTime"]
+        let duration = app.staticTexts["meeting.audioPlayer.duration"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertTrue(waveform.waitForExistence(timeout: 5))
+        XCTAssertTrue(currentTime.waitForExistence(timeout: 5))
+        XCTAssertTrue(duration.waitForExistence(timeout: 5))
+        XCTAssertEqual(accessibleText(of: currentTime), "00:00")
+        XCTAssertEqual(accessibleText(of: duration), "00:08")
+
+        toggle.click()
+        XCTAssertTrue(waitForLabel("暂停播放", on: toggle))
+
+        waveform.click()
+        waveform.typeKey(.rightArrow, modifierFlags: [])
+        XCTAssertTrue(
+            waitForTimeAtLeast(5, on: currentTime, timeout: 5),
+            "Accessibility seek should advance by at least five seconds"
+        )
+        keepScreenshot(named: "07-local-recording-player", of: app)
+    }
+
     private func launchApp(
         environment: [String: String] = [:]
     ) -> XCUIApplication {
@@ -483,5 +522,33 @@ final class MeetingFlowUITests: XCTestCase {
             )
             .firstMatch
             .waitForExistence(timeout: timeout)
+    }
+
+    private func waitForTimeAtLeast(
+        _ minimumSeconds: Int,
+        on element: XCUIElement,
+        timeout: TimeInterval
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if timeInSeconds(accessibleText(of: element)) >= minimumSeconds {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+        return false
+    }
+
+    private func timeInSeconds(_ value: String) -> Int {
+        value.split(separator: ":").reduce(0) { partial, component in
+            partial * 60 + (Int(component) ?? 0)
+        }
+    }
+
+    private func accessibleText(of element: XCUIElement) -> String {
+        if let value = element.value as? String, !value.isEmpty {
+            return value
+        }
+        return element.label
     }
 }
