@@ -256,12 +256,12 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertEqual(chunks.map(\.startingAt), [0, 4.0 / 16_000])
     }
 
-    func testProductionTranscriptionEnqueuesAtFiveSecondsWhileRecording() async throws {
-        let fiveSeconds = 5 * Int(AudioSegmentManifest.transcriptionSampleRate)
+    func testProductionTranscriptionEnqueuesAtTenSecondsWhileRecording() async throws {
+        let tenSeconds = 10 * Int(AudioSegmentManifest.transcriptionSampleRate)
         let frame = CapturedAudioFrame(
             timestamp: 0,
             sampleRate: AudioSegmentManifest.transcriptionSampleRate,
-            samples: Array(repeating: 0.1, count: fiveSeconds)
+            samples: Array(repeating: 0.1, count: tenSeconds)
         )
         let fixture = makeFixture(frames: [frame])
 
@@ -277,7 +277,7 @@ final class MeetingCoordinatorTests: XCTestCase {
         let chunks = await fixture.transcriber.chunks()
         XCTAssertEqual(snapshot.state, .recording)
         XCTAssertEqual(chunks.count, 1)
-        XCTAssertEqual(chunks.first?.samples.count, fiveSeconds)
+        XCTAssertEqual(chunks.first?.samples.count, tenSeconds)
         XCTAssertEqual(chunks.first?.startingAt, 0)
         try await fixture.coordinator.stop()
     }

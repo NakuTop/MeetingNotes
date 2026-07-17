@@ -19,7 +19,7 @@ struct MeetingCoordinatorSnapshot: Equatable, Sendable {
 
 actor MeetingCoordinator {
     static let productionTranscriptionChunkSampleCount =
-        5 * Int(AudioSegmentManifest.transcriptionSampleRate)
+        10 * Int(AudioSegmentManifest.transcriptionSampleRate)
 
     private let dependencies: MeetingCoordinatorDependencies
     private let transcriptionChunkSampleCount: Int

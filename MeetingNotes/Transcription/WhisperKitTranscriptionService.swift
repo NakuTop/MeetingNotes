@@ -12,6 +12,36 @@ enum WhisperDecodingPolicy {
     }
 }
 
+enum WhisperLanguagePolicy {
+    private static let supportedLanguages: Set<String> = ["zh", "en"]
+
+    static func acceptedLanguage(
+        from probabilities: [String: Float]
+    ) -> String? {
+        guard let mostLikely = probabilities.max(by: {
+            $0.value < $1.value
+        }), supportedLanguages.contains(mostLikely.key) else {
+            return nil
+        }
+        return mostLikely.key
+    }
+
+    static func decodingOptions(for language: String) -> DecodingOptions? {
+        guard supportedLanguages.contains(language) else {
+            return nil
+        }
+        return DecodingOptions(
+            task: .transcribe,
+            language: language,
+            temperature: 0.0,
+            temperatureFallbackCount: 5,
+            detectLanguage: false,
+            skipSpecialTokens: true,
+            wordTimestamps: false
+        )
+    }
+}
+
 struct WhisperTranscriptSegment: Equatable, Sendable {
     let start: TimeInterval
     let end: TimeInterval
@@ -104,9 +134,18 @@ actor WhisperKitTranscriptionService:
             return []
         }
 
+        let detection = try await whisperKit.detectLangauge(audioArray: samples)
+        guard let language = WhisperLanguagePolicy.acceptedLanguage(
+            from: detection.langProbs
+        ), let decodeOptions = WhisperLanguagePolicy.decodingOptions(
+            for: language
+        ) else {
+            return []
+        }
+
         let results = try await whisperKit.transcribe(
             audioArray: samples,
-            decodeOptions: WhisperDecodingPolicy.options
+            decodeOptions: decodeOptions
         )
         var drafts: [TranscriptDraft] = []
         for result in results {

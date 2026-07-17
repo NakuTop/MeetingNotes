@@ -53,6 +53,43 @@ final class TranscriptTextSanitizerTests: XCTestCase {
         XCTAssertTrue(options.skipSpecialTokens)
     }
 
+    func testLanguagePolicyAcceptsChineseOrEnglishOnlyWhenItIsGloballyMostLikely() {
+        XCTAssertEqual(
+            WhisperLanguagePolicy.acceptedLanguage(
+                from: ["zh": -0.1, "en": -1.2, "ja": -2.0]
+            ),
+            "zh"
+        )
+        XCTAssertEqual(
+            WhisperLanguagePolicy.acceptedLanguage(
+                from: ["zh": -1.4, "en": -0.2, "fr": -2.0]
+            ),
+            "en"
+        )
+    }
+
+    func testLanguagePolicyRejectsChunkWhenAnotherLanguageIsGloballyMostLikely() {
+        XCTAssertNil(
+            WhisperLanguagePolicy.acceptedLanguage(
+                from: ["zh": -0.8, "en": -1.0, "ja": -0.1]
+            )
+        )
+    }
+
+    func testLanguagePolicyBuildsFixedTranscriptionOptionsForChineseAndEnglish() throws {
+        for language in ["zh", "en"] {
+            let options = try XCTUnwrap(
+                WhisperLanguagePolicy.decodingOptions(for: language)
+            )
+
+            XCTAssertEqual(options.task, .transcribe)
+            XCTAssertEqual(options.language, language)
+            XCTAssertFalse(options.detectLanguage)
+            XCTAssertTrue(options.skipSpecialTokens)
+        }
+        XCTAssertNil(WhisperLanguagePolicy.decodingOptions(for: "ja"))
+    }
+
     func testDraftBuilderCleansFallbackResultText() {
         XCTAssertEqual(
             WhisperTranscriptDraftBuilder.makeDrafts(
