@@ -4,6 +4,43 @@ import XCTest
 
 @MainActor
 final class MeetingAudioPlayerControllerTests: XCTestCase {
+    func testAudioIsReadyAndPlayableBeforeBlockedWaveformFinishes() async {
+        let meetingID = UUID()
+        let waveformLoader = ControlledWaveformLoader(
+            values: [meetingID: [0.2, 0.8]]
+        )
+        await waveformLoader.block(meetingID)
+        let engine = PlaybackEngineSpy()
+        let controller = makeController(
+            sourceLoader: ControlledAudioSourceLoader(
+                sources: [
+                    meetingID: makeSource(
+                        meetingID: meetingID,
+                        duration: 14
+                    )
+                ]
+            ),
+            waveformLoader: waveformLoader,
+            engine: engine
+        )
+
+        let preparation = Task {
+            await controller.prepare(meetingID: meetingID)
+        }
+        await waveformLoader.waitUntilStarted(meetingID)
+
+        XCTAssertEqual(controller.state, .ready)
+        XCTAssertEqual(controller.duration, 14, accuracy: 0.000_001)
+        XCTAssertTrue(controller.waveform.isEmpty)
+        controller.togglePlayback()
+        XCTAssertEqual(controller.state, .playing)
+        XCTAssertEqual(engine.playCallCount, 1)
+
+        await waveformLoader.resume(meetingID)
+        await preparation.value
+        XCTAssertEqual(controller.waveform, [0.2, 0.8])
+    }
+
     func testPrepareTransitionsFromLoadingToReadyWithSourceDurationAndWaveform() async {
         let meetingID = UUID()
         let sourceLoader = ControlledAudioSourceLoader(

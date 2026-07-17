@@ -362,6 +362,10 @@ final class MeetingAudioPlayerController: MeetingPlaybackStopping {
                 throw AVFoundationMeetingAudioPlaybackEngine.Error.invalidSource
             }
 
+            duration = preparedDuration
+            currentTime = 0
+            state = .ready
+
             let loadedWaveform: [Float]
             do {
                 loadedWaveform = try await waveformLoader.values(
@@ -379,10 +383,7 @@ final class MeetingAudioPlayerController: MeetingPlaybackStopping {
                 generation: requestedGeneration
             ) else { return }
 
-            duration = preparedDuration
             waveform = loadedWaveform
-            currentTime = 0
-            state = .ready
         } catch is CancellationError {
             // A newer selection or an explicit stop owns the visible state.
         } catch {
