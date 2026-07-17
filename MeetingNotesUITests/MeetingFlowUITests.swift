@@ -1,3 +1,5 @@
+import AVFoundation
+import AppKit
 import XCTest
 
 @MainActor
@@ -314,10 +316,16 @@ final class MeetingFlowUITests: XCTestCase {
         )
     }
 
-    func testLocalRecordingPlayer() {
+    func testLocalRecordingPlayer() throws {
+        let meetingID = UUID()
         let app = launchApp(
-            environment: ["MEETING_NOTES_UI_AUDIO_PLAYER": "1"]
+            environment: [
+                "MEETING_NOTES_UI_AUDIO_PLAYER": "1",
+                "MEETING_NOTES_UI_AUDIO_PLAYER_MEETING_ID":
+                    meetingID.uuidString
+            ]
         )
+        try makeAudioPlayerFixture(for: meetingID, app: app)
         let historyRow = app.descendants(matching: .any)[
             "meeting.historyRow"
         ].firstMatch
@@ -344,24 +352,209 @@ final class MeetingFlowUITests: XCTestCase {
         toggle.click()
         XCTAssertTrue(waitForLabel("暂停播放", on: toggle))
 
+        toggle.click()
+        XCTAssertTrue(waitForLabel("播放录音", on: toggle))
+        let pausedTime = timeInSeconds(accessibleText(of: currentTime))
+        assertTimeStays(pausedTime, on: currentTime, for: 0.75)
+
         waveform.click()
+        let focusedTime = timeInSeconds(accessibleText(of: currentTime))
         waveform.typeKey(.rightArrow, modifierFlags: [])
+        let expectedTime = min(8, focusedTime + 5)
         XCTAssertTrue(
-            waitForTimeAtLeast(5, on: currentTime, timeout: 5),
-            "Accessibility seek should advance by at least five seconds"
+            waitForTime(
+                expectedTime,
+                tolerance: 1,
+                on: currentTime,
+                timeout: 2
+            ),
+            "Accessibility seek should advance about five seconds from pause"
         )
+        XCTAssertTrue(waitForLabel("播放录音", on: toggle))
         keepScreenshot(named: "07-local-recording-player", of: app)
     }
 
+    func testPlayerPreparesWhenOpenMeetingBecomesPlayable() throws {
+        let meetingID = UUID()
+        let triggerURL = URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent(
+                "MeetingNotes-UITesting-Trigger-\(UUID().uuidString)"
+            )
+        let app = launchApp(
+            environment: [
+                "MEETING_NOTES_UI_AUDIO_PLAYER_MEETING_ID":
+                    meetingID.uuidString,
+                "MEETING_NOTES_UI_AUDIO_PLAYER_LIFECYCLE_TRIGGER":
+                    triggerURL.path
+            ],
+            temporaryArtifacts: [
+                triggerURL,
+                triggerURL.appendingPathExtension("pending")
+            ]
+        )
+        try makeAudioPlayerFixture(for: meetingID, app: app)
+        let historyRow = app.descendants(matching: .any)[
+            "meeting.historyRow"
+        ].firstMatch
+        XCTAssertTrue(historyRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            waitForLabelContaining("录音即将完成会议", on: historyRow)
+        )
+        historyRow.click()
+
+        let player = app.descendants(matching: .any)[
+            "meeting.audioPlayer"
+        ].firstMatch
+        XCTAssertFalse(player.exists)
+        XCTAssertTrue(app.staticTexts["正在录制"].waitForExistence(timeout: 3))
+
+        try writeTriggerAtomically(to: triggerURL)
+
+        XCTAssertTrue(player.waitForExistence(timeout: 8))
+        XCTAssertTrue(
+            app.buttons["meeting.audioPlayer.toggle"]
+                .waitForExistence(timeout: 5)
+        )
+        XCTAssertEqual(
+            accessibleText(
+                of: app.staticTexts["meeting.audioPlayer.duration"]
+            ),
+            "00:08"
+        )
+    }
+
     private func launchApp(
-        environment: [String: String] = [:]
+        environment: [String: String] = [:],
+        temporaryArtifacts: [URL] = []
     ) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["-uiTesting"]
         app.launchEnvironment = environment
         app.launch()
+        let candidates = NSRunningApplication.runningApplications(
+            withBundleIdentifier: "com.shenminghao.MeetingNotes"
+        )
+        XCTAssertEqual(candidates.count, 1, "Expected one launched test app")
+        var cleanupURLs = temporaryArtifacts.map(\.standardizedFileURL)
+        if let processID = candidates.first?.processIdentifier {
+            cleanupURLs.append(recordingsRoot(for: processID))
+        }
+        addTeardownBlock { @MainActor in
+            if app.state != .notRunning {
+                app.terminate()
+            }
+            for url in cleanupURLs {
+                guard Self.isSafeTemporaryArtifact(url) else {
+                    XCTFail(
+                        "Refusing to delete unrecognized UI test path: \(url.path)"
+                    )
+                    continue
+                }
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
         return app
+    }
+
+    private func recordingsRoot(for processID: pid_t) -> URL {
+        URL(fileURLWithPath: "/tmp", isDirectory: true)
+            .appendingPathComponent(
+                "MeetingNotes-UITesting-\(processID)",
+                isDirectory: true
+            )
+    }
+
+    private func makeAudioPlayerFixture(
+        for meetingID: UUID,
+        app: XCUIApplication
+    ) throws {
+        let processID = try XCTUnwrap(
+            NSRunningApplication.runningApplications(
+                withBundleIdentifier: "com.shenminghao.MeetingNotes"
+            ).first?.processIdentifier,
+            "Unable to capture launched app PID"
+        )
+        let directory = recordingsRoot(for: processID)
+            .appendingPathComponent(meetingID.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+
+        let sampleRate = 16_000.0
+        let frameCount = Int(sampleRate * 8)
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sampleRate,
+            channels: 1,
+            interleaved: false
+        ), let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(frameCount)
+        ), let channel = buffer.floatChannelData?.pointee else {
+            XCTFail("Unable to allocate UI test audio buffer")
+            return
+        }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        channel.initialize(repeating: 0, count: frameCount)
+
+        let fileName = "segment-0001.caf"
+        let audioFile = try AVAudioFile(
+            forWriting: directory.appendingPathComponent(fileName),
+            settings: format.settings,
+            commonFormat: .pcmFormatFloat32,
+            interleaved: false
+        )
+        try audioFile.write(from: buffer)
+        audioFile.close()
+
+        let manifest: [String: Any] = [
+            "version": 1,
+            "sampleRate": sampleRate,
+            "channelCount": 1,
+            "segments": [[
+                "fileName": fileName,
+                "startTime": 0,
+                "endTime": 8,
+                "frameCount": frameCount,
+                "isComplete": true
+            ]]
+        ]
+        let data = try JSONSerialization.data(
+            withJSONObject: manifest,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try data.write(
+            to: directory.appendingPathComponent("manifest.json"),
+            options: .atomic
+        )
+    }
+
+    private nonisolated static func isSafeTemporaryArtifact(
+        _ url: URL
+    ) -> Bool {
+        let standardized = url.standardizedFileURL
+        guard standardized.deletingLastPathComponent().path == "/tmp" else {
+            return false
+        }
+
+        let name = standardized.lastPathComponent
+        let rootPrefix = "MeetingNotes-UITesting-"
+        if name.hasPrefix(rootPrefix) {
+            let suffix = name.dropFirst(rootPrefix.count)
+            if !suffix.isEmpty, suffix.allSatisfy(\.isNumber) {
+                return true
+            }
+        }
+
+        let triggerPrefix = "MeetingNotes-UITesting-Trigger-"
+        let triggerName = standardized.pathExtension == "pending"
+            ? standardized.deletingPathExtension().lastPathComponent
+            : name
+        guard triggerName.hasPrefix(triggerPrefix) else { return false }
+        let uuid = String(triggerName.dropFirst(triggerPrefix.count))
+        return UUID(uuidString: uuid) != nil
     }
 
     private func finishOfflineMeeting(in app: XCUIApplication) {
@@ -524,19 +717,46 @@ final class MeetingFlowUITests: XCTestCase {
             .waitForExistence(timeout: timeout)
     }
 
-    private func waitForTimeAtLeast(
-        _ minimumSeconds: Int,
+    private func waitForTime(
+        _ expectedSeconds: Int,
+        tolerance: Int,
         on element: XCUIElement,
         timeout: TimeInterval
     ) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            if timeInSeconds(accessibleText(of: element)) >= minimumSeconds {
+            let current = timeInSeconds(accessibleText(of: element))
+            if abs(current - expectedSeconds) <= tolerance {
                 return true
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         } while Date() < deadline
         return false
+    }
+
+    private func assertTimeStays(
+        _ expectedSeconds: Int,
+        on element: XCUIElement,
+        for duration: TimeInterval,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let deadline = Date().addingTimeInterval(duration)
+        repeat {
+            XCTAssertEqual(
+                timeInSeconds(accessibleText(of: element)),
+                expectedSeconds,
+                file: file,
+                line: line
+            )
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        } while Date() < deadline
+    }
+
+    private func writeTriggerAtomically(to url: URL) throws {
+        let temporaryURL = url.appendingPathExtension("pending")
+        try Data("finish".utf8).write(to: temporaryURL, options: .atomic)
+        try FileManager.default.moveItem(at: temporaryURL, to: url)
     }
 
     private func timeInSeconds(_ value: String) -> Int {

@@ -1,4 +1,3 @@
-import AVFoundation
 import Foundation
 
 enum LaunchArguments {
@@ -7,6 +6,10 @@ enum LaunchArguments {
         "MEETING_NOTES_UI_SLOW_RENAME"
     static let uiTestingAudioPlayerEnvironment =
         "MEETING_NOTES_UI_AUDIO_PLAYER"
+    static let uiTestingAudioPlayerMeetingIDEnvironment =
+        "MEETING_NOTES_UI_AUDIO_PLAYER_MEETING_ID"
+    static let uiTestingAudioPlayerLifecycleTriggerEnvironment =
+        "MEETING_NOTES_UI_AUDIO_PLAYER_LIFECYCLE_TRIGGER"
 
     static func isUITesting(
         _ arguments: [String] = ProcessInfo.processInfo.arguments
@@ -25,6 +28,36 @@ enum LaunchArguments {
     ) -> Bool {
         environment[uiTestingAudioPlayerEnvironment] == "1"
     }
+
+    static func audioPlayerLifecycleTriggerURL(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL? {
+        guard let path = environment[
+            uiTestingAudioPlayerLifecycleTriggerEnvironment
+        ], !path.isEmpty else {
+            return nil
+        }
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        guard url.deletingLastPathComponent().path == "/tmp",
+              url.lastPathComponent.hasPrefix(
+                "MeetingNotes-UITesting-Trigger-"
+              ),
+              url.pathExtension.isEmpty else {
+            return nil
+        }
+        return url
+    }
+
+    static func audioPlayerMeetingID(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> UUID? {
+        guard let value = environment[
+            uiTestingAudioPlayerMeetingIDEnvironment
+        ] else {
+            return nil
+        }
+        return UUID(uuidString: value)
+    }
 }
 
 #if DEBUG
@@ -36,7 +69,10 @@ extension AppContainer {
             LaunchArguments.usesSlowRenameUITestFixture()
         let usesAudioPlayerFixture =
             LaunchArguments.usesAudioPlayerUITestFixture()
-        let recordingsURL = FileManager.default.temporaryDirectory
+        let audioPlayerMeetingID = LaunchArguments.audioPlayerMeetingID()
+        let audioPlayerLifecycleTriggerURL =
+            LaunchArguments.audioPlayerLifecycleTriggerURL()
+        let recordingsURL = URL(fileURLWithPath: "/tmp", isDirectory: true)
             .appendingPathComponent(
                 "MeetingNotes-UITesting-\(ProcessInfo.processInfo.processIdentifier)",
                 isDirectory: true
@@ -60,21 +96,28 @@ extension AppContainer {
             )
             try repository.updateMeetingState(id: meetingID, state: .archived)
         }
-        if usesAudioPlayerFixture {
+        if usesAudioPlayerFixture, let audioPlayerMeetingID {
             let startedAt = Date(timeIntervalSince1970: 2_000)
-            let meetingID = try repository.createMeeting(
+            _ = try repository.createMeeting(
+                id: audioPlayerMeetingID,
                 mode: .offline,
                 startedAt: startedAt,
                 title: "可播放录音会议"
             )
-            try makeAudioPlayerFixture(
-                meetingID: meetingID,
-                recordingsURL: recordingsURL
-            )
             try repository.finalizeMeeting(
-                id: meetingID,
+                id: audioPlayerMeetingID,
                 endedAt: startedAt.addingTimeInterval(8),
                 activeDuration: 8
+            )
+        }
+        if audioPlayerLifecycleTriggerURL != nil,
+           let audioPlayerMeetingID {
+            let startedAt = Date(timeIntervalSince1970: 3_000)
+            _ = try repository.createMeeting(
+                id: audioPlayerMeetingID,
+                mode: .offline,
+                startedAt: startedAt,
+                title: "录音即将完成会议"
             )
         }
         let fileStore = MeetingFileStore(rootURL: recordingsURL)
@@ -93,7 +136,7 @@ extension AppContainer {
         let onboarding = OnboardingState(defaults: defaults)
         onboarding.completePrivacyAndConsent()
 
-        return AppContainer(
+        let container = AppContainer(
             repository: repository,
             fileStore: fileStore,
             recordingsURL: recordingsURL,
@@ -123,64 +166,43 @@ extension AppContainer {
             onboardingState: onboarding,
             systemRequirements: UITestSystemRequirements()
         )
+        if let triggerURL = audioPlayerLifecycleTriggerURL,
+           let meetingID = audioPlayerMeetingID {
+            monitorAudioPlayerLifecycleFixture(
+                triggerURL: triggerURL,
+                meetingID: meetingID,
+                container: container
+            )
+        }
+        return container
     }
 
-    private static func makeAudioPlayerFixture(
+    private static func monitorAudioPlayerLifecycleFixture(
+        triggerURL: URL,
         meetingID: UUID,
-        recordingsURL: URL
-    ) throws {
-        let directory = recordingsURL
-            .appendingPathComponent(meetingID.uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true
-        )
-
-        let sampleRate = AudioSegmentManifest.transcriptionSampleRate
-        let frameCount = Int(sampleRate * 8)
-        guard let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate,
-            channels: AVAudioChannelCount(
-                AudioSegmentManifest.transcriptionChannelCount
-            ),
-            interleaved: false
-        ), let buffer = AVAudioPCMBuffer(
-            pcmFormat: format,
-            frameCapacity: AVAudioFrameCount(frameCount)
-        ), let channel = buffer.floatChannelData?.pointee else {
-            throw SegmentedPCMWriterError.audioBufferUnavailable
+        container: AppContainer
+    ) {
+        Task { @MainActor [weak container] in
+            while !Task.isCancelled {
+                guard let container else { return }
+                if FileManager.default.fileExists(atPath: triggerURL.path) {
+                    let endedAt = Date(timeIntervalSince1970: 3_008)
+                    try? container.repository.finalizeMeeting(
+                        id: meetingID,
+                        endedAt: endedAt,
+                        activeDuration: 8
+                    )
+                    container.libraryViewModel.load()
+                    container.detailViewModel(for: meetingID).load()
+                    return
+                }
+                do {
+                    try await Task.sleep(for: .milliseconds(50))
+                } catch {
+                    return
+                }
+            }
         }
-        buffer.frameLength = AVAudioFrameCount(frameCount)
-        channel.initialize(repeating: 0, count: frameCount)
-
-        let fileName = "segment-0001.caf"
-        let audioFile = try AVAudioFile(
-            forWriting: directory.appendingPathComponent(fileName),
-            settings: format.settings,
-            commonFormat: .pcmFormatFloat32,
-            interleaved: false
-        )
-        try audioFile.write(from: buffer)
-        audioFile.close()
-
-        let manifest = AudioSegmentManifest(segments: [
-            .init(
-                fileName: fileName,
-                startTime: 0,
-                endTime: 8,
-                frameCount: Int64(frameCount),
-                isComplete: true
-            )
-        ])
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(manifest).write(
-            to: directory.appendingPathComponent(
-                MeetingFileStore.manifestFileName
-            ),
-            options: .atomic
-        )
     }
 }
 

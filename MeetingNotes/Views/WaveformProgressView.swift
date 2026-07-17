@@ -1,5 +1,36 @@
 import SwiftUI
 
+enum WaveformSeekAction: Equatable {
+    case began(Double)
+    case changed(Double)
+    case ended(Double)
+}
+
+struct WaveformSeekInteraction {
+    private(set) var isActive = false
+    private(set) var lastFraction = 0.0
+
+    mutating func update(to fraction: Double) -> WaveformSeekAction {
+        lastFraction = fraction
+        if isActive {
+            return .changed(fraction)
+        }
+        isActive = true
+        return .began(fraction)
+    }
+
+    mutating func finish(
+        at fraction: Double? = nil
+    ) -> WaveformSeekAction? {
+        guard isActive else { return nil }
+        if let fraction {
+            lastFraction = fraction
+        }
+        isActive = false
+        return .ended(lastFraction)
+    }
+}
+
 struct WaveformProgressView: View {
     private static let barWidth: CGFloat = 2
     private static let barGap: CGFloat = 2
@@ -12,7 +43,8 @@ struct WaveformProgressView: View {
     let onSeekChanged: (Double) -> Void
     let onSeekEnded: (Double) -> Void
 
-    @State private var isDragging = false
+    @GestureState private var gestureIsActive = false
+    @State private var interaction = WaveformSeekInteraction()
 
     var body: some View {
         GeometryReader { proxy in
@@ -61,25 +93,39 @@ struct WaveformProgressView: View {
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
+                    .updating($gestureIsActive) { _, isActive, _ in
+                        isActive = true
+                    }
                     .onChanged { value in
                         let fraction = Self.clampFraction(
                             value.location.x / width
                         )
-                        if isDragging {
-                            onSeekChanged(fraction)
-                        } else {
-                            isDragging = true
-                            onSeekBegan(fraction)
-                        }
+                        dispatch(interaction.update(to: fraction))
                     }
                     .onEnded { value in
                         let fraction = Self.clampFraction(
                             value.location.x / width
                         )
-                        isDragging = false
-                        onSeekEnded(fraction)
+                        finishInteraction(at: fraction)
                     }
             )
+        }
+        .onChange(of: gestureIsActive) { wasActive, isActive in
+            if wasActive, !isActive {
+                finishInteraction()
+            }
+        }
+        .onDisappear {
+            finishInteraction()
+        }
+        .focusable()
+        .onKeyPress(.rightArrow) {
+            seek(to: safeProgress + accessibilityStep)
+            return .handled
+        }
+        .onKeyPress(.leftArrow) {
+            seek(to: safeProgress - accessibilityStep)
+            return .handled
         }
         .accessibilityRepresentation {
             Slider(
@@ -135,6 +181,23 @@ struct WaveformProgressView: View {
         let safeFraction = Self.clampFraction(fraction)
         onSeekBegan(safeFraction)
         onSeekEnded(safeFraction)
+    }
+
+    private func dispatch(_ action: WaveformSeekAction) {
+        switch action {
+        case let .began(fraction):
+            onSeekBegan(fraction)
+        case let .changed(fraction):
+            onSeekChanged(fraction)
+        case let .ended(fraction):
+            onSeekEnded(fraction)
+        }
+    }
+
+    private func finishInteraction(at fraction: Double? = nil) {
+        let safeFraction = fraction.map(Self.clampFraction)
+        guard let action = interaction.finish(at: safeFraction) else { return }
+        dispatch(action)
     }
 
     private static func resample(

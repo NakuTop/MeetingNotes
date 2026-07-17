@@ -47,6 +47,10 @@ targets:
       - MeetingNotesUITests
     dependencies:
       - target: MeetingNotes
+    settings:
+      configs:
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: Configuration/MeetingNotesUITests.entitlements
 schemes:
   MeetingNotes:
     build:

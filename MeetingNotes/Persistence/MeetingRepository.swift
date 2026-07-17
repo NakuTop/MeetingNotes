@@ -64,12 +64,14 @@ final class MeetingRepository {
 
     @discardableResult
     func createMeeting(
+        id: UUID = UUID(),
         mode: MeetingMode,
         startedAt: Date,
         title: String = MeetingRecord.defaultTitle,
         audioManifestPath: String? = nil
     ) throws -> UUID {
         let meeting = MeetingRecord(
+            id: id,
             title: title,
             mode: mode,
             state: .preparing,

@@ -12,6 +12,49 @@ final class LaunchArgumentsTests: XCTestCase {
         )
     }
 
+    func testAudioLifecycleTriggerAcceptsOnlyDirectTemporaryFixturePath() {
+        let key = "MEETING_NOTES_UI_AUDIO_PLAYER_LIFECYCLE_TRIGGER"
+        let validPath = "/tmp/MeetingNotes-UITesting-Trigger-123"
+
+        XCTAssertEqual(
+            LaunchArguments.audioPlayerLifecycleTriggerURL(
+                [key: validPath]
+            )?.path,
+            validPath
+        )
+        XCTAssertNil(
+            LaunchArguments.audioPlayerLifecycleTriggerURL(
+                [key: "/tmp/not-a-meeting-notes-trigger"]
+            )
+        )
+        XCTAssertNil(
+            LaunchArguments.audioPlayerLifecycleTriggerURL(
+                [key: "/Users/example/MeetingNotes-UITesting-Trigger-123"]
+            )
+        )
+        XCTAssertNil(
+            LaunchArguments.audioPlayerLifecycleTriggerURL(
+                [key: "/tmp/nested/MeetingNotes-UITesting-Trigger-123"]
+            )
+        )
+    }
+
+    func testAudioPlayerFixtureMeetingIDRequiresAUUID() {
+        let key = "MEETING_NOTES_UI_AUDIO_PLAYER_MEETING_ID"
+        let meetingID = UUID()
+
+        XCTAssertEqual(
+            LaunchArguments.audioPlayerMeetingID(
+                [key: meetingID.uuidString]
+            ),
+            meetingID
+        )
+        XCTAssertNil(
+            LaunchArguments.audioPlayerMeetingID([key: "not-a-uuid"])
+        )
+        XCTAssertNil(LaunchArguments.audioPlayerMeetingID([:]))
+    }
+
     @MainActor
     func testUITestingContainerRecordsAndTranscribesWithoutLiveServices() async throws {
         #if DEBUG

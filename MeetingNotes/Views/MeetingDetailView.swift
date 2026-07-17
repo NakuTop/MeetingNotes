@@ -1,5 +1,15 @@
 import SwiftUI
 
+private struct MeetingPlaybackPreparationKey: Hashable {
+    let meetingID: UUID
+    let isPlayable: Bool
+
+    init(meeting: MeetingRecord) {
+        meetingID = meeting.id
+        isPlayable = meeting.endedAt != nil
+    }
+}
+
 struct MeetingDetailView: View {
     @State private var viewModel: MeetingDetailViewModel
     @State private var isEditingTitle = false
@@ -54,7 +64,8 @@ struct MeetingDetailView: View {
     }
 
     private func detailContent(_ meeting: MeetingRecord) -> some View {
-        ScrollView {
+        let playbackKey = MeetingPlaybackPreparationKey(meeting: meeting)
+        return ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 AdaptiveGlassCard {
                     header(meeting)
@@ -83,9 +94,16 @@ struct MeetingDetailView: View {
             .frame(maxWidth: .infinity)
         }
         .accessibilityIdentifier("meeting.detail")
-        .task(id: meeting.id) {
-            guard meeting.endedAt != nil else { return }
-            await audioPlayerController.prepare(meetingID: meeting.id)
+        .task(id: playbackKey) {
+            if playbackKey.isPlayable {
+                await audioPlayerController.prepare(
+                    meetingID: playbackKey.meetingID
+                )
+            } else {
+                audioPlayerController.stop(
+                    meetingID: playbackKey.meetingID
+                )
+            }
         }
         .onDisappear {
             audioPlayerController.stop(meetingID: meeting.id)
