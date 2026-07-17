@@ -92,7 +92,8 @@ xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
 | 2026-07-15 | 完整回归 | 通过 | arm64 单元测试 130/130；UI 流程 4/4；0 失败 |
 | 2026-07-15 | 签名与架构 | 通过 | macOS 15 部署目标构建成功；`file` 为 Mach-O 64-bit executable arm64；`codesign --verify --deep --strict` 通过 |
 | 2026-07-15 | 整窗 Liquid Glass 回归 | 通过 | macOS 26.5 / arm64；主窗口、历史侧栏、详情页、设置页及浮窗共 6 张 XCTest 截图逐张检查；结果包为 `/tmp/meetingnotes-window-glass-ui-full/Logs/Test/Test-MeetingNotes-2026.07.15_11-52-45-+0800.xcresult` |
-| 2026-07-17 | 真实 store 保护与只读检查 | 部分通过 | 备份 `/tmp/MeetingNotes-default-store-before-pin-20260717-115107.store`；源/备份 SHA-256 一致。SQLite `PRAGMA quick_check=ok`，2 条历史会议的 `ZPINNEDAT` 均为 `NULL`；App UI 中可见性待用户确认 |
+| 2026-07-17 | 旧 store 主文件保护副本 | 已被一致备份取代 | `/tmp/MeetingNotes-default-store-before-pin-20260717-115107.store` 与当时主文件 SHA-256 一致，但在 SQLite WAL 模式下，单独复制主文件不能证明获得了完整逻辑快照。该副本保留，不再作为完整备份证据 |
+| 2026-07-17 | 真实 store 一致性验收前备份 | 通过 | 通过 SQLite `.backup` 生成 `/tmp/MeetingNotes-consistent-before-manual-fixes-20260717-124928.store`；`PRAGMA quick_check=ok`，包含 1 条会议、0 条转录；SHA-256 `17f2562833b2d160e2f52adf83dac3a8cca4f57a419fe5f397eac86685bd7c8f` |
 | 2026-07-17 | clean arm64 单元回归 | 通过 | 全新 DerivedData，276/276、0 失败；`/tmp/meetingnotes-task12-unit-20260717-115107/Logs/Test/Run-MeetingNotes-2026.07.17_11-53-49-+0800.xcresult` |
 | 2026-07-17 | 签名 UI 流程 + 长录音 harness | 通过 | 完整 UI 8/8、harness 1/1、0 失败；`/tmp/meetingnotes-task12-ui-20260717-115107/Logs/Test/Test-MeetingNotes-2026.07.17_11-55-10-+0800.xcresult`。`-uiTesting` 使用假服务，不代表真实 DeepSeek/Notion 通过 |
 | 2026-07-17 | 固定 Debug 验收包 | 自动化通过 | `/tmp/meetingnotes-feature-real-build/Build/Products/Debug/MeetingNotes.app`；`file` = Mach-O 64-bit executable arm64，`lipo` = arm64，严格 `codesign --verify` 通过；仅 ad-hoc 本机签名，不可用于分发 |
