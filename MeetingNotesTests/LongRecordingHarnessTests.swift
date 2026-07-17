@@ -39,6 +39,8 @@ final class LongRecordingHarnessTests: XCTestCase {
 
         await service.failPreparation()
         await queue.drain()
+        let prepareCount = await service.prepareCount()
+        XCTAssertEqual(prepareCount, 2)
     }
 }
 
@@ -50,16 +52,22 @@ private struct LogicalSampleWriter {
     }
 }
 
-private enum HarnessPreparationError: Error {
+private enum HarnessPreparationError: Error, Sendable {
     case expectedFailure
 }
 
 private actor BlockingPreparationService: TranscriptionService {
     private var preparationStarted = false
+    private var preparationAttempts = 0
+    private var hasFailedPreparation = false
     private var startWaiters: [CheckedContinuation<Void, Never>] = []
     private var finishContinuation: CheckedContinuation<Void, Error>?
 
     func prepare() async throws {
+        preparationAttempts += 1
+        if hasFailedPreparation {
+            throw HarnessPreparationError.expectedFailure
+        }
         preparationStarted = true
         startWaiters.forEach { $0.resume() }
         startWaiters.removeAll()
@@ -85,9 +93,14 @@ private actor BlockingPreparationService: TranscriptionService {
     }
 
     func failPreparation() {
+        hasFailedPreparation = true
         finishContinuation?.resume(
             throwing: HarnessPreparationError.expectedFailure
         )
         finishContinuation = nil
+    }
+
+    func prepareCount() -> Int {
+        preparationAttempts
     }
 }
