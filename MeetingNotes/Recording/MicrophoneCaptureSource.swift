@@ -21,6 +21,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         guard !isRunning else {
             throw AudioCaptureError.alreadyRunning
         }
+        converter.reset()
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
@@ -66,6 +67,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         } catch {
             inputNode.removeTap(onBus: 0)
             isRunning = false
+            converter.reset()
             continuation?.finish(throwing: AudioCaptureError.engineStartFailed)
             continuation = nil
             throw AudioCaptureError.engineStartFailed
@@ -101,6 +103,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
 
     func stop() async {
         guard isRunning else {
+            converter.reset()
             return
         }
         engine.stop()
@@ -110,6 +113,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         isRunning = false
         isPaused = false
         firstSampleTime = nil
+        converter.reset()
     }
 
     private func process(
@@ -147,6 +151,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         isRunning = false
         isPaused = false
         firstSampleTime = nil
+        converter.reset()
     }
 
     nonisolated private static func copyBuffer(

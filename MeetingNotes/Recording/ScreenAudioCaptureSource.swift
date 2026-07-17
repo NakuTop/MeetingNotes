@@ -59,6 +59,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         guard stream == nil else {
             throw AudioCaptureError.alreadyRunning
         }
+        decoder.reset()
 
         let content: SCShareableContent
         do {
@@ -119,6 +120,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             }
         } catch {
             removeRegisteredOutputs(from: stream, relay: relay)
+            decoder.reset()
             continuation?.finish(throwing: ScreenAudioCaptureError.streamSetupFailed)
             continuation = nil
             throw ScreenAudioCaptureError.streamSetupFailed
@@ -130,6 +132,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             try await stream.startCapture()
         } catch {
             removeRegisteredOutputs(from: stream, relay: relay)
+            decoder.reset()
             self.stream = nil
             self.relay = nil
             continuation?.finish(throwing: ScreenAudioCaptureError.streamStartFailed)
@@ -158,10 +161,12 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
 
     func stop() async {
         guard let stream, let relay else {
+            decoder.reset()
             return
         }
         try? await stream.stopCapture()
         removeRegisteredOutputs(from: stream, relay: relay)
+        decoder.reset()
         for frame in await mixer.flush() {
             continuation?.yield(normalizeOutputTimestamp(frame))
         }
@@ -225,6 +230,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         }
         continuation?.finish(throwing: ScreenAudioCaptureError.streamStopped)
         continuation = nil
+        decoder.reset()
         stream = nil
         relay = nil
         isPaused = false
@@ -233,13 +239,26 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
 }
 
 final class ScreenAudioSampleDecoder: @unchecked Sendable {
-    private let converter: PCMConverter
+    private let systemConverter: PCMConverter
+    private let microphoneConverter: PCMConverter
 
-    init(converter: PCMConverter = PCMConverter()) {
-        self.converter = converter
+    init(
+        systemConverter: PCMConverter = PCMConverter(),
+        microphoneConverter: PCMConverter = PCMConverter()
+    ) {
+        self.systemConverter = systemConverter
+        self.microphoneConverter = microphoneConverter
     }
 
-    func decode(_ sampleBuffer: CMSampleBuffer) throws -> CapturedAudioFrame {
+    func reset() {
+        systemConverter.reset()
+        microphoneConverter.reset()
+    }
+
+    func decode(
+        _ sampleBuffer: CMSampleBuffer,
+        source: RealtimeAudioSource
+    ) throws -> CapturedAudioFrame {
         guard sampleBuffer.isValid else {
             throw ScreenAudioCaptureError.invalidAudioSample
         }
@@ -247,6 +266,10 @@ final class ScreenAudioSampleDecoder: @unchecked Sendable {
         let timestamp = CMTimeGetSeconds(presentationTime)
         guard timestamp.isFinite else {
             throw ScreenAudioCaptureError.invalidAudioSample
+        }
+        let converter = switch source {
+        case .system: systemConverter
+        case .microphone: microphoneConverter
         }
 
         let converted = try sampleBuffer.withAudioBufferList {
@@ -306,7 +329,10 @@ private final class ScreenAudioStreamRelay: NSObject, SCStreamOutput, SCStreamDe
         default:
             return
         }
-        guard let frame = try? decoder.decode(sampleBuffer) else {
+        guard let frame = try? decoder.decode(
+            sampleBuffer,
+            source: source
+        ) else {
             return
         }
         frameHandler(frame, source)
