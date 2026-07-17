@@ -288,12 +288,19 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
         transcripts: [MeetingTranscriptInput],
         bookmarks: [MeetingBookmarkInput]
     ) {
-        let finalTranscripts = meeting.transcripts
-            .filter {
-                $0.isFinal
-                    && !$0.text.trimmingCharacters(
-                        in: .whitespacesAndNewlines
-                    ).isEmpty
+        let transcripts = meeting.transcripts
+            .compactMap { transcript -> MeetingTranscriptInput? in
+                guard transcript.isFinal,
+                      let text = TranscriptTextSanitizer.nonEmpty(
+                          transcript.text
+                      ) else {
+                    return nil
+                }
+                return MeetingTranscriptInput(
+                    startTime: transcript.startTime,
+                    endTime: transcript.endTime,
+                    text: text
+                )
             }
             .sorted {
                 if $0.startTime == $1.startTime {
@@ -301,18 +308,11 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
                 }
                 return $0.startTime < $1.startTime
             }
-        let transcripts = finalTranscripts.map {
-            MeetingTranscriptInput(
-                startTime: $0.startTime,
-                endTime: $0.endTime,
-                text: $0.text
-            )
-        }
         let bookmarks = meeting.bookmarks
             .sorted { $0.timestamp < $1.timestamp }
             .map { bookmark in
                 let window = BookmarkWindow(bookmarkTime: bookmark.timestamp)
-                let excerpt = finalTranscripts
+                let excerpt = transcripts
                     .filter {
                         window.intersects(
                             transcriptStart: $0.startTime,

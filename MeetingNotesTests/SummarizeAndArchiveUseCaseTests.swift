@@ -61,6 +61,40 @@ final class SummarizeAndArchiveUseCaseTests: XCTestCase {
         XCTAssertEqual(fixture.archiver.archivedTitles, ["我的自定义标题"])
     }
 
+    func testSanitizesTranscriptsAndBookmarkExcerptsForDeepSeekAndNotion() async throws {
+        let fixture = try makeFixture()
+        let meetingID = try fixture.makeReadyMeeting()
+        try fixture.repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 5,
+            text: "<|zh|> 确认 A 方案。 <|unfinished",
+            isFinal: true
+        )
+        try fixture.repository.appendTranscript(
+            meetingID: meetingID,
+            start: 5,
+            end: 6,
+            text: "<|endoftext|>",
+            isFinal: true
+        )
+        try fixture.repository.appendBookmark(
+            meetingID: meetingID,
+            timestamp: 3
+        )
+
+        try await fixture.useCase.execute(meetingID: meetingID)
+
+        let capturedGeneratorInput = await fixture.generator.lastInput()
+        let generatorInput = try XCTUnwrap(capturedGeneratorInput)
+        XCTAssertEqual(generatorInput.transcripts.map(\.text), ["确认 A 方案。"])
+        XCTAssertEqual(generatorInput.bookmarks.map(\.excerpt), ["确认 A 方案。"])
+
+        let notionContent = try XCTUnwrap(fixture.archiver.archivedContents.last)
+        XCTAssertEqual(notionContent.transcripts.map(\.text), ["确认 A 方案。"])
+        XCTAssertEqual(notionContent.bookmarks.map(\.excerpt), ["确认 A 方案。"])
+    }
+
     func testDeepSeekFailureRestoresReadyAndNeverCallsNotion() async throws {
         let fixture = try makeFixture(
             generatorResult: .failure(DeepSeekClientError.unauthorized)
@@ -288,6 +322,7 @@ private final class UseCaseCredentialStore: CredentialStore, @unchecked Sendable
 private actor SummaryGeneratorSpy: MeetingSummaryGenerating {
     private let result: Result<GeneratedMeetingSummary, Error>
     private var calls = 0
+    private var inputs: [MeetingSummaryInput] = []
 
     init(result: Result<GeneratedMeetingSummary, Error>) {
         self.result = result
@@ -299,13 +334,14 @@ private actor SummaryGeneratorSpy: MeetingSummaryGenerating {
         model: String
     ) async throws -> GeneratedMeetingSummary {
         _ = apiKey
-        _ = input
         _ = model
         calls += 1
+        inputs.append(input)
         return try result.get()
     }
 
     func callCount() -> Int { calls }
+    func lastInput() -> MeetingSummaryInput? { inputs.last }
 }
 
 @MainActor
@@ -315,6 +351,7 @@ private final class NotionArchiverSpy: MeetingNotionArchiving {
     private(set) var callCount = 0
     private(set) var observedLocalSummaryBeforeArchive = false
     private(set) var archivedTitles: [String] = []
+    private(set) var archivedContents: [NotionMeetingPageContent] = []
 
     init(
         repository: MeetingRepository,
@@ -334,6 +371,7 @@ private final class NotionArchiverSpy: MeetingNotionArchiving {
         _ = parentPageID
         callCount += 1
         archivedTitles.append(content.title)
+        archivedContents.append(content)
         let meeting = try repository.meeting(id: meetingID)
         observedLocalSummaryBeforeArchive = meeting.summary != nil
         guard !results.isEmpty else {
