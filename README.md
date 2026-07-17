@@ -122,7 +122,7 @@ lipo -archs .deriveddata/Build/Products/Release/MeetingNotes.app/Contents/MacOS/
 - 全新 `/tmp/meetingnotes-task12-ui-20260717-115107` 构建目录中的本机临时签名测试：完整 UI 流程 8/8、长录音 harness 1/1 通过，0 失败；结果包为 `/tmp/meetingnotes-task12-ui-20260717-115107/Logs/Test/Test-MeetingNotes-2026.07.17_11-55-10-+0800.xcresult`。
 - 一小时等价 harness：57,600,000 个逻辑样本全部到达 writer 计数；模型阻塞时实时转录内存队列不超过 8 个分片，生产循环少于 2 秒。
 - 固定真机验收构建位于 `/tmp/meetingnotes-feature-real-build/Build/Products/Debug/MeetingNotes.app`；`file` 输出 `Mach-O 64-bit executable arm64`，`lipo -archs` 仅输出 `arm64`，`codesign --verify --deep --strict --verbose=2` 通过。该 Debug 包是 `Sign to Run Locally` 的 ad-hoc 签名，不是可分发的 Developer ID 签名，也未公证。
-- 在不启动 App、不触发迁移写入的前提下，真实 `default.store` 的 SQLite 只读 `PRAGMA quick_check` 返回 `ok`；存在 2 条历史会议，两条 `ZPINNEDAT` 均为 `NULL`。源库与备份 `/tmp/MeetingNotes-default-store-before-pin-20260717-115107.store` 的 SHA-256 均为 `afbd23fd4dc759afeb92c529e62c2c02812fd8a4dfc43e9472548f3917647432`。历史会议在 App UI 中的可见性仍待用户手动确认。
+- `/tmp/MeetingNotes-default-store-before-pin-20260717-115107.store` 只是旧 `default.store` 主文件的保护性副本；由于 SQLite 使用 WAL 模式，单独复制主文件不能作为完整逻辑备份。一致快照以 SQLite `.backup` 生成的 `/tmp/MeetingNotes-consistent-before-manual-fixes-20260717-124928.store` 为准：`PRAGMA quick_check=ok`，包含 1 条会议、0 条转录，SHA-256 为 `17f2562833b2d160e2f52adf83dac3a8cca4f57a419fe5f397eac86685bd7c8f`。
 - Release 假数据审计：二进制中未发现 UI 测试 Key、Token、页面标题或假总结文本。
 - `-uiTesting` Debug App 可直接启动并保持运行。
 - UI Runner：本机 Developer Mode 已启用，并通过临时签名完成全部 UI 自动化。
