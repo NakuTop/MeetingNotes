@@ -44,7 +44,7 @@ final class TranscriptTextSanitizerTests: XCTestCase {
         )
     }
 
-    func testWhisperDecodingPolicyTranscribesWithAutomaticLanguageDetection() {
+    func testSinglePassBilingualDetectionLeavesLanguageUnsetUntilResultGate() {
         let options = WhisperDecodingPolicy.options
 
         XCTAssertEqual(options.task, .transcribe)
@@ -53,46 +53,51 @@ final class TranscriptTextSanitizerTests: XCTestCase {
         XCTAssertTrue(options.skipSpecialTokens)
     }
 
-    func testLanguagePolicyAcceptsChineseOrEnglishOnlyWhenItIsGloballyMostLikely() {
+    func testLanguagePolicyAcceptsChineseAndEnglishResultLanguages() {
+        XCTAssertTrue(WhisperLanguagePolicy.accepts(language: "zh"))
+        XCTAssertTrue(WhisperLanguagePolicy.accepts(language: "en"))
+    }
+
+    func testLanguagePolicyRejectsJapaneseAndFrenchResultLanguages() {
+        XCTAssertFalse(WhisperLanguagePolicy.accepts(language: "ja"))
+        XCTAssertFalse(WhisperLanguagePolicy.accepts(language: "fr"))
+    }
+
+    func testDraftBuilderPreservesMixedChineseAndEnglishForSupportedResult() {
         XCTAssertEqual(
-            WhisperLanguagePolicy.acceptedLanguage(
-                from: ["zh": -0.1, "en": -1.2, "ja": -2.0]
+            WhisperTranscriptDraftBuilder.makeDrafts(
+                resultLanguage: "zh",
+                resultText: "<|zh|> 中文 planning starts now.<|endoftext|>",
+                segments: [],
+                sampleCount: 16_000,
+                startingAt: 2
             ),
-            "zh"
-        )
-        XCTAssertEqual(
-            WhisperLanguagePolicy.acceptedLanguage(
-                from: ["zh": -1.4, "en": -0.2, "fr": -2.0]
-            ),
-            "en"
+            [
+                TranscriptDraft(
+                    startTime: 2,
+                    endTime: 3,
+                    text: "中文 planning starts now."
+                )
+            ]
         )
     }
 
-    func testLanguagePolicyRejectsChunkWhenAnotherLanguageIsGloballyMostLikely() {
-        XCTAssertNil(
-            WhisperLanguagePolicy.acceptedLanguage(
-                from: ["zh": -0.8, "en": -1.0, "ja": -0.1]
-            )
+    func testDraftBuilderRejectsUnsupportedResultLanguageBeforeTextProcessing() {
+        XCTAssertTrue(
+            WhisperTranscriptDraftBuilder.makeDrafts(
+                resultLanguage: "ja",
+                resultText: "English-looking text must still be rejected.",
+                segments: [],
+                sampleCount: 16_000,
+                startingAt: 0
+            ).isEmpty
         )
-    }
-
-    func testLanguagePolicyBuildsFixedTranscriptionOptionsForChineseAndEnglish() throws {
-        for language in ["zh", "en"] {
-            let options = try XCTUnwrap(
-                WhisperLanguagePolicy.decodingOptions(for: language)
-            )
-
-            XCTAssertEqual(options.task, .transcribe)
-            XCTAssertEqual(options.language, language)
-            XCTAssertFalse(options.detectLanguage)
-            XCTAssertTrue(options.skipSpecialTokens)
-        }
-        XCTAssertNil(WhisperLanguagePolicy.decodingOptions(for: "ja"))
     }
 
     func testDraftBuilderCleansFallbackResultText() {
         XCTAssertEqual(
             WhisperTranscriptDraftBuilder.makeDrafts(
+                resultLanguage: "zh",
                 resultText: "<|zh|> 现在开始。<|endoftext|>",
                 segments: [],
                 sampleCount: 16_000,
@@ -111,6 +116,7 @@ final class TranscriptTextSanitizerTests: XCTestCase {
     func testDraftBuilderCleansSegmentsAndOmitsTokenOnlySegments() {
         XCTAssertEqual(
             WhisperTranscriptDraftBuilder.makeDrafts(
+                resultLanguage: "en",
                 resultText: "unused",
                 segments: [
                     .init(start: 0, end: 1, text: "<|en|> Hello."),
@@ -130,6 +136,7 @@ final class TranscriptTextSanitizerTests: XCTestCase {
     func testDraftBuilderOmitsTokenOnlyFallbackResult() {
         XCTAssertTrue(
             WhisperTranscriptDraftBuilder.makeDrafts(
+                resultLanguage: "en",
                 resultText: "<|endoftext|>",
                 segments: [],
                 sampleCount: 16_000,
