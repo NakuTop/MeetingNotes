@@ -255,10 +255,13 @@ final class MeetingCoordinatorTests: XCTestCase {
     }
 
     func testRoutesNormalizedAudioToWriterAndFixedTranscriptionChunks() async throws {
+        let transcriptionSamples: [Float] = [0, 1, 2, 3, 4, 5]
         let frame = CapturedAudioFrame(
             timestamp: 99,
-            sampleRate: 16_000,
-            samples: [0, 1, 2, 3, 4, 5]
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: transcriptionSamples,
+            transcriptionSamples: transcriptionSamples,
+            transcriptionSampleRate: AudioSegmentManifest.transcriptionSampleRate
         )
         let fixture = makeFixture(frames: [frame], transcriptionChunkSampleCount: 4)
 
@@ -269,6 +272,7 @@ final class MeetingCoordinatorTests: XCTestCase {
         let chunks = await fixture.transcriber.chunks()
         XCTAssertEqual(written.count, 1)
         XCTAssertEqual(written[0].timestamp, 0, accuracy: 0.000_001)
+        XCTAssertEqual(written[0].sampleRate, PCMConverter.playbackSampleRate)
         XCTAssertEqual(written[0].samples, [0, 1, 2, 3, 4, 5])
         XCTAssertEqual(chunks.map(\.samples), [[0, 1, 2, 3], [4, 5]])
         XCTAssertEqual(chunks.map(\.startingAt), [0, 4.0 / 16_000])
@@ -319,10 +323,13 @@ final class MeetingCoordinatorTests: XCTestCase {
 
     func testProductionTranscriptionEnqueuesAtTenSecondsWhileRecording() async throws {
         let tenSeconds = 10 * Int(AudioSegmentManifest.transcriptionSampleRate)
+        let transcriptionSamples = Array(repeating: Float(0.1), count: tenSeconds)
         let frame = CapturedAudioFrame(
             timestamp: 0,
-            sampleRate: AudioSegmentManifest.transcriptionSampleRate,
-            samples: Array(repeating: 0.1, count: tenSeconds)
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: transcriptionSamples,
+            transcriptionSamples: transcriptionSamples,
+            transcriptionSampleRate: AudioSegmentManifest.transcriptionSampleRate
         )
         let fixture = makeFixture(frames: [frame])
 
@@ -335,8 +342,13 @@ final class MeetingCoordinatorTests: XCTestCase {
         }
 
         let snapshot = await fixture.coordinator.snapshot()
+        let written = await fixture.writer.writtenFrames()
         let chunks = await fixture.transcriber.chunks()
         XCTAssertEqual(snapshot.state, .recording)
+        XCTAssertEqual(
+            written.map(\.sampleRate),
+            [PCMConverter.playbackSampleRate]
+        )
         XCTAssertEqual(chunks.count, 1)
         XCTAssertEqual(chunks.first?.samples.count, tenSeconds)
         XCTAssertEqual(chunks.first?.startingAt, 0)
@@ -344,10 +356,13 @@ final class MeetingCoordinatorTests: XCTestCase {
     }
 
     func testPersistsTranscriptionUpdatesWhileRecordingIsStillActive() async throws {
+        let transcriptionSamples: [Float] = [0, 1, 2, 3]
         let frame = CapturedAudioFrame(
             timestamp: 0,
-            sampleRate: 16_000,
-            samples: [0, 1, 2, 3]
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: transcriptionSamples,
+            transcriptionSamples: transcriptionSamples,
+            transcriptionSampleRate: AudioSegmentManifest.transcriptionSampleRate
         )
         let fixture = makeFixture(
             frames: [frame],
@@ -760,6 +775,7 @@ private struct FakeCoordinatorWriterFactory: MeetingAudioWriterFactory {
     func makeWriter(meetingID: UUID, sampleRate: Double) async throws -> any MeetingAudioWriting {
         _ = meetingID
         await sampleRates.append(sampleRate)
+        await writer.configure(expectedSampleRate: sampleRate)
         return writer
     }
 }
@@ -768,6 +784,7 @@ private actor FakeCoordinatorWriter: MeetingAudioWriting {
     private let events: CoordinatorEventLog
     private let failsAppend: Bool
     private let failsFinish: Bool
+    private var expectedSampleRate: Double?
     private var frames: [CapturedAudioFrame] = []
 
     init(
@@ -780,7 +797,15 @@ private actor FakeCoordinatorWriter: MeetingAudioWriting {
         self.failsFinish = failsFinish
     }
 
+    func configure(expectedSampleRate: Double) {
+        self.expectedSampleRate = expectedSampleRate
+    }
+
     func append(_ frame: CapturedAudioFrame) async throws {
+        guard let expectedSampleRate,
+              abs(frame.sampleRate - expectedSampleRate) < 0.001 else {
+            throw CoordinatorTestError.writerAppend
+        }
         if failsAppend {
             throw CoordinatorTestError.writerAppend
         }
