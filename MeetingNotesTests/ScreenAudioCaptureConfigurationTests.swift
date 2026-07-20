@@ -303,36 +303,46 @@ final class ScreenAudioCaptureConfigurationTests: XCTestCase {
 
     func testTranscriptionFrameBuilderConvertsAfterSessionReset() throws {
         let builder = ScreenAudioTranscriptionFrameBuilder()
+        let firstSessionSamples = (0..<4_097).map { index in
+            Float((index % 97) - 48) / 240
+        }
         _ = try builder.build(
             from: CapturedAudioFrame(
                 timestamp: 0,
                 sampleRate: PCMConverter.playbackSampleRate,
-                samples: Array(repeating: 0.2, count: 4_800)
+                samples: firstSessionSamples
             )
         )
 
         builder.reset()
-        let output = try builder.build(
-            from: CapturedAudioFrame(
-                timestamp: 1,
-                sampleRate: PCMConverter.playbackSampleRate,
-                samples: Array(repeating: -0.3, count: 4_800)
-            )
+        let secondSessionSamples = (0..<4_097).map { index in
+            Float(((index * 17) % 211) - 105) / 525
+        }
+        let secondSessionFrame = CapturedAudioFrame(
+            timestamp: 1,
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: secondSessionSamples
+        )
+        let outputAfterReset = try builder.build(from: secondSessionFrame)
+        let freshOutput = try ScreenAudioTranscriptionFrameBuilder().build(
+            from: secondSessionFrame
         )
 
-        XCTAssertEqual(output.timestamp, 1)
-        XCTAssertEqual(output.sampleRate, 48_000)
-        XCTAssertEqual(output.samples.count, 4_800)
-        XCTAssertEqual(output.transcriptionSampleRate, 16_000)
-        let transcriptionSamples = try XCTUnwrap(
-            output.transcriptionSamples
-        )
-        XCTAssertEqual(transcriptionSamples.count, 1_600)
+        XCTAssertEqual(outputAfterReset.timestamp, freshOutput.timestamp)
+        XCTAssertEqual(outputAfterReset.sampleRate, freshOutput.sampleRate)
+        XCTAssertEqual(outputAfterReset.samples, freshOutput.samples)
         XCTAssertEqual(
-            transcriptionSamples[transcriptionSamples.count / 2],
-            -0.3,
-            accuracy: 0.001
+            outputAfterReset.transcriptionSampleRate,
+            freshOutput.transcriptionSampleRate
         )
+        let outputSamples = try XCTUnwrap(
+            outputAfterReset.transcriptionSamples
+        )
+        let freshSamples = try XCTUnwrap(freshOutput.transcriptionSamples)
+        XCTAssertEqual(outputSamples.count, freshSamples.count)
+        for (outputSample, freshSample) in zip(outputSamples, freshSamples) {
+            XCTAssertEqual(outputSample, freshSample, accuracy: 0.000_001)
+        }
     }
 
     private func frame(
