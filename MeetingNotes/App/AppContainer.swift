@@ -16,7 +16,18 @@ final class AppContainer {
     private let summarizeAndArchiveUseCase: SummarizeAndArchiveUseCase
     private let meetingTitleUpdater: any MeetingTitleUpdating
     private let operationGate: MeetingOperationGate
-    private var detailViewModels: [UUID: MeetingDetailViewModel] = [:]
+   private var detailViewModels: [UUID: MeetingDetailViewModel] = [:]
+
+    private static var whisperModelFolder: URL {
+        let appSupport = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first!
+            .appendingPathComponent("MeetingNotes")
+        let models = appSupport.appendingPathComponent("WhisperModels")
+        try? FileManager.default.createDirectory(
+            at: models, withIntermediateDirectories: true)
+        return models
+    }
 
     init(
         repository: MeetingRepository,
@@ -48,7 +59,8 @@ final class AppContainer {
         let panelPresenter = FloatingPanelPresenter(
             controller: panelController
         )
-        let transcriptionService = WhisperKitTranscriptionService()
+        let transcriptionService = WhisperKitTranscriptionService(
+            modelFolder: Self.whisperModelFolder)
         transcriptionModelViewModel = TranscriptionModelViewModel(
             preparer: modelPreparer ?? transcriptionService
         )

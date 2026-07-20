@@ -71,12 +71,14 @@ actor WhisperKitTranscriptionService:
     static let sampleRate = 16_000.0
 
     private let model: String?
+    private let modelFolder: URL?
     private var whisperKit: WhisperKit?
     private var preparationInProgress = false
     private var preparationWaiters: [CheckedContinuation<Void, Error>] = []
 
-    init(model: String? = nil) {
+    init(model: String? = nil, modelFolder: URL? = nil) {
         self.model = model
+        self.modelFolder = modelFolder
     }
 
     func prepare() async throws {
@@ -93,6 +95,7 @@ actor WhisperKitTranscriptionService:
         do {
             let configuration = WhisperKitConfig(
                 model: model,
+                modelFolder: modelFolder?.path,
                 verbose: false,
                 prewarm: true,
                 load: true
