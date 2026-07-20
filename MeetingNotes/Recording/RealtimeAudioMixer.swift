@@ -105,25 +105,39 @@ actor RealtimeAudioMixer {
         }
 
         let startSample = Int((frame.timestamp * Self.sampleRate).rounded())
-        for (offset, sample) in frame.samples.enumerated() {
-            let absoluteSample = startSample + offset
+        var frameOffset = 0
+        while frameOffset < frame.samples.count {
+            let absoluteSample = startSample + frameOffset
             guard absoluteSample >= 0 else {
+                frameOffset += 1
                 continue
             }
             let windowIndex = absoluteSample / windowSampleCount
+            let windowOffset = absoluteSample % windowSampleCount
+            let sampleCount = min(
+                windowSampleCount - windowOffset,
+                frame.samples.count - frameOffset
+            )
             if let nextWindowIndex, windowIndex < nextWindowIndex {
+                frameOffset += sampleCount
                 continue
             }
-            let windowOffset = absoluteSample % windowSampleCount
-            var bucket = buckets[windowIndex]
+            var bucket = buckets.removeValue(forKey: windowIndex)
                 ?? Bucket(sampleCount: windowSampleCount)
-            bucket.add(sample, at: windowOffset, source: source)
+            for chunkOffset in 0..<sampleCount {
+                bucket.add(
+                    frame.samples[frameOffset + chunkOffset],
+                    at: windowOffset + chunkOffset,
+                    source: source
+                )
+            }
             buckets[windowIndex] = bucket
             if let current = nextWindowIndex {
                 nextWindowIndex = min(current, windowIndex)
             } else {
                 nextWindowIndex = windowIndex
             }
+            frameOffset += sampleCount
         }
 
         let lastSample = startSample + frame.samples.count - 1

@@ -23,6 +23,48 @@ final class RealtimeAudioMixerTests: XCTestCase {
         XCTAssertEqual(window.samples.count, 960)
     }
 
+    func testIngestsFrameAcrossMultipleDefaultWindows() async throws {
+        let mixer = RealtimeAudioMixer(holdbackWindowCount: 0)
+        let firstWindow = Array(repeating: Float(0.1), count: 960)
+        let secondWindow = Array(repeating: Float(0.2), count: 960)
+
+        let emitted = try await mixer.ingest(
+            frame(samples: firstWindow + secondWindow),
+            source: .microphone
+        )
+
+        XCTAssertEqual(emitted.count, 2)
+        assertSamples(emitted[0].samples, equalTo: firstWindow)
+        assertSamples(emitted[1].samples, equalTo: secondWindow)
+        XCTAssertEqual(emitted[0].timestamp, 0, accuracy: 0.000_001)
+        XCTAssertEqual(emitted[1].timestamp, 0.02, accuracy: 0.000_001)
+    }
+
+    func testSkipsSamplesForEmittedWindowAndKeepsNewWindow() async throws {
+        let mixer = RealtimeAudioMixer(holdbackWindowCount: 0)
+        _ = try await mixer.ingest(
+            frame(samples: Array(repeating: 0.1, count: 960)),
+            source: .system
+        )
+
+        let emitted = try await mixer.ingest(
+            frame(
+                timestamp: 959 / RealtimeAudioMixer.sampleRate,
+                samples: [0.9, 0.3, 0.4]
+            ),
+            source: .system
+        )
+        let remainder = await mixer.flush()
+
+        XCTAssertTrue(emitted.isEmpty)
+        let frame = try XCTUnwrap(remainder.first)
+        assertSamples(
+            frame.samples,
+            equalTo: [0.3, 0.4] + Array(repeating: 0, count: 958)
+        )
+        XCTAssertEqual(frame.timestamp, 0.02, accuracy: 0.000_001)
+    }
+
     func testPreservesSystemSignalWhileAddingAudibleMicrophone() async throws {
         let mixer = RealtimeAudioMixer(windowSampleCount: 4)
 
