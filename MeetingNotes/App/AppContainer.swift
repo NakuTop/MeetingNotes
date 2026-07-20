@@ -2,7 +2,15 @@ import Foundation
 
 @MainActor
 final class AppContainer {
-    private static let defaultModel = "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page"
+   private static let defaultModel = "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page"
+    private static var persistentModelFolder: URL {
+        let appSupport = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first!
+            .appendingPathComponent("MeetingNotes/WhisperModels")
+        try? FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
+        return appSupport
+    }
 
     let repository: MeetingRepository
     let fileStore: MeetingFileStore
@@ -51,7 +59,8 @@ final class AppContainer {
             controller: panelController
         )
         let transcriptionService = WhisperKitTranscriptionService(
-            model: Self.defaultModel)
+            model: Self.defaultModel,
+            persistentModelFolder: Self.persistentModelFolder)
         transcriptionModelViewModel = TranscriptionModelViewModel(
             preparer: modelPreparer ?? transcriptionService
         )

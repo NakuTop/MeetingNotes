@@ -71,12 +71,14 @@ actor WhisperKitTranscriptionService:
     static let sampleRate = 16_000.0
 
     private let model: String?
+    private let persistentModelFolder: URL?
     private var whisperKit: WhisperKit?
     private var preparationInProgress = false
     private var preparationWaiters: [CheckedContinuation<Void, Error>] = []
 
-    init(model: String? = nil) {
+    init(model: String? = nil, persistentModelFolder: URL? = nil) {
         self.model = model
+        self.persistentModelFolder = persistentModelFolder
     }
 
     func prepare() async throws {
@@ -91,13 +93,33 @@ actor WhisperKitTranscriptionService:
 
         preparationInProgress = true
         do {
-            let configuration = WhisperKitConfig(
-                model: model,
-                verbose: false,
-                prewarm: true,
-                load: true
-            )
-            whisperKit = try await WhisperKit(configuration)
+            if let folder = persistentModelFolder,
+               hasModelFiles(at: folder) {
+                // Model already cached locally — load offline
+                let config = WhisperKitConfig(
+                    modelFolder: folder.path,
+                    verbose: false,
+                    prewarm: true,
+                    load: true,
+                    download: false
+                )
+                whisperKit = try await WhisperKit(config)
+            } else {
+                // First launch — download to Hub cache, then persist
+                let config = WhisperKitConfig(
+                    model: model,
+                    verbose: false,
+                    prewarm: true,
+                    load: true,
+                    download: true
+                )
+                whisperKit = try await WhisperKit(config)
+                // Copy downloaded model to persistent folder for offline use
+                if let folder = persistentModelFolder,
+                   let downloadedPath = whisperKit?.modelFolder {
+                    try? copyModel(from: downloadedPath, to: folder)
+                }
+            }
             finishPreparation(with: .success(()))
         } catch {
             finishPreparation(with: .failure(error))
@@ -139,6 +161,28 @@ actor WhisperKitTranscriptionService:
             )
         }
         return TranscriptMerger().merge(drafts)
+    }
+
+    private func hasModelFiles(at folder: URL) -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: folder.path) else { return false }
+        guard let contents = try? fm.contentsOfDirectory(atPath: folder.path),
+              !contents.isEmpty else { return false }
+        return contents.contains { $0.hasSuffix(".mlmodelc") || $0 == "config.json" || $0 == "model.mlpackage" }
+    }
+
+    private func copyModel(from source: URL, to destination: URL) throws {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        let contents = try fm.contentsOfDirectory(atPath: source.path)
+        for item in contents {
+            let src = source.appendingPathComponent(item)
+            let dst = destination.appendingPathComponent(item)
+            if fm.fileExists(atPath: dst.path) {
+                try? fm.removeItem(at: dst)
+            }
+            try fm.copyItem(at: src, to: dst)
+        }
     }
 
     private func finishPreparation(with result: Result<Void, Error>) {
