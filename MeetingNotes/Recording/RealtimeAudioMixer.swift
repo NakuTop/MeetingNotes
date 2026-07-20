@@ -40,22 +40,7 @@ actor RealtimeAudioMixer {
         }
 
         func mixedSamples() -> [Float] {
-            let systemRMS = sqrt(
-                systemSums.indices.reduce(0.0) { partialResult, index in
-                    guard systemCounts[index] > 0 else {
-                        return partialResult
-                    }
-                    let sample = systemSums[index]
-                        / Float(systemCounts[index])
-                    return partialResult + Double(sample * sample)
-                } / Double(max(1, systemSums.count))
-            )
-            let microphoneMixLevel: Float = systemRMS
-                >= RealtimeAudioMixer.systemActivityRMS
-                ? RealtimeAudioMixer.microphoneMixLevelWhenSystemActive
-                : 1
-
-            return microphoneSums.indices.map { index in
+            let mixedSamples = microphoneSums.indices.map { index in
                 let microphone = microphoneCounts[index] > 0
                     ? microphoneSums[index] / Float(microphoneCounts[index])
                     : nil
@@ -65,8 +50,7 @@ actor RealtimeAudioMixer {
                 let mixed: Float
                 switch (microphone, system) {
                 case let (.some(microphone), .some(system)):
-                    mixed = system
-                        + microphone * microphoneMixLevel
+                    mixed = system + microphone
                 case let (.some(microphone), .none):
                     mixed = microphone
                 case let (.none, .some(system)):
@@ -74,14 +58,23 @@ actor RealtimeAudioMixer {
                 case (.none, .none):
                     mixed = 0
                 }
-                return min(1, max(-1, mixed))
+                return mixed
             }
+            let containsMicrophone = microphoneCounts.contains { $0 > 0 }
+            let containsSystem = systemCounts.contains { $0 > 0 }
+            guard containsMicrophone,
+                  containsSystem,
+                  let peak = mixedSamples.map(abs).max(),
+                  peak > RealtimeAudioMixer.maximumMixedPeak else {
+                return mixedSamples
+            }
+            let scale = RealtimeAudioMixer.maximumMixedPeak / peak
+            return mixedSamples.map { $0 * scale }
         }
     }
 
-    static let sampleRate: Double = 16_000
-    private static let systemActivityRMS: Double = 0.001
-    private static let microphoneMixLevelWhenSystemActive: Float = 0.5
+    static let sampleRate = PCMConverter.playbackSampleRate
+    private static let maximumMixedPeak: Float = 0.98
 
     private let windowSampleCount: Int
     private let holdbackSampleCount: Int
@@ -90,7 +83,7 @@ actor RealtimeAudioMixer {
     private var nextWindowIndex: Int?
 
     init(
-        windowSampleCount: Int = 320,
+        windowSampleCount: Int = 960,
         holdbackWindowCount: Int = 2
     ) {
         self.windowSampleCount = max(1, windowSampleCount)
