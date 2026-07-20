@@ -107,7 +107,7 @@ actor WhisperKitTranscriptionService:
             } else {
                 // First launch — download to Hub cache, then persist
                 let config = WhisperKitConfig(
-                    model: model,
+                    model: nil,
                     verbose: false,
                     prewarm: true,
                     load: true,
