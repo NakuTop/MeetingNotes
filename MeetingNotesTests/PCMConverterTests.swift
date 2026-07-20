@@ -3,6 +3,79 @@ import XCTest
 @testable import MeetingNotes
 
 final class PCMConverterTests: XCTestCase {
+    func testConvertsCapturedFrameToTranscriptionRate() throws {
+        let converter = PCMConverter(
+            outputSampleRate: AudioSegmentManifest.transcriptionSampleRate,
+            amplitudePolicy: .preserveAmplitude
+        )
+        let input = CapturedAudioFrame(
+            timestamp: 1.25,
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: Array(repeating: 0.25, count: 4_800)
+        )
+
+        let output = try converter.convert(input)
+
+        XCTAssertEqual(output.timestamp, 1.25)
+        XCTAssertEqual(
+            output.sampleRate,
+            AudioSegmentManifest.transcriptionSampleRate
+        )
+        XCTAssertEqual(output.channelCount, 1)
+        XCTAssertEqual(output.samples.count, 1_600)
+        XCTAssertEqual(
+            output.samples[output.samples.count / 2],
+            0.25,
+            accuracy: 0.001
+        )
+    }
+
+    func testRejectsInvalidCapturedFrameFormats() {
+        let converter = PCMConverter(
+            outputSampleRate: AudioSegmentManifest.transcriptionSampleRate,
+            amplitudePolicy: .preserveAmplitude
+        )
+        let invalidFrames = [
+            CapturedAudioFrame(
+                timestamp: 0,
+                sampleRate: 48_000,
+                channelCount: 2,
+                samples: [0.25]
+            ),
+            CapturedAudioFrame(
+                timestamp: 0,
+                sampleRate: 48_000,
+                samples: []
+            ),
+            CapturedAudioFrame(
+                timestamp: 0,
+                sampleRate: .nan,
+                samples: [0.25]
+            ),
+            CapturedAudioFrame(
+                timestamp: 0,
+                sampleRate: .infinity,
+                samples: [0.25]
+            ),
+            CapturedAudioFrame(
+                timestamp: 0,
+                sampleRate: 0,
+                samples: [0.25]
+            ),
+            CapturedAudioFrame(
+                timestamp: 0,
+                sampleRate: -48_000,
+                samples: [0.25]
+            ),
+        ]
+
+        for frame in invalidFrames {
+            XCTAssertThrowsError(try converter.convert(frame)) { error in
+                XCTAssertEqual(error as? PCMConverterError, .invalidInputFormat)
+            }
+        }
+    }
+
     func testPreserveAmplitudeAt48kKeepsPlaybackLevelAndDuration() throws {
         let input = try makeBuffer(frameCount: 48_000) { frame, _ in
             0.2 * sin(Float(frame) * 2 * .pi * 440 / 48_000)

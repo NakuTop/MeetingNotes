@@ -44,6 +44,33 @@ final class PCMConverter: @unchecked Sendable {
         }
     }
 
+    func convert(_ frame: CapturedAudioFrame) throws -> CapturedAudioFrame {
+        guard frame.channelCount == 1,
+              frame.sampleRate.isFinite,
+              frame.sampleRate > 0,
+              !frame.samples.isEmpty,
+              let frameCount = AVAudioFrameCount(exactly: frame.samples.count),
+              let inputFormat = AVAudioFormat(
+                  commonFormat: .pcmFormatFloat32,
+                  sampleRate: frame.sampleRate,
+                  channels: 1,
+                  interleaved: false
+              ),
+              let input = AVAudioPCMBuffer(
+                  pcmFormat: inputFormat,
+                  frameCapacity: frameCount
+              ),
+              let channel = input.floatChannelData?.pointee else {
+            throw PCMConverterError.invalidInputFormat
+        }
+
+        input.frameLength = frameCount
+        _ = frame.samples.withUnsafeBytes { samples in
+            memcpy(channel, samples.baseAddress, samples.count)
+        }
+        return try convert(input, timestamp: frame.timestamp)
+    }
+
     func convert(
         _ input: AVAudioPCMBuffer,
         timestamp: TimeInterval
