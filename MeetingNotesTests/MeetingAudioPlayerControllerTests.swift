@@ -654,6 +654,30 @@ final class MeetingAudioPlayerControllerTests: XCTestCase {
         )
     }
 
+    func testLiveCompositionUses48kTimingForRealCAFSegments() async throws {
+        let fixture = try await makeCAFSource(
+            segments: [[0.1, 0.2], [0.3, 0.4, 0.5], [0.6]],
+            sampleRate: 48_000
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let composition = try await AVFoundationMeetingAudioPlaybackEngine
+            .makeComposition(for: fixture.source)
+        let track = try XCTUnwrap(composition.tracks(withMediaType: .audio).first)
+
+        XCTAssertEqual(fixture.source.sampleRate, 48_000)
+        XCTAssertEqual(track.segments.count, 3)
+        XCTAssertEqual(
+            track.segments.map(\.timeMapping.target.start.seconds),
+            [0, 2.0 / 48_000.0, 5.0 / 48_000.0]
+        )
+        XCTAssertEqual(
+            composition.duration.seconds,
+            6.0 / 48_000.0,
+            accuracy: 0.000_000_1
+        )
+    }
+
     func testLiveEngineLatePreparationCannotReplaceOrStopNewItem() async throws {
         let firstID = UUID()
         let secondID = UUID()
@@ -758,6 +782,18 @@ final class MeetingAudioPlayerControllerTests: XCTestCase {
         XCTAssertEqual(recorder.secondCount, 1)
     }
 
+    func testLiveEnginePlayRestoresAudiblePlayerState() {
+        let player = AVPlayer()
+        player.volume = 0
+        player.isMuted = true
+        let engine = AVFoundationMeetingAudioPlaybackEngine(player: player)
+
+        engine.play()
+
+        XCTAssertEqual(player.volume, 1)
+        XCTAssertFalse(player.isMuted)
+    }
+
     private func makeController(
         sources: [UUID: MeetingAudioSource],
         waveformValues: [UUID: [Float]] = [:],
@@ -812,7 +848,8 @@ final class MeetingAudioPlayerControllerTests: XCTestCase {
     }
 
     private func makeCAFSource(
-        segments: [[Float]]
+        segments: [[Float]],
+        sampleRate: Double = 16_000
     ) async throws -> (root: URL, source: MeetingAudioSource) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("MeetingAudioPlayerTests-\(UUID().uuidString)")
@@ -824,19 +861,26 @@ final class MeetingAudioPlayerControllerTests: XCTestCase {
 
         for (index, samples) in segments.enumerated() {
             let fileName = String(format: "segment-%04d.caf", index + 1)
-            try writeCAF(samples: samples, to: directory.appendingPathComponent(fileName))
-            let start = Double(frameCursor) / 16_000
+            try writeCAF(
+                samples: samples,
+                sampleRate: sampleRate,
+                to: directory.appendingPathComponent(fileName)
+            )
+            let start = Double(frameCursor) / sampleRate
             frameCursor += Int64(samples.count)
             manifestSegments.append(.init(
                 fileName: fileName,
                 startTime: start,
-                endTime: Double(frameCursor) / 16_000,
+                endTime: Double(frameCursor) / sampleRate,
                 frameCount: Int64(samples.count),
                 isComplete: true
             ))
         }
         try await fileStore.saveManifest(
-            AudioSegmentManifest(segments: manifestSegments),
+            AudioSegmentManifest(
+                sampleRate: sampleRate,
+                segments: manifestSegments
+            ),
             meetingID: meetingID
         )
         let source = try await MeetingAudioSourceLoader(fileStore: fileStore)
@@ -844,10 +888,14 @@ final class MeetingAudioPlayerControllerTests: XCTestCase {
         return (root, source)
     }
 
-    private func writeCAF(samples: [Float], to url: URL) throws {
+    private func writeCAF(
+        samples: [Float],
+        sampleRate: Double,
+        to url: URL
+    ) throws {
         let format = try XCTUnwrap(AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: 16_000,
+            sampleRate: sampleRate,
             channels: 1,
             interleaved: false
         ))

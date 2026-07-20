@@ -1,7 +1,13 @@
 import AVFoundation
 import Foundation
 
+enum MicrophoneCaptureError: Error, Equatable, Sendable {
+    case backlogCapacityExceeded
+}
+
 actor MicrophoneCaptureSource: AudioCaptureSource {
+    static let productionDrainCapacity = 256
+
     private let engine: AVAudioEngine
     private let storageConverter: PCMConverter
     private let transcriptionConverter: PCMConverter
@@ -9,6 +15,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
     private var isRunning = false
     private var isPaused = false
     private var firstSampleTime: AVAudioFramePosition?
+    private var drainQueue: MicrophoneCaptureDrainQueue<MicrophoneCaptureEvent>?
 
     init(
         engine: AVAudioEngine = AVAudioEngine(),
@@ -41,31 +48,38 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         isPaused = false
         firstSampleTime = nil
 
+        let drainQueue = MicrophoneCaptureDrainQueue<MicrophoneCaptureEvent>(
+            capacity: Self.productionDrainCapacity,
+            onOverflow: { [weak self] in
+                Task {
+                    await self?.handleBacklogOverflow()
+                }
+            },
+            handler: { [weak self] event in
+                await self?.consume(event)
+            }
+        )
+        self.drainQueue = drainQueue
+
         inputNode.installTap(
             onBus: 0,
             bufferSize: 4_096,
             format: format
-        ) { [weak self] buffer, time in
-            guard let source = self else {
-                return
-            }
+        ) { buffer, time in
             guard let box = Self.copyBuffer(buffer) else {
-                Task {
-                    await source.finishAfterFailure(
-                        AudioCaptureError.unableToCopyInputBuffer
-                    )
-                }
+                drainQueue.enqueue(
+                    .failure(AudioCaptureError.unableToCopyInputBuffer)
+                )
+                drainQueue.finishAccepting()
                 return
             }
-            let sampleTime = time.sampleTime
-            let sampleRate = time.sampleRate
-            Task {
-                await source.process(
+            drainQueue.enqueue(
+                .buffer(
                     box,
-                    sampleTime: sampleTime,
-                    sampleRate: sampleRate
+                    sampleTime: time.sampleTime,
+                    sampleRate: time.sampleRate
                 )
-            }
+            )
         }
 
         engine.prepare()
@@ -73,6 +87,8 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
             try engine.start()
         } catch {
             inputNode.removeTap(onBus: 0)
+            await drainQueue.finishAndWait()
+            self.drainQueue = nil
             isRunning = false
             storageConverter.reset()
             transcriptionConverter.reset()
@@ -111,13 +127,51 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
 
     func stop() async {
         guard isRunning else {
+            drainQueue?.finishAccepting()
+            await drainQueue?.waitUntilDrained()
+            drainQueue = nil
             storageConverter.reset()
             transcriptionConverter.reset()
             return
         }
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
+        drainQueue?.finishAccepting()
+        await drainQueue?.waitUntilDrained()
+        drainQueue = nil
         continuation?.finish()
+        continuation = nil
+        isRunning = false
+        isPaused = false
+        firstSampleTime = nil
+        storageConverter.reset()
+        transcriptionConverter.reset()
+    }
+
+    private func consume(_ event: MicrophoneCaptureEvent) {
+        switch event {
+        case let .buffer(box, sampleTime, sampleRate):
+            process(
+                box,
+                sampleTime: sampleTime,
+                sampleRate: sampleRate
+            )
+        case let .failure(error):
+            finishAfterFailure(error)
+        }
+    }
+
+    private func handleBacklogOverflow() async {
+        guard isRunning else { return }
+        engine.stop()
+        engine.inputNode.removeTap(onBus: 0)
+        drainQueue?.finishAccepting()
+        await drainQueue?.waitUntilDrained()
+        guard isRunning else { return }
+        drainQueue = nil
+        continuation?.finish(
+            throwing: MicrophoneCaptureError.backlogCapacityExceeded
+        )
         continuation = nil
         isRunning = false
         isPaused = false
@@ -131,7 +185,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         sampleTime: AVAudioFramePosition,
         sampleRate: Double
     ) {
-        guard isRunning, !isPaused else {
+        guard isRunning else {
             return
         }
         if firstSampleTime == nil {
@@ -171,6 +225,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         }
         engine.stop()
         engine.inputNode.removeTap(onBus: 0)
+        drainQueue?.finishAccepting()
         continuation?.finish(throwing: error)
         continuation = nil
         isRunning = false
@@ -198,6 +253,124 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         }
         return AudioBufferBox(copy)
     }
+}
+
+final class MicrophoneCaptureDrainQueue<Element: Sendable>: @unchecked Sendable {
+    typealias Handler = @Sendable (Element) async -> Void
+    typealias OverflowHandler = @Sendable () -> Void
+
+    private let state: MicrophoneCaptureDrainState<Element>
+    private let processingTask: Task<Void, Never>
+    private let onOverflow: OverflowHandler
+
+    init(
+        capacity: Int,
+        onOverflow: @escaping OverflowHandler = {},
+        handler: @escaping Handler
+    ) {
+        let pair = AsyncStream<Element>.makeStream()
+        let state = MicrophoneCaptureDrainState(
+            capacity: capacity,
+            continuation: pair.continuation
+        )
+        self.state = state
+        self.onOverflow = onOverflow
+        processingTask = Task {
+            for await element in pair.stream {
+                await handler(element)
+                state.didProcessElement()
+            }
+        }
+    }
+
+    @discardableResult
+    func enqueue(_ element: Element) -> Bool {
+        switch state.enqueue(element) {
+        case .accepted:
+            return true
+        case .overflowed:
+            onOverflow()
+            return false
+        case .closed:
+            return false
+        }
+    }
+
+    func finishAccepting() {
+        state.finishAccepting()
+    }
+
+    func waitUntilDrained() async {
+        await processingTask.value
+    }
+
+    func finishAndWait() async {
+        finishAccepting()
+        await waitUntilDrained()
+    }
+}
+
+private final class MicrophoneCaptureDrainState<Element: Sendable>:
+    @unchecked Sendable {
+    enum EnqueueResult {
+        case accepted
+        case overflowed
+        case closed
+    }
+
+    private let lock = NSLock()
+    private let capacity: Int
+    private let continuation: AsyncStream<Element>.Continuation
+    private var pendingCount = 0
+    private var isAccepting = true
+
+    init(
+        capacity: Int,
+        continuation: AsyncStream<Element>.Continuation
+    ) {
+        self.capacity = max(1, capacity)
+        self.continuation = continuation
+    }
+
+    func enqueue(_ element: Element) -> EnqueueResult {
+        lock.lock()
+        defer { lock.unlock() }
+        guard isAccepting else { return .closed }
+        guard pendingCount < capacity else {
+            isAccepting = false
+            continuation.finish()
+            return .overflowed
+        }
+        pendingCount += 1
+        continuation.yield(element)
+        return .accepted
+    }
+
+    func didProcessElement() {
+        lock.lock()
+        pendingCount = max(0, pendingCount - 1)
+        lock.unlock()
+    }
+
+    func finishAccepting() {
+        lock.lock()
+        guard isAccepting else {
+            lock.unlock()
+            return
+        }
+        isAccepting = false
+        continuation.finish()
+        lock.unlock()
+    }
+}
+
+private enum MicrophoneCaptureEvent: @unchecked Sendable {
+    case buffer(
+        AudioBufferBox,
+        sampleTime: AVAudioFramePosition,
+        sampleRate: Double
+    )
+    case failure(AudioCaptureError)
 }
 
 private final class AudioBufferBox: @unchecked Sendable {

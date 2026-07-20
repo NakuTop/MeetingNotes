@@ -32,6 +32,56 @@ final class SegmentedPCMWriterTests: XCTestCase {
         XCTAssertEqual(audioFile.length, 48_000)
     }
 
+    func testDefault48kSegmentsRemainFifteenSecondsLong() async throws {
+        let root = try makeTemporaryRoot()
+        let fileStore = MeetingFileStore(rootURL: root)
+        let meetingID = UUID()
+        let writer = try SegmentedPCMWriter(
+            meetingID: meetingID,
+            fileStore: fileStore,
+            sampleRate: 48_000
+        )
+        let fifteenSeconds = 15 * 48_000
+        try await writer.append(CapturedAudioFrame(
+            timestamp: 0,
+            sampleRate: 48_000,
+            samples: Array(repeating: 0.1, count: fifteenSeconds + 1)
+        ))
+
+        let manifest = try await writer.finish()
+
+        XCTAssertEqual(manifest.segments.map(\.frameCount), [
+            Int64(fifteenSeconds),
+            1
+        ])
+        XCTAssertEqual(manifest.segments[0].endTime, 15, accuracy: 0.000_001)
+        XCTAssertEqual(
+            manifest.segments[1].startTime,
+            15,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testRejectsNonFiniteAndNonPositiveWriterSampleRates() throws {
+        let root = try makeTemporaryRoot()
+        let fileStore = MeetingFileStore(rootURL: root)
+
+        for sampleRate in [Double.nan, .infinity, -.infinity, 0, -1] {
+            XCTAssertThrowsError(
+                try SegmentedPCMWriter(
+                    meetingID: UUID(),
+                    fileStore: fileStore,
+                    sampleRate: sampleRate
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? SegmentedPCMWriterError,
+                    .audioFormatUnavailable
+                )
+            }
+        }
+    }
+
     func testWritesMultipleReadableCAFSegmentsAndCompletesManifest() async throws {
         let root = try makeTemporaryRoot()
         let fileStore = MeetingFileStore(rootURL: root)

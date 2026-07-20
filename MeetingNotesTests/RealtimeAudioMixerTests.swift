@@ -1,8 +1,9 @@
+import AVFoundation
 import XCTest
 @testable import MeetingNotes
 
 final class RealtimeAudioMixerTests: XCTestCase {
-    func testAveragesAlignedMicrophoneAndSystemSamples() async throws {
+    func testPreservesSystemSignalWhileAddingAudibleMicrophone() async throws {
         let mixer = RealtimeAudioMixer(windowSampleCount: 4)
 
         let first = try await mixer.ingest(
@@ -16,7 +17,78 @@ final class RealtimeAudioMixerTests: XCTestCase {
 
         XCTAssertTrue(first.isEmpty)
         XCTAssertEqual(second.count, 1)
-        assertSamples(second[0].samples, equalTo: [0.4, 0.3, -0.4, -0.3])
+        assertSamples(second[0].samples, equalTo: [0.7, 0.4, -0.7, -0.4])
+    }
+
+    func testDoesNotAmplifyMicrophoneNoiseWhilePreservingSystemAudio() async throws {
+        let mixer = RealtimeAudioMixer(windowSampleCount: 4)
+
+        _ = try await mixer.ingest(
+            frame(samples: [0.003, -0.003, 0.003, -0.003]),
+            source: .microphone
+        )
+        let emitted = try await mixer.ingest(
+            frame(samples: [0.4, 0.3, -0.4, -0.3]),
+            source: .system
+        )
+
+        XCTAssertEqual(emitted.count, 1)
+        assertSamples(
+            emitted[0].samples,
+            equalTo: [0.4015, 0.2985, -0.3985, -0.3015]
+        )
+    }
+
+    func testPreservesQuietMicrophoneWhenSystemAudioIsSilent() async throws {
+        let mixer = RealtimeAudioMixer(windowSampleCount: 4)
+
+        _ = try await mixer.ingest(
+            frame(samples: [0.003, -0.003, 0.002, -0.002]),
+            source: .microphone
+        )
+        let emitted = try await mixer.ingest(
+            frame(samples: [0, 0, 0, 0]),
+            source: .system
+        )
+
+        XCTAssertEqual(emitted.count, 1)
+        assertSamples(
+            emitted[0].samples,
+            equalTo: [0.003, -0.003, 0.002, -0.002]
+        )
+    }
+
+    func testPreserveAmplitudeConverterThenMixerDoesNotRaiseRawMicNoise() async throws {
+        let converter = PCMConverter(amplitudePolicy: .preserveAmplitude)
+        let input = try makeMonoBuffer(samples: [
+            0.003, -0.003, 0.003, -0.003,
+        ])
+        let converted = try converter.convert(input, timestamp: 0)
+        let mixer = RealtimeAudioMixer(
+            windowSampleCount: converted.samples.count
+        )
+
+        _ = try await mixer.ingest(converted, source: .microphone)
+        let emitted = try await mixer.ingest(
+            frame(samples: Array(
+                repeating: 0.4,
+                count: converted.samples.count
+            )),
+            source: .system
+        )
+
+        let mixed = try XCTUnwrap(emitted.first)
+        XCTAssertEqual(mixed.samples.count, converted.samples.count)
+        XCTAssertEqual(
+            converted.samples.map(abs).max() ?? 0,
+            0.003,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            mixed.samples.map { abs($0 - 0.4) }.max() ?? 0,
+            0.0015,
+            accuracy: 0.000_001
+        )
     }
 
     func testKeepsSingleAvailableSourceAndClampsOverload() async throws {
@@ -77,10 +149,10 @@ final class RealtimeAudioMixerTests: XCTestCase {
         XCTAssertEqual(firstWindow.count, 1)
         XCTAssertTrue(secondIngest.isEmpty)
         XCTAssertEqual(firstWindow[0].timestamp, 0, accuracy: 0.000_001)
-        assertSamples(firstWindow[0].samples, equalTo: [1, 1, 0.5, 0.5])
+        assertSamples(firstWindow[0].samples, equalTo: [1, 1, 1, 1])
         XCTAssertEqual(remainder.count, 1)
         XCTAssertEqual(remainder[0].timestamp, 4 / 16_000, accuracy: 0.000_001)
-        assertSamples(remainder[0].samples, equalTo: [0.5, 0.5, 1, 1])
+        assertSamples(remainder[0].samples, equalTo: [1, 1, 1, 1])
     }
 
     private func frame(
@@ -93,6 +165,31 @@ final class RealtimeAudioMixerTests: XCTestCase {
             channelCount: 1,
             samples: samples
         )
+    }
+
+    private func makeMonoBuffer(
+        samples: [Float]
+    ) throws -> AVAudioPCMBuffer {
+        let format = try XCTUnwrap(
+            AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: 16_000,
+                channels: 1,
+                interleaved: false
+            )
+        )
+        let buffer = try XCTUnwrap(
+            AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: AVAudioFrameCount(samples.count)
+            )
+        )
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        let channel = try XCTUnwrap(buffer.floatChannelData?.pointee)
+        for (index, sample) in samples.enumerated() {
+            channel[index] = sample
+        }
+        return buffer
     }
 
     private func assertSamples(

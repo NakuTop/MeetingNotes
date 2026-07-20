@@ -543,6 +543,8 @@ final class AVFoundationMeetingAudioPlaybackEngine: MeetingAudioPlaybackEngine {
     }
 
     func play() {
+        player.isMuted = false
+        player.volume = 1
         player.play()
     }
 

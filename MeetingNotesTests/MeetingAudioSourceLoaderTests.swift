@@ -179,14 +179,16 @@ final class MeetingAudioSourceLoaderTests: XCTestCase {
         let fixture = try makeFixture()
         let loader = MeetingAudioSourceLoader(fileStore: fixture.fileStore)
 
-        try await fixture.fileStore.saveManifest(
-            AudioSegmentManifest(sampleRate: 0),
-            meetingID: fixture.meetingID
-        )
-        await assertLoaderError(
-            try await loader.load(meetingID: fixture.meetingID),
-            equals: .invalidManifestSampleRate
-        )
+        for unsupportedSampleRate in [0, 44_100] {
+            try await fixture.fileStore.saveManifest(
+                AudioSegmentManifest(sampleRate: Double(unsupportedSampleRate)),
+                meetingID: fixture.meetingID
+            )
+            await assertLoaderError(
+                try await loader.load(meetingID: fixture.meetingID),
+                equals: .invalidManifestSampleRate
+            )
+        }
 
         try await fixture.fileStore.saveManifest(
             AudioSegmentManifest(channelCount: 0),
