@@ -27,6 +27,22 @@ enum CapturePermissionStatus: Equatable, Sendable {
     }
 }
 
+enum ScreenCaptureProbeResult: Equatable, Sendable {
+    case authorized
+    case denied
+    case unavailable
+
+    init(error: Error) {
+        let error = error as NSError
+        if error.domain == SCStreamErrorDomain,
+           error.code == SCStreamError.Code.userDeclined.rawValue {
+            self = .denied
+        } else {
+            self = .unavailable
+        }
+    }
+}
+
 protocol CapturePermissionSystem: Sendable {
     func status(
         for permission: CapturePermission
@@ -70,6 +86,10 @@ struct CapturePermissionClient: Sendable {
     ) async -> [CapturePermission: CapturePermissionStatus] {
         var result: [CapturePermission: CapturePermissionStatus] = [:]
         for permission in Self.requiredPermissions(for: mode) {
+            if permission == .screenRecording {
+                result[permission] = await system.requestAccess(for: permission)
+                continue
+            }
             let currentStatus = await system.status(for: permission)
             if currentStatus == .notDetermined {
                 result[permission] = await system.requestAccess(for: permission)
@@ -86,7 +106,7 @@ final class LiveCapturePermissionSystem: CapturePermissionSystem, Sendable {
     private let microphoneRequest: @Sendable () async -> Bool
     private let screenPreflight: @Sendable () -> Bool
     private let screenRequest: @Sendable () -> Bool
-    private let screenProbe: @Sendable () async -> Bool
+    private let screenProbe: @Sendable () async -> ScreenCaptureProbeResult
 
     init(
         microphoneStatus: @escaping @Sendable () -> AVAuthorizationStatus = {
@@ -105,15 +125,15 @@ final class LiveCapturePermissionSystem: CapturePermissionSystem, Sendable {
         screenRequest: @escaping @Sendable () -> Bool = {
             CGRequestScreenCaptureAccess()
         },
-        screenProbe: @escaping @Sendable () async -> Bool = {
+        screenProbe: @escaping @Sendable () async -> ScreenCaptureProbeResult = {
             do {
                 _ = try await SCShareableContent.excludingDesktopWindows(
                     false,
                     onScreenWindowsOnly: true
                 )
-                return true
+                return .authorized
             } catch {
-                return false
+                return ScreenCaptureProbeResult(error: error)
             }
         }
     ) {
@@ -131,7 +151,12 @@ final class LiveCapturePermissionSystem: CapturePermissionSystem, Sendable {
         case .microphone:
             return CapturePermissionStatus(microphoneStatus())
         case .screenRecording:
-            return screenPreflight() ? .authorized : .notDetermined
+            switch await screenProbe() {
+            case .authorized, .unavailable:
+                return .authorized
+            case .denied:
+                return screenPreflight() ? .authorized : .notDetermined
+            }
         }
     }
 
@@ -143,11 +168,22 @@ final class LiveCapturePermissionSystem: CapturePermissionSystem, Sendable {
             let granted = await microphoneRequest()
             return granted ? .authorized : .denied
         case .screenRecording:
-            let granted = screenRequest()
-            if granted || screenPreflight() {
+            switch await screenProbe() {
+            case .authorized, .unavailable:
+                return .authorized
+            case .denied:
+                break
+            }
+            let requested = screenRequest()
+            if requested || screenPreflight() {
                 return .authorized
             }
-            return await screenProbe() ? .authorized : .denied
+            switch await screenProbe() {
+            case .authorized, .unavailable:
+                return .authorized
+            case .denied:
+                return .denied
+            }
         }
     }
 }

@@ -3,6 +3,17 @@ import XCTest
 @testable import MeetingNotes
 
 final class MeetingAudioSourceLoaderTests: XCTestCase {
+    func testLoads48kPlaybackRecording() async throws {
+        let fixture = try await makeThreeSegmentFixture(sampleRate: 48_000)
+        let loader = MeetingAudioSourceLoader(fileStore: fixture.fileStore)
+
+        let source = try await loader.load(meetingID: fixture.meetingID)
+
+        XCTAssertEqual(source.sampleRate, 48_000)
+        XCTAssertEqual(source.totalFrames, 7)
+        XCTAssertEqual(source.duration, 7.0 / 48_000.0, accuracy: 0.000_000_1)
+    }
+
     func testLoadsThreeRealCAFSegmentsInManifestOrder() async throws {
         let fixture = try await makeThreeSegmentFixture()
         let loader = MeetingAudioSourceLoader(fileStore: fixture.fileStore)
@@ -537,17 +548,20 @@ final class MeetingAudioSourceLoaderTests: XCTestCase {
         )
     }
 
-    private func makeThreeSegmentFixture() async throws -> Fixture {
+    private func makeThreeSegmentFixture(
+        sampleRate: Double = 16_000
+    ) async throws -> Fixture {
         let fixture = try makeFixture()
         let writer = try SegmentedPCMWriter(
             meetingID: fixture.meetingID,
             fileStore: fixture.fileStore,
-            frameLimit: 3
+            frameLimit: 3,
+            sampleRate: sampleRate
         )
         try await writer.append(
             CapturedAudioFrame(
                 timestamp: 0,
-                sampleRate: 16_000,
+                sampleRate: sampleRate,
                 samples: (0..<7).map { Float($0) / 7 }
             )
         )

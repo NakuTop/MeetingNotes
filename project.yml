@@ -32,7 +32,10 @@ targets:
         PRODUCT_NAME: MeetingNotes
       configs:
         Debug:
+          ENABLE_DEBUG_DYLIB: false
           ENABLE_TESTABILITY: true
+          # Local ad-hoc acceptance identity only; never copy to Release.
+          OTHER_CODE_SIGN_FLAGS: "--requirements=$(SRCROOT)/Configuration/MeetingNotesRequirements.req"
   MeetingNotesTests:
     type: bundle.unit-test
     platform: macOS

@@ -88,6 +88,7 @@ final class AppContainer {
             titleUpdater: titleUpdater,
             operationGate: operationGate,
             playbackStopper: audioPlayerController,
+            deletionGuard: coordinator,
             systemRequirements: systemRequirements ?? SystemRequirements(),
             recordingsURL: recordingsURL
         )

@@ -23,6 +23,17 @@ protocol MeetingStarting: Sendable {
 
 extension MeetingCoordinator: MeetingStarting {}
 
+protocol MeetingDeletionGuarding: Sendable {
+    func canDeleteMeeting(id: UUID) async -> Bool
+}
+
+struct AllowMeetingDeletionGuard: MeetingDeletionGuarding {
+    func canDeleteMeeting(id: UUID) async -> Bool {
+        _ = id
+        return true
+    }
+}
+
 @MainActor
 @Observable
 final class MeetingLibraryViewModel {
@@ -38,6 +49,7 @@ final class MeetingLibraryViewModel {
     private let titleUpdater: any MeetingTitleUpdating
     private let operationGate: MeetingOperationGate
     private let playbackStopper: any MeetingPlaybackStopping
+    private let deletionGuard: any MeetingDeletionGuarding
     private let systemRequirements: any SystemRequirementChecking
     private let recordingsURL: URL
 
@@ -65,6 +77,7 @@ final class MeetingLibraryViewModel {
         titleUpdater: any MeetingTitleUpdating,
         operationGate: MeetingOperationGate,
         playbackStopper: any MeetingPlaybackStopping,
+        deletionGuard: any MeetingDeletionGuarding = AllowMeetingDeletionGuard(),
         systemRequirements: any SystemRequirementChecking = SystemRequirements(),
         recordingsURL: URL = FileManager.default.temporaryDirectory
     ) {
@@ -74,6 +87,7 @@ final class MeetingLibraryViewModel {
         self.titleUpdater = titleUpdater
         self.operationGate = operationGate
         self.playbackStopper = playbackStopper
+        self.deletionGuard = deletionGuard
         self.systemRequirements = systemRequirements
         self.recordingsURL = recordingsURL
         systemRequirementsSnapshot = systemRequirements.snapshot(
@@ -217,7 +231,7 @@ final class MeetingLibraryViewModel {
             return
         }
         guard canDelete(meeting) else {
-            setErrorPresentation(message: "会议正在录制或处理中，暂时不能删除。")
+            setErrorPresentation(message: "会议正在进行关键操作，请稍后重试。")
             return
         }
         guard operationGate.acquire(.delete, for: id) else {
@@ -225,6 +239,10 @@ final class MeetingLibraryViewModel {
             return
         }
         defer { operationGate.release(.delete, for: id) }
+        guard await deletionGuard.canDeleteMeeting(id: id) else {
+            setErrorPresentation(message: "会议仍在完成录音处理，请稍后重试。")
+            return
+        }
         deletingMeetingIDs.insert(id)
         setErrorPresentation()
         defer { deletingMeetingIDs.remove(id) }
@@ -250,11 +268,11 @@ final class MeetingLibraryViewModel {
 
     func canDelete(_ meeting: MeetingRecord) -> Bool {
         switch meeting.state {
-        case .idle, .ready, .summaryReady, .archived:
-            true
-        case .preparing, .recording, .paused, .finalizing,
-                .summarizing, .archiving:
+        case .preparing, .recording, .paused:
             false
+        case .idle, .finalizing, .ready, .summarizing,
+                .summaryReady, .archiving, .archived:
+            true
         }
     }
 

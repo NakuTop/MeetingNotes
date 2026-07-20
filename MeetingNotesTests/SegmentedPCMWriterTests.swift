@@ -3,6 +3,35 @@ import XCTest
 @testable import MeetingNotes
 
 final class SegmentedPCMWriterTests: XCTestCase {
+    func testWritesAndDescribes48kPlaybackAudio() async throws {
+        let root = try makeTemporaryRoot()
+        let fileStore = MeetingFileStore(rootURL: root)
+        let meetingID = UUID()
+        let writer = try SegmentedPCMWriter(
+            meetingID: meetingID,
+            fileStore: fileStore,
+            frameLimit: 48_000,
+            sampleRate: 48_000
+        )
+        try await writer.append(CapturedAudioFrame(
+            timestamp: 0,
+            sampleRate: 48_000,
+            samples: sineWave(frameCount: 48_000, sampleRate: 48_000)
+        ))
+
+        let manifest = try await writer.finish()
+        let segmentURL = try await fileStore.resolveSegmentURL(
+            meetingID: meetingID,
+            fileName: try XCTUnwrap(manifest.segments.first?.fileName)
+        )
+        let audioFile = try AVAudioFile(forReading: segmentURL)
+
+        XCTAssertEqual(manifest.sampleRate, 48_000)
+        XCTAssertEqual(manifest.segments.first?.frameCount, 48_000)
+        XCTAssertEqual(audioFile.fileFormat.sampleRate, 48_000)
+        XCTAssertEqual(audioFile.length, 48_000)
+    }
+
     func testWritesMultipleReadableCAFSegmentsAndCompletesManifest() async throws {
         let root = try makeTemporaryRoot()
         let fileStore = MeetingFileStore(rootURL: root)
@@ -129,9 +158,12 @@ final class SegmentedPCMWriterTests: XCTestCase {
         }
     }
 
-    private func sineWave(frameCount: Int) -> [Float] {
+    private func sineWave(
+        frameCount: Int,
+        sampleRate: Float = 16_000
+    ) -> [Float] {
         (0..<frameCount).map { index in
-            sin(Float(index) * 2 * .pi * 440 / 16_000)
+            sin(Float(index) * 2 * .pi * 440 / sampleRate)
         }
     }
 

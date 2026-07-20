@@ -3,6 +3,23 @@ import XCTest
 @testable import MeetingNotes
 
 final class PCMConverterTests: XCTestCase {
+    func testPreserveAmplitudeAt48kKeepsPlaybackLevelAndDuration() throws {
+        let input = try makeBuffer(frameCount: 48_000) { frame, _ in
+            0.2 * sin(Float(frame) * 2 * .pi * 440 / 48_000)
+        }
+        let converter = PCMConverter(
+            outputSampleRate: 48_000,
+            amplitudePolicy: .preserveAmplitude
+        )
+
+        let output = try converter.convert(input, timestamp: 0)
+
+        XCTAssertEqual(output.sampleRate, 48_000)
+        XCTAssertEqual(output.samples.count, 48_000, accuracy: 1)
+        let peak = output.samples.map { abs($0) }.max() ?? 0
+        XCTAssertEqual(peak, 0.2, accuracy: 0.01)
+    }
+
     func testStreamingChunksDoNotAccumulateResamplingRoundingDrift() throws {
         let converter = PCMConverter()
         let chunkFrameCount: AVAudioFrameCount = 4_096

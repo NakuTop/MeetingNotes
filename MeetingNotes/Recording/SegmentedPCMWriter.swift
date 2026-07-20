@@ -11,7 +11,7 @@ enum SegmentedPCMWriterError: Error, Equatable, Sendable {
 }
 
 actor SegmentedPCMWriter {
-    static let productionFrameLimit = 15 * 16_000
+    static let productionSegmentDuration: Double = 15
 
     private let meetingID: UUID
     private let fileStore: MeetingFileStore
@@ -26,14 +26,22 @@ actor SegmentedPCMWriter {
     init(
         meetingID: UUID,
         fileStore: MeetingFileStore,
-        frameLimit: Int = productionFrameLimit
+        frameLimit: Int? = nil,
+        sampleRate: Double = AudioSegmentManifest.transcriptionSampleRate
     ) throws {
-        guard frameLimit > 0, frameLimit <= Int(UInt32.max) else {
-            throw SegmentedPCMWriterError.invalidFrameLimit(frameLimit)
+        guard sampleRate.isFinite, sampleRate > 0 else {
+            throw SegmentedPCMWriterError.audioFormatUnavailable
+        }
+        let resolvedRate = sampleRate
+        let resolvedFrameLimit = frameLimit
+            ?? Int(Self.productionSegmentDuration * resolvedRate)
+        guard resolvedFrameLimit > 0,
+              resolvedFrameLimit <= Int(UInt32.max) else {
+            throw SegmentedPCMWriterError.invalidFrameLimit(resolvedFrameLimit)
         }
         guard let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: AudioSegmentManifest.transcriptionSampleRate,
+            sampleRate: resolvedRate,
             channels: AVAudioChannelCount(
                 AudioSegmentManifest.transcriptionChannelCount
             ),
@@ -44,18 +52,19 @@ actor SegmentedPCMWriter {
 
         self.meetingID = meetingID
         self.fileStore = fileStore
-        self.frameLimit = frameLimit
+        self.frameLimit = resolvedFrameLimit
         self.format = format
+        manifest = AudioSegmentManifest(sampleRate: resolvedRate)
     }
 
     func append(_ frame: CapturedAudioFrame) async throws {
         guard !isFinished else {
             throw SegmentedPCMWriterError.alreadyFinished
         }
-        guard frame.sampleRate == AudioSegmentManifest.transcriptionSampleRate else {
+        guard abs(frame.sampleRate - manifest.sampleRate) < 0.001 else {
             throw SegmentedPCMWriterError.unsupportedSampleRate(frame.sampleRate)
         }
-        guard frame.channelCount == AudioSegmentManifest.transcriptionChannelCount else {
+        guard frame.channelCount == manifest.channelCount else {
             throw SegmentedPCMWriterError.unsupportedChannelCount(frame.channelCount)
         }
         guard !frame.samples.isEmpty else {

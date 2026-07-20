@@ -10,8 +10,14 @@ enum PCMConverterError: Error, Equatable, Sendable {
     case missingOutputSamples
 }
 
+enum PCMAmplitudePolicy: Sendable {
+    case speechLeveling
+    case preserveAmplitude
+}
+
 final class PCMConverter: @unchecked Sendable {
-    static let outputSampleRate: Double = 16_000
+    static let defaultOutputSampleRate: Double = 16_000
+    static let playbackSampleRate: Double = 48_000
     private static let targetSpeechRMS = pow(10.0, -24.0 / 20.0)
     private static let maximumSpeechGain = 10.0
     private static let maximumPeak = 0.95
@@ -20,6 +26,16 @@ final class PCMConverter: @unchecked Sendable {
     private let lock = NSLock()
     private var converter: AVAudioConverter?
     private var inputFormatSignature: InputFormatSignature?
+    private let outputSampleRate: Double
+    private let amplitudePolicy: PCMAmplitudePolicy
+
+    init(
+        outputSampleRate: Double = PCMConverter.defaultOutputSampleRate,
+        amplitudePolicy: PCMAmplitudePolicy = .speechLeveling
+    ) {
+        self.outputSampleRate = outputSampleRate
+        self.amplitudePolicy = amplitudePolicy
+    }
 
     func reset() {
         lock.withLock {
@@ -48,7 +64,7 @@ final class PCMConverter: @unchecked Sendable {
         }
         guard let outputFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: Self.outputSampleRate,
+            sampleRate: outputSampleRate,
             channels: 1,
             interleaved: false
         ) else {
@@ -59,7 +75,7 @@ final class PCMConverter: @unchecked Sendable {
             outputFormat: outputFormat
         )
 
-        let ratio = Self.outputSampleRate / input.format.sampleRate
+        let ratio = outputSampleRate / input.format.sampleRate
         let expectedFrames = ceil(Double(input.frameLength) * ratio)
         let capacity = AVAudioFrameCount(max(1, expectedFrames + 16))
         guard let output = AVAudioPCMBuffer(
@@ -94,10 +110,16 @@ final class PCMConverter: @unchecked Sendable {
             start: channel,
             count: Int(output.frameLength)
         ).map { $0.isFinite ? Double($0) : 0 }
-        let samples = Self.levelSpeech(rawSamples)
+        let samples: [Float]
+        switch amplitudePolicy {
+        case .speechLeveling:
+            samples = Self.levelSpeech(rawSamples)
+        case .preserveAmplitude:
+            samples = rawSamples.map { Float(min(1, max(-1, $0))) }
+        }
         return CapturedAudioFrame(
             timestamp: timestamp,
-            sampleRate: Self.outputSampleRate,
+            sampleRate: outputSampleRate,
             channelCount: 1,
             samples: samples
         )

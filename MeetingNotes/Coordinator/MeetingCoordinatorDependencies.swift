@@ -20,7 +20,7 @@ protocol MeetingAudioWriting: Sendable {
 extension SegmentedPCMWriter: MeetingAudioWriting {}
 
 protocol MeetingAudioWriterFactory: Sendable {
-    func makeWriter(meetingID: UUID) async throws -> any MeetingAudioWriting
+    func makeWriter(meetingID: UUID, sampleRate: Double) async throws -> any MeetingAudioWriting
 }
 
 protocol MeetingTranscriptionQueueing: Sendable {
@@ -100,8 +100,8 @@ struct LiveMeetingCaptureFactory: MeetingCaptureSourceFactory {
 struct LiveMeetingAudioWriterFactory: MeetingAudioWriterFactory {
     let fileStore: MeetingFileStore
 
-    func makeWriter(meetingID: UUID) async throws -> any MeetingAudioWriting {
-        try SegmentedPCMWriter(meetingID: meetingID, fileStore: fileStore)
+    func makeWriter(meetingID: UUID, sampleRate: Double) async throws -> any MeetingAudioWriting {
+        try SegmentedPCMWriter(meetingID: meetingID, fileStore: fileStore, sampleRate: sampleRate)
     }
 }
 

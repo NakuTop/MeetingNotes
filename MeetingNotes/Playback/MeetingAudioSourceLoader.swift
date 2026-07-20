@@ -267,7 +267,10 @@ actor MeetingAudioSourceLoader {
             )
         }
         guard manifest.sampleRate.isFinite,
-              manifest.sampleRate == AudioSegmentManifest.transcriptionSampleRate else {
+              [
+                  AudioSegmentManifest.transcriptionSampleRate,
+                  PCMConverter.playbackSampleRate
+              ].contains(manifest.sampleRate) else {
             throw MeetingAudioSourceLoaderError.invalidManifestSampleRate
         }
         guard manifest.channelCount == AudioSegmentManifest.transcriptionChannelCount else {

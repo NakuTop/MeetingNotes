@@ -256,6 +256,49 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertEqual(chunks.map(\.startingAt), [0, 4.0 / 16_000])
     }
 
+    func testRoutes48kPlaybackSamplesAnd16kTranscriptionSamplesSeparately() async throws {
+        let frame = CapturedAudioFrame(
+            timestamp: 99,
+            sampleRate: 48_000,
+            samples: [1, 2, 3, 4, 5, 6],
+            transcriptionSamples: [10, 11, 12, 13],
+            transcriptionSampleRate: 16_000
+        )
+        let fixture = makeFixture(
+            frames: [frame],
+            transcriptionChunkSampleCount: 4
+        )
+
+        try await fixture.coordinator.start(mode: .offline)
+        try await fixture.coordinator.stop()
+
+        let written = await fixture.writer.writtenFrames()
+        let chunks = await fixture.transcriber.chunks()
+        XCTAssertEqual(written.first?.sampleRate, 48_000)
+        XCTAssertEqual(written.first?.samples, [1, 2, 3, 4, 5, 6])
+        XCTAssertEqual(chunks.map(\.samples), [[10, 11, 12, 13]])
+    }
+
+    func testDeletionSafetyAllowsOnlyReleasedOrUnrelatedSessions() async throws {
+        let fixture = makeFixture(repositoryFailsFinalize: true)
+        let meetingID = try await fixture.coordinator.start(mode: .offline)
+
+        let canDeleteActive = await fixture.coordinator.canDeleteMeeting(id: meetingID)
+        let canDeleteUnrelated = await fixture.coordinator.canDeleteMeeting(id: UUID())
+        XCTAssertFalse(canDeleteActive)
+        XCTAssertTrue(canDeleteUnrelated)
+
+        do {
+            try await fixture.coordinator.stop()
+            XCTFail("Expected repository finalize failure")
+        } catch {
+            XCTAssertEqual(error as? CoordinatorTestError, .repositoryFinalize)
+        }
+
+        let canDeleteReleased = await fixture.coordinator.canDeleteMeeting(id: meetingID)
+        XCTAssertTrue(canDeleteReleased)
+    }
+
     func testProductionTranscriptionEnqueuesAtTenSecondsWhileRecording() async throws {
         let tenSeconds = 10 * Int(AudioSegmentManifest.transcriptionSampleRate)
         let frame = CapturedAudioFrame(
@@ -318,11 +361,11 @@ final class MeetingCoordinatorTests: XCTestCase {
         let fixture = makeFixture(frames: [frame], writerFailsAppend: true)
 
         try await fixture.coordinator.start(mode: .offline)
-        for _ in 0..<100 {
+        for _ in 0..<1_000 {
             if await fixture.events.values().contains("capture.stop") {
                 break
             }
-            await Task.yield()
+            try await Task.sleep(for: .milliseconds(1))
         }
 
         let events = await fixture.events.values()
@@ -677,8 +720,9 @@ private actor FakeCoordinatorCapture: AudioCaptureSource {
 private struct FakeCoordinatorWriterFactory: MeetingAudioWriterFactory {
     let writer: FakeCoordinatorWriter
 
-    func makeWriter(meetingID: UUID) async throws -> any MeetingAudioWriting {
+    func makeWriter(meetingID: UUID, sampleRate: Double) async throws -> any MeetingAudioWriting {
         _ = meetingID
+        _ = sampleRate
         return writer
     }
 }

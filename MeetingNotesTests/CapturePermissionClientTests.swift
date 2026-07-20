@@ -1,4 +1,5 @@
 import AVFoundation
+import ScreenCaptureKit
 import XCTest
 @testable import MeetingNotes
 
@@ -51,7 +52,7 @@ final class CapturePermissionClientTests: XCTestCase {
             },
             screenProbe: {
                 calls.recordScreenProbe()
-                return false
+                return .denied
             }
         )
 
@@ -66,7 +67,7 @@ final class CapturePermissionClientTests: XCTestCase {
         XCTAssertEqual(secondRequest, .denied)
         XCTAssertEqual(calls.screenPreflightCount, 4)
         XCTAssertEqual(calls.screenRequestCount, 2)
-        XCTAssertEqual(calls.screenProbeCount, 2)
+        XCTAssertEqual(calls.screenProbeCount, 6)
     }
 
     func testLiveScreenRequestTrustsFreshPreflightAfterRequestReturnsFalse() async {
@@ -85,7 +86,7 @@ final class CapturePermissionClientTests: XCTestCase {
             },
             screenProbe: {
                 calls.recordScreenProbe()
-                return false
+                return .denied
             }
         )
 
@@ -96,6 +97,7 @@ final class CapturePermissionClientTests: XCTestCase {
         XCTAssertEqual(requestStatus, .authorized)
         XCTAssertEqual(calls.screenPreflightCount, 2)
         XCTAssertEqual(calls.screenRequestCount, 1)
+        XCTAssertEqual(calls.screenProbeCount, 2)
     }
 
     func testLiveScreenRequestAcceptsScreenCaptureKitProbeWhenCGStateIsStale() async {
@@ -113,16 +115,74 @@ final class CapturePermissionClientTests: XCTestCase {
             },
             screenProbe: {
                 calls.recordScreenProbe()
-                return true
+                return .authorized
             }
         )
 
         let status = await system.requestAccess(for: .screenRecording)
 
         XCTAssertEqual(status, .authorized)
-        XCTAssertEqual(calls.screenPreflightCount, 1)
-        XCTAssertEqual(calls.screenRequestCount, 1)
+        XCTAssertEqual(calls.screenPreflightCount, 0)
+        XCTAssertEqual(calls.screenRequestCount, 0)
         XCTAssertEqual(calls.screenProbeCount, 1)
+    }
+
+    func testScreenRequestAcceptsSuccessfulProbeAfterRequestReturnsFalse() async {
+        let calls = PermissionInvocationRecorder()
+        let probes = SequencedProbe(values: [.denied, .authorized])
+        let system = LiveCapturePermissionSystem(
+            microphoneStatus: { .authorized },
+            microphoneRequest: { true },
+            screenPreflight: {
+                calls.recordScreenPreflight()
+                return false
+            },
+            screenRequest: {
+                calls.recordScreenRequest()
+                return false
+            },
+            screenProbe: {
+                calls.recordScreenProbe()
+                return probes.next()
+            }
+        )
+
+        let status = await system.requestAccess(for: .screenRecording)
+
+        XCTAssertEqual(status, .authorized)
+        XCTAssertEqual(calls.screenProbeCount, 2)
+        XCTAssertEqual(calls.screenRequestCount, 1)
+    }
+
+    func testNonPermissionProbeFailureDoesNotBecomePermissionDenial() async {
+        let system = LiveCapturePermissionSystem(
+            microphoneStatus: { .authorized },
+            microphoneRequest: { true },
+            screenPreflight: { false },
+            screenRequest: { false },
+            screenProbe: { .unavailable }
+        )
+
+        let status = await system.requestAccess(for: .screenRecording)
+        XCTAssertEqual(status, .authorized)
+    }
+
+    func testClassifiesOnlyScreenCaptureUserDeclinedAsDenied() {
+        let denied = NSError(
+            domain: SCStreamErrorDomain,
+            code: SCStreamError.Code.userDeclined.rawValue
+        )
+        let internalFailure = NSError(
+            domain: SCStreamErrorDomain,
+            code: SCStreamError.Code.internalError.rawValue
+        )
+
+        XCTAssertEqual(ScreenCaptureProbeResult(error: denied), .denied)
+        XCTAssertEqual(ScreenCaptureProbeResult(error: internalFailure), .unavailable)
+        XCTAssertEqual(
+            ScreenCaptureProbeResult(error: NSError(domain: NSCocoaErrorDomain, code: 1)),
+            .unavailable
+        )
     }
 
     func testEveryOnlineRetryRequestsScreenPermissionAgain() async {
@@ -140,7 +200,7 @@ final class CapturePermissionClientTests: XCTestCase {
             },
             screenProbe: {
                 calls.recordScreenProbe()
-                return false
+                return .denied
             }
         )
         let client = CapturePermissionClient(system: system)
@@ -148,9 +208,9 @@ final class CapturePermissionClientTests: XCTestCase {
         _ = await client.requestRequiredPermissions(for: .online)
         _ = await client.requestRequiredPermissions(for: .online)
 
-        XCTAssertEqual(calls.screenPreflightCount, 4)
+        XCTAssertEqual(calls.screenPreflightCount, 2)
         XCTAssertEqual(calls.screenRequestCount, 2)
-        XCTAssertEqual(calls.screenProbeCount, 2)
+        XCTAssertEqual(calls.screenProbeCount, 4)
     }
 
     func testLiveOfflineRequestNeverTouchesScreenPermission() async {
@@ -182,6 +242,21 @@ final class CapturePermissionClientTests: XCTestCase {
         XCTAssertEqual(calls.microphoneRequestCount, 1)
         XCTAssertEqual(calls.screenPreflightCount, 0)
         XCTAssertEqual(calls.screenRequestCount, 0)
+    }
+}
+
+private final class SequencedProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [ScreenCaptureProbeResult]
+
+    init(values: [ScreenCaptureProbeResult]) {
+        self.values = values
+    }
+
+    func next() -> ScreenCaptureProbeResult {
+        lock.lock()
+        defer { lock.unlock() }
+        return values.isEmpty ? .denied : values.removeFirst()
     }
 }
 

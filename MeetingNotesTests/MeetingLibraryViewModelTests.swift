@@ -210,11 +210,11 @@ final class MeetingLibraryViewModelTests: XCTestCase {
             .preparing: false,
             .recording: false,
             .paused: false,
-            .finalizing: false,
+            .finalizing: true,
             .ready: true,
-            .summarizing: false,
+            .summarizing: true,
             .summaryReady: true,
-            .archiving: false,
+            .archiving: true,
             .archived: true
         ]
         let renameExpectations: [RecordingState: Bool] = [
@@ -245,7 +245,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         }
     }
 
-    func testDeleteBusyMeetingDoesNotTouchFilesOrRepository() async {
+    func testDeleteBusyRecordingDoesNotTouchFilesOrRepository() async {
         let meeting = makeMeeting(seconds: 100, state: .recording)
         let repository = LibraryRepositorySpy(meetings: [meeting])
         let files = FileDeletionSpy()
@@ -254,16 +254,46 @@ final class MeetingLibraryViewModelTests: XCTestCase {
 
         await viewModel.deleteMeeting(id: meeting.id)
 
-        XCTAssertEqual(
-            viewModel.errorMessage,
-            "会议正在录制或处理中，暂时不能删除。"
-        )
+        XCTAssertEqual(viewModel.errorMessage, "会议正在进行关键操作，请稍后重试。")
         let deletedFileIDs = await files.deletedMeetingIDs()
         XCTAssertTrue(deletedFileIDs.isEmpty)
         XCTAssertTrue(repository.deletedIDs.isEmpty)
-        XCTAssertEqual(viewModel.meetings.map(\.id), [meeting.id])
     }
 
+    func testDeleteStrandedFinalizingMeetingSucceeds() async {
+        let meeting = makeMeeting(seconds: 100, state: .finalizing)
+        let repository = LibraryRepositorySpy(meetings: [meeting])
+        let files = FileDeletionSpy()
+        let viewModel = makeViewModel(repository: repository, files: files)
+        viewModel.load()
+
+        await viewModel.deleteMeeting(id: meeting.id)
+
+        let deletedFileIDs = await files.deletedMeetingIDs()
+        XCTAssertEqual(deletedFileIDs, [meeting.id])
+        XCTAssertEqual(repository.deletedIDs, [meeting.id])
+    }
+
+    func testDeleteFinalizingMeetingIsRejectedWhileCoordinatorOwnsResources() async {
+        let meeting = makeMeeting(seconds: 100, state: .finalizing)
+        let repository = LibraryRepositorySpy(meetings: [meeting])
+        let files = FileDeletionSpy()
+        let guardSpy = DeletionGuardSpy(allowed: false)
+        let viewModel = makeViewModel(
+            repository: repository,
+            files: files,
+            deletionGuard: guardSpy
+        )
+        viewModel.load()
+
+        await viewModel.deleteMeeting(id: meeting.id)
+
+        let requestedIDs = await guardSpy.requestedIDs()
+        let deletedFileIDs = await files.deletedMeetingIDs()
+        XCTAssertEqual(requestedIDs, [meeting.id])
+        XCTAssertTrue(deletedFileIDs.isEmpty)
+        XCTAssertTrue(repository.deletedIDs.isEmpty)
+    }
     func testActiveRenameOrSummaryGateBlocksDeleteWithoutSideEffects() async {
         for operation in [
             MeetingOperationKind.rename,
@@ -411,7 +441,6 @@ final class MeetingLibraryViewModelTests: XCTestCase {
 
         XCTAssertTrue(playback.stoppedMeetingIDs.isEmpty)
     }
-
     func testDeleteWaitsForWaveformCacheWriterBeforeRemovingDirectory() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "MeetingDeleteQuiescenceTests-\(UUID().uuidString)",
@@ -771,6 +800,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         titleUpdater: any MeetingTitleUpdating = TitleUpdaterSpy(),
         operationGate: MeetingOperationGate = MeetingOperationGate(),
         playbackStopper: any MeetingPlaybackStopping = PlaybackStopperSpy(),
+        deletionGuard: any MeetingDeletionGuarding = AllowMeetingDeletionGuard(),
         systemRequirements: any SystemRequirementChecking =
             SystemRequirementsStub.supported
     ) -> MeetingLibraryViewModel {
@@ -781,6 +811,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
             titleUpdater: titleUpdater,
             operationGate: operationGate,
             playbackStopper: playbackStopper,
+            deletionGuard: deletionGuard,
             systemRequirements: systemRequirements,
             recordingsURL: FileManager.default.temporaryDirectory
         )
@@ -853,6 +884,24 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         }
         try file.write(from: buffer)
         file.close()
+    }
+}
+
+private actor DeletionGuardSpy: MeetingDeletionGuarding {
+    private let allowed: Bool
+    private var ids: [UUID] = []
+
+    init(allowed: Bool) {
+        self.allowed = allowed
+    }
+
+    func canDeleteMeeting(id: UUID) -> Bool {
+        ids.append(id)
+        return allowed
+    }
+
+    func requestedIDs() -> [UUID] {
+        ids
     }
 }
 

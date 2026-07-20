@@ -68,7 +68,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
                 onScreenWindowsOnly: true
             )
         } catch {
-            if !CGPreflightScreenCaptureAccess() {
+            if ScreenCaptureProbeResult(error: error) == .denied {
                 throw ScreenAudioCaptureError.screenRecordingDenied
             }
             throw ScreenAudioCaptureError.streamSetupFailed

@@ -3,7 +3,8 @@ import Foundation
 
 actor MicrophoneCaptureSource: AudioCaptureSource {
     private let engine: AVAudioEngine
-    private let converter: PCMConverter
+    private let storageConverter: PCMConverter
+    private let transcriptionConverter: PCMConverter
     private var continuation: AsyncThrowingStream<CapturedAudioFrame, Error>.Continuation?
     private var isRunning = false
     private var isPaused = false
@@ -11,17 +12,23 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
 
     init(
         engine: AVAudioEngine = AVAudioEngine(),
-        converter: PCMConverter = PCMConverter()
+        storageConverter: PCMConverter = PCMConverter(
+            outputSampleRate: PCMConverter.playbackSampleRate,
+            amplitudePolicy: .preserveAmplitude
+        ),
+        transcriptionConverter: PCMConverter = PCMConverter(outputSampleRate: PCMConverter.defaultOutputSampleRate)
     ) {
         self.engine = engine
-        self.converter = converter
+        self.storageConverter = storageConverter
+        self.transcriptionConverter = transcriptionConverter
     }
 
     func start() async throws -> AsyncThrowingStream<CapturedAudioFrame, Error> {
         guard !isRunning else {
             throw AudioCaptureError.alreadyRunning
         }
-        converter.reset()
+        storageConverter.reset()
+        transcriptionConverter.reset()
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
@@ -67,7 +74,8 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         } catch {
             inputNode.removeTap(onBus: 0)
             isRunning = false
-            converter.reset()
+            storageConverter.reset()
+            transcriptionConverter.reset()
             continuation?.finish(throwing: AudioCaptureError.engineStartFailed)
             continuation = nil
             throw AudioCaptureError.engineStartFailed
@@ -103,7 +111,8 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
 
     func stop() async {
         guard isRunning else {
-            converter.reset()
+            storageConverter.reset()
+            transcriptionConverter.reset()
             return
         }
         engine.stop()
@@ -113,7 +122,8 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         isRunning = false
         isPaused = false
         firstSampleTime = nil
-        converter.reset()
+        storageConverter.reset()
+        transcriptionConverter.reset()
     }
 
     private func process(
@@ -133,7 +143,22 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
             : 0
 
         do {
-            let frame = try converter.convert(box.buffer, timestamp: timestamp)
+            let storageFrame = try storageConverter.convert(
+                box.buffer,
+                timestamp: timestamp
+            )
+            let transcriptionFrame = try transcriptionConverter.convert(
+                box.buffer,
+                timestamp: timestamp
+            )
+            let frame = CapturedAudioFrame(
+                timestamp: storageFrame.timestamp,
+                sampleRate: storageFrame.sampleRate,
+                channelCount: storageFrame.channelCount,
+                samples: storageFrame.samples,
+                transcriptionSamples: transcriptionFrame.samples,
+                transcriptionSampleRate: transcriptionFrame.sampleRate
+            )
             continuation?.yield(frame)
         } catch {
             finishAfterFailure(error)
@@ -151,7 +176,8 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         isRunning = false
         isPaused = false
         firstSampleTime = nil
-        converter.reset()
+        storageConverter.reset()
+        transcriptionConverter.reset()
     }
 
     nonisolated private static func copyBuffer(

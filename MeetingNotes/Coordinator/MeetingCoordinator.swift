@@ -67,6 +67,19 @@ actor MeetingCoordinator {
         )
     }
 
+    func canDeleteMeeting(id: UUID) -> Bool {
+        guard meetingID == id else {
+            return true
+        }
+        return !lifecycleOperationInProgress
+            && capture == nil
+            && writer == nil
+            && transcriber == nil
+            && timeline == nil
+            && streamTask == nil
+            && transcriptPersistenceTask == nil
+    }
+
     @discardableResult
     func start(mode: MeetingMode) async throws -> UUID {
         try beginLifecycleOperation()
@@ -100,8 +113,12 @@ actor MeetingCoordinator {
                 startedAt: startedAt
             )
             newMeetingID = createdID
+            let writerSampleRate: Double = mode == .offline
+                ? PCMConverter.playbackSampleRate
+                : AudioSegmentManifest.transcriptionSampleRate
             let createdWriter = try await dependencies.writerFactory.makeWriter(
-                meetingID: createdID
+                meetingID: createdID,
+                sampleRate: writerSampleRate
             )
             newWriter = createdWriter
             let createdTranscriber = try await dependencies.transcriptionFactory
@@ -322,16 +339,34 @@ actor MeetingCoordinator {
         guard let writer, let transcriber else {
             return
         }
-        let normalizedFrame = CapturedAudioFrame(
-            timestamp: Double(totalSampleCount)
-                / AudioSegmentManifest.transcriptionSampleRate,
+        let writerTimestamp = Double(totalSampleCount)
+            / frame.sampleRate
+        let storageFrame = CapturedAudioFrame(
+            timestamp: writerTimestamp,
             sampleRate: frame.sampleRate,
             channelCount: frame.channelCount,
             samples: frame.samples
         )
-        try await writer.append(normalizedFrame)
+        try await writer.append(storageFrame)
         totalSampleCount += frame.samples.count
-        pendingTranscriptionSamples.append(contentsOf: frame.samples)
+        let transcriptionInput: [Float]
+        if let samples = frame.transcriptionSamples {
+            guard abs(
+                (frame.transcriptionSampleRate ?? 0)
+                    - AudioSegmentManifest.transcriptionSampleRate
+            ) < 0.001 else {
+                throw MeetingCoordinatorError.capturePipelineFailed
+            }
+            transcriptionInput = samples
+        } else {
+            guard abs(
+                frame.sampleRate - AudioSegmentManifest.transcriptionSampleRate
+            ) < 0.001 else {
+                throw MeetingCoordinatorError.capturePipelineFailed
+            }
+            transcriptionInput = frame.samples
+        }
+        pendingTranscriptionSamples.append(contentsOf: transcriptionInput)
 
         while pendingTranscriptionSamples.count >= transcriptionChunkSampleCount {
             let chunk = Array(
@@ -428,3 +463,5 @@ actor MeetingCoordinator {
         totalSampleCount = 0
     }
 }
+
+extension MeetingCoordinator: MeetingDeletionGuarding {}
