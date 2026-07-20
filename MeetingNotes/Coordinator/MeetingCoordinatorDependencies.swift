@@ -108,7 +108,8 @@ struct LiveMeetingAudioWriterFactory: MeetingAudioWriterFactory {
 struct LiveMeetingTranscriptionQueueFactory: MeetingTranscriptionQueueFactory {
     let service: any TranscriptionService
 
-    init(service: any TranscriptionService = WhisperKitTranscriptionService()) {
+    init(service: any TranscriptionService = WhisperKitTranscriptionService(
+        model: "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page")) {
         self.service = service
     }
 
@@ -227,7 +228,8 @@ extension MeetingCoordinatorDependencies {
         permissionSystem: any CapturePermissionSystem = LiveCapturePermissionSystem(),
         panel: any RecordingPanelPresenting = NoopRecordingPanelPresenter(),
         transcriptionService: any TranscriptionService =
-            WhisperKitTranscriptionService()
+            WhisperKitTranscriptionService(
+                model: "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page")
     ) -> MeetingCoordinatorDependencies {
         MeetingCoordinatorDependencies(
             permissions: CapturePermissionClient(system: permissionSystem),
