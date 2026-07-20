@@ -9,7 +9,7 @@ final class ScreenAudioCaptureConfigurationTests: XCTestCase {
         XCTAssertTrue(configuration.capturesAudio)
         XCTAssertTrue(configuration.captureMicrophone)
         XCTAssertTrue(configuration.excludesCurrentProcessAudio)
-        XCTAssertEqual(configuration.sampleRate, 16_000)
+        XCTAssertEqual(configuration.sampleRate, 48_000)
         XCTAssertEqual(configuration.channelCount, 1)
         XCTAssertEqual(
             ScreenAudioCaptureConfiguration.eventQueueCapacity,
@@ -273,6 +273,65 @@ final class ScreenAudioCaptureConfigurationTests: XCTestCase {
         XCTAssertEqual(
             receivedError as? ScreenAudioCaptureError,
             .invalidAudioSample
+        )
+    }
+
+    func testBuilds16kTranscriptionPayloadWithoutChanging48kStorage() throws {
+        let builder = ScreenAudioTranscriptionFrameBuilder()
+        let storage = CapturedAudioFrame(
+            timestamp: 0.5,
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: Array(repeating: 0.2, count: 4_800)
+        )
+
+        let output = try builder.build(from: storage)
+
+        XCTAssertEqual(output.timestamp, 0.5)
+        XCTAssertEqual(output.sampleRate, 48_000)
+        XCTAssertEqual(output.samples, storage.samples)
+        XCTAssertEqual(output.transcriptionSampleRate, 16_000)
+        let transcriptionSamples = try XCTUnwrap(
+            output.transcriptionSamples
+        )
+        XCTAssertEqual(transcriptionSamples.count, 1_600)
+        XCTAssertEqual(
+            transcriptionSamples[transcriptionSamples.count / 2],
+            0.2,
+            accuracy: 0.001
+        )
+    }
+
+    func testTranscriptionFrameBuilderConvertsAfterSessionReset() throws {
+        let builder = ScreenAudioTranscriptionFrameBuilder()
+        _ = try builder.build(
+            from: CapturedAudioFrame(
+                timestamp: 0,
+                sampleRate: PCMConverter.playbackSampleRate,
+                samples: Array(repeating: 0.2, count: 4_800)
+            )
+        )
+
+        builder.reset()
+        let output = try builder.build(
+            from: CapturedAudioFrame(
+                timestamp: 1,
+                sampleRate: PCMConverter.playbackSampleRate,
+                samples: Array(repeating: -0.3, count: 4_800)
+            )
+        )
+
+        XCTAssertEqual(output.timestamp, 1)
+        XCTAssertEqual(output.sampleRate, 48_000)
+        XCTAssertEqual(output.samples.count, 4_800)
+        XCTAssertEqual(output.transcriptionSampleRate, 16_000)
+        let transcriptionSamples = try XCTUnwrap(
+            output.transcriptionSamples
+        )
+        XCTAssertEqual(transcriptionSamples.count, 1_600)
+        XCTAssertEqual(
+            transcriptionSamples[transcriptionSamples.count / 2],
+            -0.3,
+            accuracy: 0.001
         )
     }
 

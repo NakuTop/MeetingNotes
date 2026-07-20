@@ -27,7 +27,7 @@ enum ScreenAudioCaptureConfiguration {
         configuration.capturesAudio = true
         configuration.captureMicrophone = true
         configuration.excludesCurrentProcessAudio = true
-        configuration.sampleRate = Int(RealtimeAudioMixer.sampleRate)
+        configuration.sampleRate = Int(PCMConverter.playbackSampleRate)
         configuration.channelCount = 1
         return configuration
     }
@@ -339,9 +339,41 @@ private enum ScreenAudioRelayEvent: @unchecked Sendable {
     case failure(Error)
 }
 
+final class ScreenAudioTranscriptionFrameBuilder: @unchecked Sendable {
+    private let converter: PCMConverter
+
+    init(
+        converter: PCMConverter = PCMConverter(
+            outputSampleRate: PCMConverter.defaultOutputSampleRate,
+            amplitudePolicy: .preserveAmplitude
+        )
+    ) {
+        self.converter = converter
+    }
+
+    func build(
+        from storageFrame: CapturedAudioFrame
+    ) throws -> CapturedAudioFrame {
+        let transcriptionFrame = try converter.convert(storageFrame)
+        return CapturedAudioFrame(
+            timestamp: storageFrame.timestamp,
+            sampleRate: storageFrame.sampleRate,
+            channelCount: storageFrame.channelCount,
+            samples: storageFrame.samples,
+            transcriptionSamples: transcriptionFrame.samples,
+            transcriptionSampleRate: transcriptionFrame.sampleRate
+        )
+    }
+
+    func reset() {
+        converter.reset()
+    }
+}
+
 actor ScreenAudioCaptureSource: AudioCaptureSource {
     private let mixer: RealtimeAudioMixer
     private let decoder: ScreenAudioSampleDecoder
+    private let transcriptionFrameBuilder: ScreenAudioTranscriptionFrameBuilder
     private let systemQueue = DispatchQueue(
         label: "MeetingNotes.ScreenAudio.System",
         qos: .userInitiated
@@ -358,17 +390,20 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
 
     init(
         mixer: RealtimeAudioMixer = RealtimeAudioMixer(),
-        decoder: ScreenAudioSampleDecoder = ScreenAudioSampleDecoder()
+        decoder: ScreenAudioSampleDecoder = ScreenAudioSampleDecoder(),
+        transcriptionFrameBuilder: ScreenAudioTranscriptionFrameBuilder =
+            ScreenAudioTranscriptionFrameBuilder()
     ) {
         self.mixer = mixer
         self.decoder = decoder
+        self.transcriptionFrameBuilder = transcriptionFrameBuilder
     }
 
     func start() async throws -> AsyncThrowingStream<CapturedAudioFrame, Error> {
         guard stream == nil else {
             throw AudioCaptureError.alreadyRunning
         }
-        decoder.reset()
+        resetConverters()
 
         let content: SCShareableContent
         do {
@@ -436,7 +471,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             removeRegisteredOutputs(from: stream, relay: relay)
             await waitForCallbackQueues()
             await relay.finishAndWait()
-            decoder.reset()
+            resetConverters()
             frameSynchronizer = nil
             continuation?.finish(throwing: ScreenAudioCaptureError.streamSetupFailed)
             continuation = nil
@@ -451,7 +486,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             removeRegisteredOutputs(from: stream, relay: relay)
             await waitForCallbackQueues()
             await relay.finishAndWait()
-            decoder.reset()
+            resetConverters()
             frameSynchronizer = nil
             self.stream = nil
             self.relay = nil
@@ -473,8 +508,11 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
               continuation != nil else {
             throw AudioCaptureError.notRunning
         }
-        for frame in await mixer.flush() {
-            continuation?.yield(normalizeOutputTimestamp(frame))
+        do {
+            try yieldMixedFrames(await mixer.flush())
+        } catch {
+            await handleStreamFailure(error)
+            throw error
         }
     }
 
@@ -489,18 +527,20 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
 
     func stop() async {
         guard let stream, let relay else {
-            decoder.reset()
+            resetConverters()
             return
         }
         try? await stream.stopCapture()
         removeRegisteredOutputs(from: stream, relay: relay)
         await waitForCallbackQueues()
         await relay.finishAndWait()
-        decoder.reset()
-        for frame in await mixer.flush() {
-            continuation?.yield(normalizeOutputTimestamp(frame))
+        do {
+            try yieldMixedFrames(await mixer.flush())
+            continuation?.finish()
+        } catch {
+            continuation?.finish(throwing: error)
         }
-        continuation?.finish()
+        resetConverters()
         continuation = nil
         self.stream = nil
         self.relay = nil
@@ -547,9 +587,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
                     orderedFrame,
                     source: source
                 )
-                for mixedFrame in mixedFrames {
-                    continuation?.yield(normalizeOutputTimestamp(mixedFrame))
-                }
+                try yieldMixedFrames(mixedFrames)
             }
         } catch {
             await handleStreamFailure(error)
@@ -567,8 +605,24 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             timestamp: max(0, frame.timestamp - origin),
             sampleRate: frame.sampleRate,
             channelCount: frame.channelCount,
-            samples: frame.samples
+            samples: frame.samples,
+            transcriptionSamples: frame.transcriptionSamples,
+            transcriptionSampleRate: frame.transcriptionSampleRate
         )
+    }
+
+    private func yieldMixedFrames(
+        _ frames: [CapturedAudioFrame]
+    ) throws {
+        for frame in frames {
+            let output = try transcriptionFrameBuilder.build(from: frame)
+            continuation?.yield(normalizeOutputTimestamp(output))
+        }
+    }
+
+    private func resetConverters() {
+        decoder.reset()
+        transcriptionFrameBuilder.reset()
     }
 
     private func handleStreamFailure(_ error: Error) async {
@@ -581,11 +635,14 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             removeRegisteredOutputs(from: stream, relay: relay)
             await waitForCallbackQueues()
         }
-        decoder.reset()
-        for frame in await mixer.flush() {
-            continuation?.yield(normalizeOutputTimestamp(frame))
+        var completionError = error
+        do {
+            try yieldMixedFrames(await mixer.flush())
+        } catch {
+            completionError = error
         }
-        continuation?.finish(throwing: error)
+        resetConverters()
+        continuation?.finish(throwing: completionError)
         continuation = nil
         stream = nil
         relay = nil
@@ -600,9 +657,11 @@ final class ScreenAudioSampleDecoder: @unchecked Sendable {
 
     init(
         systemConverter: PCMConverter = PCMConverter(
+            outputSampleRate: PCMConverter.playbackSampleRate,
             amplitudePolicy: .preserveAmplitude
         ),
         microphoneConverter: PCMConverter = PCMConverter(
+            outputSampleRate: PCMConverter.playbackSampleRate,
             amplitudePolicy: .preserveAmplitude
         )
     ) {
