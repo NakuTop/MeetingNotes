@@ -2,6 +2,24 @@ import XCTest
 @testable import MeetingNotes
 
 final class MeetingCoordinatorTests: XCTestCase {
+    func testOnlineMeetingCreatesWriterAtPlaybackSampleRate() async throws {
+        let fixture = makeFixture()
+
+        try await fixture.coordinator.start(mode: .online)
+
+        let sampleRates = await fixture.writerSampleRates.values()
+        XCTAssertEqual(sampleRates, [PCMConverter.playbackSampleRate])
+    }
+
+    func testOfflineMeetingCreatesWriterAtPlaybackSampleRate() async throws {
+        let fixture = makeFixture()
+
+        try await fixture.coordinator.start(mode: .offline)
+
+        let sampleRates = await fixture.writerSampleRates.values()
+        XCTAssertEqual(sampleRates, [PCMConverter.playbackSampleRate])
+    }
+
     func testPermissionsMustBeAuthorizedBeforeRecording() async throws {
         let fixture = makeFixture(
             permissions: [
@@ -523,6 +541,7 @@ final class MeetingCoordinatorTests: XCTestCase {
     ) -> CoordinatorFixture {
         let events = CoordinatorEventLog()
         let captureModes = CoordinatorModeLog()
+        let writerSampleRates = CoordinatorSampleRateLog()
         let capture = FakeCoordinatorCapture(
             events: events,
             failsToStart: captureFailsToStart,
@@ -554,7 +573,10 @@ final class MeetingCoordinatorTests: XCTestCase {
                 capture: capture,
                 modes: captureModes
             ),
-            writerFactory: FakeCoordinatorWriterFactory(writer: writer),
+            writerFactory: FakeCoordinatorWriterFactory(
+                writer: writer,
+                sampleRates: writerSampleRates
+            ),
             transcriptionFactory: FakeCoordinatorTranscriptionFactory(
                 transcriber: transcriber
             ),
@@ -575,6 +597,7 @@ final class MeetingCoordinatorTests: XCTestCase {
             coordinator: coordinator,
             events: events,
             captureModes: captureModes,
+            writerSampleRates: writerSampleRates,
             capture: capture,
             writer: writer,
             transcriber: transcriber,
@@ -589,6 +612,7 @@ private struct CoordinatorFixture {
     let coordinator: MeetingCoordinator
     let events: CoordinatorEventLog
     let captureModes: CoordinatorModeLog
+    let writerSampleRates: CoordinatorSampleRateLog
     let capture: FakeCoordinatorCapture
     let writer: FakeCoordinatorWriter
     let transcriber: FakeCoordinatorTranscriber
@@ -630,6 +654,18 @@ private actor CoordinatorModeLog {
 
     func values() -> [MeetingMode] {
         modes
+    }
+}
+
+private actor CoordinatorSampleRateLog {
+    private var sampleRates: [Double] = []
+
+    func append(_ sampleRate: Double) {
+        sampleRates.append(sampleRate)
+    }
+
+    func values() -> [Double] {
+        sampleRates
     }
 }
 
@@ -719,10 +755,11 @@ private actor FakeCoordinatorCapture: AudioCaptureSource {
 
 private struct FakeCoordinatorWriterFactory: MeetingAudioWriterFactory {
     let writer: FakeCoordinatorWriter
+    let sampleRates: CoordinatorSampleRateLog
 
     func makeWriter(meetingID: UUID, sampleRate: Double) async throws -> any MeetingAudioWriting {
         _ = meetingID
-        _ = sampleRate
+        await sampleRates.append(sampleRate)
         return writer
     }
 }

@@ -113,9 +113,7 @@ actor MeetingCoordinator {
                 startedAt: startedAt
             )
             newMeetingID = createdID
-            let writerSampleRate: Double = mode == .offline
-                ? PCMConverter.playbackSampleRate
-                : AudioSegmentManifest.transcriptionSampleRate
+            let writerSampleRate = PCMConverter.playbackSampleRate
             let createdWriter = try await dependencies.writerFactory.makeWriter(
                 meetingID: createdID,
                 sampleRate: writerSampleRate
