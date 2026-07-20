@@ -76,6 +76,28 @@ final class PCMConverterTests: XCTestCase {
         }
     }
 
+    func testRejectsUnsafeOutputBufferCapacities() {
+        let unsafeInputs: [(AVAudioFrameCount, Double, Double)] = [
+            (1, .leastNonzeroMagnitude, 16_000),
+            (.max, 16_000, 48_000),
+        ]
+
+        for (frameCount, inputSampleRate, outputSampleRate) in unsafeInputs {
+            XCTAssertThrowsError(
+                try PCMConverter.outputFrameCapacity(
+                    inputFrameCount: frameCount,
+                    inputSampleRate: inputSampleRate,
+                    outputSampleRate: outputSampleRate
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? PCMConverterError,
+                    .unableToCreateOutputBuffer
+                )
+            }
+        }
+    }
+
     func testPreserveAmplitudeAt48kKeepsPlaybackLevelAndDuration() throws {
         let input = try makeBuffer(frameCount: 48_000) { frame, _ in
             0.2 * sin(Float(frame) * 2 * .pi * 440 / 48_000)

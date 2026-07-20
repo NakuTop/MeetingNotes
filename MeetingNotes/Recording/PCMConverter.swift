@@ -80,6 +80,25 @@ final class PCMConverter: @unchecked Sendable {
         }
     }
 
+    static func outputFrameCapacity(
+        inputFrameCount: AVAudioFrameCount,
+        inputSampleRate: Double,
+        outputSampleRate: Double
+    ) throws -> AVAudioFrameCount {
+        let ratio = outputSampleRate / inputSampleRate
+        let expectedFrames = ceil(Double(inputFrameCount) * ratio)
+        guard expectedFrames.isFinite else {
+            throw PCMConverterError.unableToCreateOutputBuffer
+        }
+
+        let paddedCapacity = max(1, expectedFrames + 16)
+        guard paddedCapacity.isFinite,
+              let capacity = AVAudioFrameCount(exactly: paddedCapacity) else {
+            throw PCMConverterError.unableToCreateOutputBuffer
+        }
+        return capacity
+    }
+
     private func convertLocked(
         _ input: AVAudioPCMBuffer,
         timestamp: TimeInterval
@@ -97,14 +116,15 @@ final class PCMConverter: @unchecked Sendable {
         ) else {
             throw PCMConverterError.unableToCreateOutputFormat
         }
+        let capacity = try Self.outputFrameCapacity(
+            inputFrameCount: input.frameLength,
+            inputSampleRate: input.format.sampleRate,
+            outputSampleRate: outputSampleRate
+        )
         let converter = try streamingConverter(
             for: input.format,
             outputFormat: outputFormat
         )
-
-        let ratio = outputSampleRate / input.format.sampleRate
-        let expectedFrames = ceil(Double(input.frameLength) * ratio)
-        let capacity = AVAudioFrameCount(max(1, expectedFrames + 16))
         guard let output = AVAudioPCMBuffer(
             pcmFormat: outputFormat,
             frameCapacity: capacity
