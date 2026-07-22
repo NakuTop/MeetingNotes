@@ -1,13 +1,17 @@
 import Foundation
+import Observation
 
+@Observable
 final class AppSettingsStore: @unchecked Sendable {
     static let defaultDeepSeekModel = "deepseek-v4-flash"
 
     private enum Key {
         static let deepSeekModel = "settings.deepSeekModel"
         static let notionParentPageURL = "settings.notionParentPageURL"
+        static let notionArchivingEnabled = "settings.notionArchivingEnabled"
     }
 
+    @ObservationIgnored
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -35,5 +39,20 @@ final class AppSettingsStore: @unchecked Sendable {
     var notionParentPageURL: String {
         get { defaults.string(forKey: Key.notionParentPageURL) ?? "" }
         set { defaults.set(newValue, forKey: Key.notionParentPageURL) }
+    }
+
+    var isNotionArchivingEnabled: Bool {
+        get {
+            access(keyPath: \AppSettingsStore.isNotionArchivingEnabled)
+            guard defaults.object(forKey: Key.notionArchivingEnabled) != nil else {
+                return true
+            }
+            return defaults.bool(forKey: Key.notionArchivingEnabled)
+        }
+        set {
+            withMutation(keyPath: \AppSettingsStore.isNotionArchivingEnabled) {
+                defaults.set(newValue, forKey: Key.notionArchivingEnabled)
+            }
+        }
     }
 }

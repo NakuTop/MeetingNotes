@@ -4,6 +4,23 @@ import XCTest
 
 @MainActor
 final class SettingsViewModelTests: XCTestCase {
+    func testNotionArchivingPreferenceLoadsAndSaves() throws {
+        let fixture = try makeFixture()
+        fixture.settings.isNotionArchivingEnabled = false
+
+        fixture.viewModel.load()
+
+        XCTAssertFalse(fixture.viewModel.isNotionArchivingEnabled)
+
+        fixture.viewModel.isNotionArchivingEnabled = true
+        fixture.viewModel.save()
+        fixture.viewModel.isNotionArchivingEnabled = false
+        fixture.viewModel.load()
+
+        XCTAssertTrue(fixture.settings.isNotionArchivingEnabled)
+        XCTAssertTrue(fixture.viewModel.isNotionArchivingEnabled)
+    }
+
     func testSaveWritesSecretsToCredentialStoreAndNonSecretsToSettings() throws {
         let fixture = try makeFixture()
         let viewModel = fixture.viewModel

@@ -62,6 +62,22 @@ struct SettingsView: View {
                         Text("Notion")
                             .font(.headline)
 
+                        Toggle(
+                            "总结后自动归档到 Notion",
+                            isOn: $viewModel.isNotionArchivingEnabled
+                        )
+                        .accessibilityIdentifier(
+                            "settings.notion.archiveEnabled"
+                        )
+
+                        Text(
+                            viewModel.isNotionArchivingEnabled
+                                ? "生成总结后会继续写入已配置的 Notion 父页面。"
+                                : "总结只保存在本软件中，不会连接 Notion。"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                         SecureField(
                             "输入新的 Notion Token",
                             text: $viewModel.notionTokenInput

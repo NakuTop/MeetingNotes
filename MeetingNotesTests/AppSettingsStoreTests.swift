@@ -1,7 +1,56 @@
+import Observation
 import XCTest
 @testable import MeetingNotes
 
 final class AppSettingsStoreTests: XCTestCase {
+    func testNotionArchivingDefaultsToEnabledWhenPreferenceIsMissing() throws {
+        let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let store = AppSettingsStore(defaults: defaults)
+
+        XCTAssertTrue(store.isNotionArchivingEnabled)
+    }
+
+    func testDisabledNotionArchivingPersistsAcrossStoreInstances() throws {
+        let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let first = AppSettingsStore(defaults: defaults)
+
+        first.isNotionArchivingEnabled = false
+
+        let reloaded = AppSettingsStore(defaults: defaults)
+        XCTAssertFalse(reloaded.isNotionArchivingEnabled)
+    }
+
+    func testNotionArchivingMutationNotifiesObservationTracking() throws {
+        let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let store = AppSettingsStore(defaults: defaults)
+        let changeObserved = expectation(
+            description: "Notion archiving preference change observed"
+        )
+
+        withObservationTracking {
+            _ = store.isNotionArchivingEnabled
+        } onChange: {
+            changeObserved.fulfill()
+        }
+
+        store.isNotionArchivingEnabled = false
+
+        wait(for: [changeObserved], timeout: 0.1)
+    }
+
     func testModelAndNotionParentURLPersistAcrossStoreInstances() throws {
         let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
