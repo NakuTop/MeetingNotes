@@ -3,6 +3,7 @@ import Observation
 
 enum MeetingDetailPrimaryAction: Equatable, Sendable {
     case unavailable
+    case unavailableLocal
     case summarizeAndArchive
     case summarizeLocally
     case summarizing
@@ -14,6 +15,7 @@ enum MeetingDetailPrimaryAction: Equatable, Sendable {
     var title: String {
         switch self {
         case .unavailable: "总结并归档"
+        case .unavailableLocal: "生成总结"
         case .summarizeAndArchive: "总结并归档"
         case .summarizeLocally: "生成总结"
         case .summarizing: "正在总结"
@@ -26,7 +28,9 @@ enum MeetingDetailPrimaryAction: Equatable, Sendable {
 
     var symbolName: String {
         switch self {
-        case .unavailable, .summarizeAndArchive, .summarizeLocally: "sparkles"
+        case .unavailable, .unavailableLocal, .summarizeAndArchive,
+             .summarizeLocally:
+            "sparkles"
         case .summarizing, .archiving: "clock.arrow.circlepath"
         case .archiveToNotion: "square.and.arrow.up"
         case .localSummarySaved, .archived: "checkmark.circle.fill"
@@ -72,7 +76,9 @@ final class MeetingDetailViewModel {
     }
 
     var primaryAction: MeetingDetailPrimaryAction {
-        guard let state = meeting?.state else { return .unavailable }
+        guard let state = meeting?.state else {
+            return isNotionArchivingEnabled ? .unavailable : .unavailableLocal
+        }
         if isPerforming {
             return switch operationState ?? state {
             case .summaryReady:
@@ -93,7 +99,8 @@ final class MeetingDetailViewModel {
             isNotionArchivingEnabled ? .archiveToNotion : .localSummarySaved
         case .archiving: .archiving
         case .archived: .archived
-        default: .unavailable
+        default:
+            isNotionArchivingEnabled ? .unavailable : .unavailableLocal
         }
     }
 

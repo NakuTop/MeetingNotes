@@ -94,6 +94,10 @@ final class MeetingDetailViewModelTests: XCTestCase {
             titleUpdater: DetailTitleUpdaterSpy()
         )
 
+        try repository.updateMeetingState(id: meetingID, state: .recording)
+        viewModel.load()
+        XCTAssertEqual(viewModel.primaryAction, .unavailableLocal)
+
         try repository.updateMeetingState(id: meetingID, state: .ready)
         viewModel.load()
         XCTAssertFalse(viewModel.isNotionArchivingEnabled)
