@@ -27,8 +27,8 @@ struct OnboardingView: View {
                     )
                     privacyRow(
                         symbol: "sparkles",
-                        title: "只有点击“总结并归档”才会联网",
-                        detail: "转录文本会发送给 DeepSeek，并按你的设置写入 Notion。"
+                        title: "只有主动生成总结时，转录内容才会发送给 DeepSeek",
+                        detail: "是否继续写入 Notion 由你的设置决定。"
                     )
                     privacyRow(
                         symbol: "checkmark.shield",
