@@ -48,6 +48,62 @@ final class SummarizeAndArchiveUseCaseTests: XCTestCase {
         XCTAssertTrue(fixture.archiver.observedLocalSummaryBeforeArchive)
     }
 
+    func testDisabledNotionArchivingSavesSummaryLocallyWithoutNotionCredential() async throws {
+        let fixture = try makeFixture(isNotionArchivingEnabled: false)
+        try fixture.credentials.delete(.notionToken)
+        let meetingID = try fixture.makeReadyMeeting()
+        try fixture.addFinalTranscript(to: meetingID)
+
+        try await fixture.useCase.execute(meetingID: meetingID)
+
+        let meeting = try fixture.repository.meeting(id: meetingID)
+        XCTAssertEqual(meeting.summary?.overview, "确认启动计划")
+        XCTAssertEqual(meeting.state, .summaryReady)
+        let generatorCallCount = await fixture.generator.callCount()
+        XCTAssertEqual(generatorCallCount, 1)
+        XCTAssertEqual(fixture.archiver.callCount, 0)
+    }
+
+    func testDisabledNotionArchivingFromSummaryReadyReportsStateAndDoesNothing() async throws {
+        let fixture = try makeFixture(isNotionArchivingEnabled: false)
+        try fixture.credentials.delete(.notionToken)
+        let meetingID = try fixture.makeReadyMeeting()
+        try fixture.addFinalTranscript(to: meetingID)
+        try await fixture.useCase.execute(meetingID: meetingID)
+        var progress: [RecordingState] = []
+
+        try await fixture.useCase.execute(meetingID: meetingID) {
+            progress.append($0)
+        }
+
+        XCTAssertEqual(progress, [.summaryReady])
+        XCTAssertEqual(
+            try fixture.repository.meeting(id: meetingID).state,
+            .summaryReady
+        )
+        let generatorCallCount = await fixture.generator.callCount()
+        XCTAssertEqual(generatorCallCount, 1)
+        XCTAssertEqual(fixture.archiver.callCount, 0)
+    }
+
+    func testReenablingNotionArchivingArchivesExistingSummaryWithoutRegeneration() async throws {
+        let fixture = try makeFixture(isNotionArchivingEnabled: false)
+        let meetingID = try fixture.makeReadyMeeting()
+        try fixture.addFinalTranscript(to: meetingID)
+        try await fixture.useCase.execute(meetingID: meetingID)
+        fixture.settings.isNotionArchivingEnabled = true
+
+        try await fixture.useCase.execute(meetingID: meetingID)
+
+        let generatorCallCount = await fixture.generator.callCount()
+        XCTAssertEqual(generatorCallCount, 1)
+        XCTAssertEqual(fixture.archiver.callCount, 1)
+        XCTAssertEqual(
+            try fixture.repository.meeting(id: meetingID).state,
+            .archived
+        )
+    }
+
     func testSuggestedTitleDoesNotOverwriteUserEditedTitle() async throws {
         let fixture = try makeFixture()
         let meetingID = try fixture.makeReadyMeeting(title: "我的自定义标题")
@@ -222,7 +278,8 @@ final class SummarizeAndArchiveUseCaseTests: XCTestCase {
             )
         ],
         generator: (any MeetingSummaryGenerating)? = nil,
-        operationGate: MeetingOperationGate = MeetingOperationGate()
+        operationGate: MeetingOperationGate = MeetingOperationGate(),
+        isNotionArchivingEnabled: Bool = true
     ) throws -> Fixture {
         let repository = try MeetingRepository.inMemory()
         let credentials = UseCaseCredentialStore()
@@ -235,6 +292,7 @@ final class SummarizeAndArchiveUseCaseTests: XCTestCase {
         }
         let settings = AppSettingsStore(defaults: defaults)
         settings.deepSeekModel = "deepseek-chat"
+        settings.isNotionArchivingEnabled = isNotionArchivingEnabled
         settings.notionParentPageURL =
             "https://www.notion.so/Parent-1234567890abcdef1234567890abcdef"
         let generatorSpy = SummaryGeneratorSpy(
@@ -255,6 +313,8 @@ final class SummarizeAndArchiveUseCaseTests: XCTestCase {
         )
         return Fixture(
             repository: repository,
+            credentials: credentials,
+            settings: settings,
             generator: generatorSpy,
             archiver: archiver,
             useCase: useCase
@@ -275,6 +335,8 @@ final class SummarizeAndArchiveUseCaseTests: XCTestCase {
     @MainActor
     private struct Fixture {
         let repository: MeetingRepository
+        let credentials: UseCaseCredentialStore
+        let settings: AppSettingsStore
         let generator: SummaryGeneratorSpy
         let archiver: NotionArchiverSpy
         let useCase: SummarizeAndArchiveUseCase

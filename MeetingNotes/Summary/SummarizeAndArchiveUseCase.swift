@@ -229,6 +229,7 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
         meetingID: UUID,
         onProgress: (RecordingState) -> Void
     ) async throws {
+        guard settingsStore.isNotionArchivingEnabled else { return }
         guard let notionToken = try nonemptyCredential(.notionToken) else {
             throw SummarizeAndArchiveError.missingNotionCredential
         }
