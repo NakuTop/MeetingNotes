@@ -345,7 +345,11 @@ struct MeetingDetailView: View {
                         items: summary.actionItemRecords.map(actionItemText)
                     )
                 } else {
-                    Text("会议结束并完成转录后，可生成总结并归档到 Notion。")
+                    Text(
+                        viewModel.isNotionArchivingEnabled
+                            ? "会议结束并完成转录后，可生成总结并归档到 Notion。"
+                            : "会议结束并完成转录后，可生成总结并保存在本软件中。"
+                    )
                         .foregroundStyle(.secondary)
                 }
 
@@ -388,8 +392,13 @@ struct MeetingDetailView: View {
                     if let urlString = meeting.notionPageURL,
                        let url = URL(string: urlString) {
                         Link("在 Notion 中打开", destination: url)
+                    } else if meeting.summary != nil,
+                              !viewModel.isNotionArchivingEnabled {
+                        Text("已保存在本机")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     } else {
-                        Text("尚未归档")
+                        Text("尚未归档到 Notion")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -451,7 +460,7 @@ enum MeetingDisplayFormat {
         case .finalizing: "处理中"
         case .ready: "可总结"
         case .summarizing: "总结中"
-        case .summaryReady: "待归档"
+        case .summaryReady: "总结完成"
         case .archiving: "归档中"
         case .archived: "已归档"
         }

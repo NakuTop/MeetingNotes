@@ -4,8 +4,10 @@ import Observation
 enum MeetingDetailPrimaryAction: Equatable, Sendable {
     case unavailable
     case summarizeAndArchive
+    case summarizeLocally
     case summarizing
-    case retryArchive
+    case archiveToNotion
+    case localSummarySaved
     case archiving
     case archived
 
@@ -13,8 +15,10 @@ enum MeetingDetailPrimaryAction: Equatable, Sendable {
         switch self {
         case .unavailable: "总结并归档"
         case .summarizeAndArchive: "总结并归档"
+        case .summarizeLocally: "生成总结"
         case .summarizing: "正在总结"
-        case .retryArchive: "重试归档"
+        case .archiveToNotion: "归档到 Notion"
+        case .localSummarySaved: "已保存到本机"
         case .archiving: "正在归档"
         case .archived: "已归档"
         }
@@ -22,15 +26,17 @@ enum MeetingDetailPrimaryAction: Equatable, Sendable {
 
     var symbolName: String {
         switch self {
-        case .unavailable, .summarizeAndArchive: "sparkles"
+        case .unavailable, .summarizeAndArchive, .summarizeLocally: "sparkles"
         case .summarizing, .archiving: "clock.arrow.circlepath"
-        case .retryArchive: "arrow.clockwise"
-        case .archived: "checkmark.circle.fill"
+        case .archiveToNotion: "square.and.arrow.up"
+        case .localSummarySaved, .archived: "checkmark.circle.fill"
         }
     }
 
     var isEnabled: Bool {
-        self == .summarizeAndArchive || self == .retryArchive
+        self == .summarizeAndArchive
+            || self == .summarizeLocally
+            || self == .archiveToNotion
     }
 }
 
@@ -39,6 +45,7 @@ enum MeetingDetailPrimaryAction: Equatable, Sendable {
 final class MeetingDetailViewModel {
     let meetingID: UUID
     private let repository: MeetingRepository
+    private let settingsStore: AppSettingsStore
     private let action: any SummarizeAndArchiving
     private let titleUpdater: any MeetingTitleUpdating
 
@@ -52,11 +59,13 @@ final class MeetingDetailViewModel {
     init(
         meetingID: UUID,
         repository: MeetingRepository,
+        settingsStore: AppSettingsStore,
         action: any SummarizeAndArchiving,
         titleUpdater: any MeetingTitleUpdating
     ) {
         self.meetingID = meetingID
         self.repository = repository
+        self.settingsStore = settingsStore
         self.action = action
         self.titleUpdater = titleUpdater
         meeting = try? repository.meeting(id: meetingID)
@@ -66,7 +75,9 @@ final class MeetingDetailViewModel {
         guard let state = meeting?.state else { return .unavailable }
         if isPerforming {
             return switch operationState ?? state {
-            case .summaryReady, .archiving:
+            case .summaryReady:
+                isNotionArchivingEnabled ? .archiving : .localSummarySaved
+            case .archiving:
                 .archiving
             case .archived:
                 .archived
@@ -75,13 +86,19 @@ final class MeetingDetailViewModel {
             }
         }
         return switch state {
-        case .ready: .summarizeAndArchive
+        case .ready:
+            isNotionArchivingEnabled ? .summarizeAndArchive : .summarizeLocally
         case .summarizing: .summarizing
-        case .summaryReady: .retryArchive
+        case .summaryReady:
+            isNotionArchivingEnabled ? .archiveToNotion : .localSummarySaved
         case .archiving: .archiving
         case .archived: .archived
         default: .unavailable
         }
+    }
+
+    var isNotionArchivingEnabled: Bool {
+        settingsStore.isNotionArchivingEnabled
     }
 
     func load() {

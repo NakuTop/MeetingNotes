@@ -23,6 +23,7 @@ final class AppContainer {
     let transcriptionModelViewModel: TranscriptionModelViewModel
 
     private let controlRouter: MeetingControlRouter
+    private let settingsStore: AppSettingsStore
     private let summarizeAndArchiveUseCase: SummarizeAndArchiveUseCase
     private let meetingTitleUpdater: any MeetingTitleUpdating
     private let operationGate: MeetingOperationGate
@@ -106,6 +107,7 @@ final class AppContainer {
         )
         self.libraryViewModel = libraryViewModel
         let settingsStore = settingsStore ?? AppSettingsStore()
+        self.settingsStore = settingsStore
         let summarizeAndArchiveUseCase = SummarizeAndArchiveUseCase(
             repository: repository,
             credentialStore: credentialStore,
@@ -183,6 +185,7 @@ final class AppContainer {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
+            settingsStore: settingsStore,
             action: summarizeAndArchiveUseCase,
             titleUpdater: meetingTitleUpdater
         )

@@ -14,6 +14,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
+            settingsStore: makeSettingsStore(),
             action: DetailActionSpy(),
             titleUpdater: DetailTitleUpdaterSpy()
         )
@@ -55,6 +56,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
+            settingsStore: makeSettingsStore(),
             action: action,
             titleUpdater: DetailTitleUpdaterSpy()
         )
@@ -63,7 +65,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
             (.recording, .unavailable),
             (.ready, .summarizeAndArchive),
             (.summarizing, .summarizing),
-            (.summaryReady, .retryArchive),
+            (.summaryReady, .archiveToNotion),
             (.archiving, .archiving),
             (.archived, .archived)
         ]
@@ -73,6 +75,41 @@ final class MeetingDetailViewModelTests: XCTestCase {
             viewModel.load()
             XCTAssertEqual(viewModel.primaryAction, expected)
         }
+    }
+
+    func testPrimaryButtonReflectsNotionArchivingPreference() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        let settingsStore = makeSettingsStore(
+            isNotionArchivingEnabled: false
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: settingsStore,
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        viewModel.load()
+        XCTAssertFalse(viewModel.isNotionArchivingEnabled)
+        XCTAssertEqual(viewModel.primaryAction, .summarizeLocally)
+
+        settingsStore.isNotionArchivingEnabled = true
+        XCTAssertTrue(viewModel.isNotionArchivingEnabled)
+        XCTAssertEqual(viewModel.primaryAction, .summarizeAndArchive)
+
+        settingsStore.isNotionArchivingEnabled = false
+        try repository.updateMeetingState(id: meetingID, state: .summaryReady)
+        viewModel.load()
+        XCTAssertEqual(viewModel.primaryAction, .localSummarySaved)
+
+        settingsStore.isNotionArchivingEnabled = true
+        XCTAssertEqual(viewModel.primaryAction, .archiveToNotion)
     }
 
     func testArchiveFailureReloadsSummaryReadyAndShowsRetryMessage() async throws {
@@ -94,13 +131,14 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
+            settingsStore: makeSettingsStore(),
             action: action,
             titleUpdater: DetailTitleUpdaterSpy()
         )
 
         await viewModel.performPrimaryAction()
 
-        XCTAssertEqual(viewModel.primaryAction, .retryArchive)
+        XCTAssertEqual(viewModel.primaryAction, .archiveToNotion)
         XCTAssertEqual(viewModel.errorMessage, "Notion 归档失败，可直接重试，不会再次生成总结。")
         XCTAssertEqual(action.callCount, 1)
     }
@@ -116,6 +154,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
+            settingsStore: makeSettingsStore(),
             action: action,
             titleUpdater: DetailTitleUpdaterSpy()
         )
@@ -143,6 +182,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
+            settingsStore: makeSettingsStore(),
             action: action,
             titleUpdater: DetailTitleUpdaterSpy()
         )
@@ -153,6 +193,36 @@ final class MeetingDetailViewModelTests: XCTestCase {
         await action.waitUntilStarted()
 
         XCTAssertEqual(viewModel.primaryAction, .archiving)
+        XCTAssertTrue(viewModel.isPerforming)
+
+        action.finish()
+        await operation.value
+    }
+
+    func testLocalSummaryShowsSavedWhenWorkflowReportsSummaryReady() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        let action = ProgressingDetailAction(progressState: .summaryReady)
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(
+                isNotionArchivingEnabled: false
+            ),
+            action: action,
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        let operation = Task {
+            await viewModel.performPrimaryAction()
+        }
+        await action.waitUntilStarted()
+
+        XCTAssertEqual(viewModel.primaryAction, .localSummarySaved)
         XCTAssertTrue(viewModel.isPerforming)
 
         action.finish()
@@ -171,6 +241,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
+            settingsStore: makeSettingsStore(),
             action: DetailActionSpy(),
             titleUpdater: updater
         )
@@ -250,6 +321,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
             let viewModel = MeetingDetailViewModel(
                 meetingID: meetingID,
                 repository: repository,
+                settingsStore: makeSettingsStore(),
                 action: DetailActionSpy(),
                 titleUpdater: updater
             )
@@ -277,6 +349,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
+            settingsStore: makeSettingsStore(),
             action: DetailActionSpy(),
             titleUpdater: DetailTitleUpdaterSpy(error: CancellationError())
         )
@@ -299,6 +372,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
+            settingsStore: makeSettingsStore(),
             action: DetailActionSpy(),
             titleUpdater: updater
         )
@@ -325,6 +399,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
+            settingsStore: makeSettingsStore(),
             action: action,
             titleUpdater: updater
         )
@@ -350,6 +425,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let viewModel = MeetingDetailViewModel(
             meetingID: meetingID,
             repository: repository,
+            settingsStore: makeSettingsStore(),
             action: action,
             titleUpdater: updater
         )
@@ -362,6 +438,21 @@ final class MeetingDetailViewModelTests: XCTestCase {
         XCTAssertTrue(updater.requests.isEmpty)
         action.finish()
         _ = await primaryAction.value
+    }
+
+    private func makeSettingsStore(
+        isNotionArchivingEnabled: Bool = true
+    ) -> AppSettingsStore {
+        let suiteName = "MeetingDetailViewModelTests-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            preconditionFailure("Unable to create isolated test defaults")
+        }
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let store = AppSettingsStore(defaults: defaults)
+        store.isNotionArchivingEnabled = isNotionArchivingEnabled
+        return store
     }
 }
 
@@ -468,9 +559,14 @@ private final class BlockingDetailAction: SummarizeAndArchiving {
 
 @MainActor
 private final class ProgressingDetailAction: SummarizeAndArchiving {
+    private let progressState: RecordingState
     private var started = false
     private var startWaiters: [CheckedContinuation<Void, Never>] = []
     private var finishContinuation: CheckedContinuation<Void, Never>?
+
+    init(progressState: RecordingState = .archiving) {
+        self.progressState = progressState
+    }
 
     func execute(meetingID: UUID) async throws {
         _ = meetingID
@@ -482,7 +578,7 @@ private final class ProgressingDetailAction: SummarizeAndArchiving {
         onProgress: @escaping (RecordingState) -> Void
     ) async throws {
         _ = meetingID
-        onProgress(.archiving)
+        onProgress(progressState)
         await waitForFinish()
     }
 
