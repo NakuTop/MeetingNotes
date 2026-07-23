@@ -6,6 +6,21 @@ enum MeetingCoordinatorError: Error, Equatable, Sendable {
     case operationInProgress
     case capturePipelineFailed
     case transcriptPersistenceFailed
+    case sourceDegradationPersistenceFailed
+}
+
+private enum SourceDegradationReason: Equatable, Sendable {
+    case appendFailed(AudioTrack)
+    case finishFailed(AudioTrack)
+
+    var errorCode: String {
+        switch self {
+        case let .appendFailed(track):
+            "source_track_write_failed_\(track.rawValue)"
+        case let .finishFailed(track):
+            "source_track_finish_failed_\(track.rawValue)"
+        }
+    }
 }
 
 struct MeetingCoordinatorSnapshot: Equatable, Sendable {
@@ -33,6 +48,7 @@ actor MeetingCoordinator {
     private var timeline: ActiveRecordingTimeline?
     private var streamTask: Task<Void, Never>?
     private var transcriptPersistenceTask: Task<Bool, Never>?
+    private var pendingSourceDegradations: [SourceDegradationReason] = []
     private var pendingTranscriptionSamples: [Float] = []
     private var nextTranscriptionSampleOffset = 0
     private var totalSampleCount = 0
@@ -316,6 +332,14 @@ actor MeetingCoordinator {
             await task?.value
             await finishSurvivingSourceWriters(meetingID: meetingID)
             _ = try await masterWriter.finish()
+            do {
+                try await persistPendingSourceDegradations(
+                    meetingID: meetingID
+                )
+            } catch {
+                throw MeetingCoordinatorError
+                    .sourceDegradationPersistenceFailed
+            }
             await enqueueRemainingTranscriptionSamples(using: transcriber)
             await transcriber.drain()
             await transcriber.finishUpdates()
@@ -336,7 +360,10 @@ actor MeetingCoordinator {
             resetAfterSuccessfulStop()
         } catch {
             finalActiveDuration = activeDuration
-            await transcriber.drain()
+            if error as? MeetingCoordinatorError
+                != .sourceDegradationPersistenceFailed {
+                await transcriber.drain()
+            }
             await transcriber.finishUpdates()
             _ = await transcriptPersistenceTask?.value
             releaseActiveResources()
@@ -444,9 +471,9 @@ actor MeetingCoordinator {
         guard let meetingID else {
             return
         }
-        try? await dependencies.repository.markSpeakerProcessingDegraded(
-            meetingID: meetingID,
-            errorCode: "source_track_write_failed_\(track.rawValue)"
+        await recordSourceDegradation(
+            .appendFailed(track),
+            meetingID: meetingID
         )
     }
 
@@ -458,11 +485,33 @@ actor MeetingCoordinator {
             do {
                 _ = try await writer.finish()
             } catch {
-                try? await dependencies.repository.markSpeakerProcessingDegraded(
-                    meetingID: meetingID,
-                    errorCode: "source_track_finish_failed_\(track.rawValue)"
+                await recordSourceDegradation(
+                    .finishFailed(track),
+                    meetingID: meetingID
                 )
             }
+        }
+    }
+
+    private func recordSourceDegradation(
+        _ reason: SourceDegradationReason,
+        meetingID: UUID
+    ) async {
+        if !pendingSourceDegradations.contains(reason) {
+            pendingSourceDegradations.append(reason)
+        }
+        try? await persistPendingSourceDegradations(meetingID: meetingID)
+    }
+
+    private func persistPendingSourceDegradations(
+        meetingID: UUID
+    ) async throws {
+        while let reason = pendingSourceDegradations.first {
+            try await dependencies.repository.markSpeakerProcessingDegraded(
+                meetingID: meetingID,
+                errorCode: reason.errorCode
+            )
+            pendingSourceDegradations.removeFirst()
         }
     }
 
@@ -505,6 +554,7 @@ actor MeetingCoordinator {
         timeline = nil
         streamTask = nil
         transcriptPersistenceTask = nil
+        pendingSourceDegradations.removeAll(keepingCapacity: true)
         pendingTranscriptionSamples.removeAll(keepingCapacity: true)
         nextTranscriptionSampleOffset = 0
         totalSampleCount = 0
@@ -547,6 +597,7 @@ actor MeetingCoordinator {
         timeline = nil
         streamTask = nil
         transcriptPersistenceTask = nil
+        pendingSourceDegradations.removeAll(keepingCapacity: true)
         pendingTranscriptionSamples.removeAll(keepingCapacity: true)
         nextTranscriptionSampleOffset = 0
         totalSampleCount = 0

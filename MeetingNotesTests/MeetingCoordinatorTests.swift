@@ -491,6 +491,130 @@ final class MeetingCoordinatorTests: XCTestCase {
         )
     }
 
+    func testSourceDegradationPersistenceRetriesBeforeFinalization() async throws {
+        let fixture = makeFixture(
+            packets: [
+                makeOnlinePacket(index: 0),
+                makeOnlinePacket(index: 1)
+            ],
+            writerFailsAppendTracks: [.microphone],
+            repositoryDegradationFailures: 1
+        )
+
+        let meetingID = try await fixture.coordinator.start(mode: .online)
+        for _ in 0..<1_000 {
+            let attempts = await fixture.repository
+                .degradationPersistenceAttemptCount()
+            let masterFrameCount = await fixture.writer(for: .master)
+                .writtenFrames()
+                .count
+            if attempts == 1, masterFrameCount == 2 {
+                break
+            }
+            await Task.yield()
+        }
+
+        let attemptsBeforeStop = await fixture.repository
+            .degradationPersistenceAttemptCount()
+        let codesBeforeStop = await fixture.repository
+            .savedDegradationCodes()
+        XCTAssertEqual(attemptsBeforeStop, 1)
+        XCTAssertTrue(codesBeforeStop.isEmpty)
+
+        try await fixture.coordinator.stop()
+
+        let attempts = await fixture.repository
+            .degradationPersistenceAttemptCount()
+        let codes = await fixture.repository.savedDegradationCodes()
+        let persistedState = await fixture.repository.savedState(for: meetingID)
+        let finalization = await fixture.repository.finalization()
+        XCTAssertEqual(attempts, 2)
+        XCTAssertEqual(codes, ["source_track_write_failed_microphone"])
+        XCTAssertEqual(persistedState, .ready)
+        XCTAssertNotNil(finalization)
+    }
+
+    func testPersistentSourceDegradationPersistenceFailureBlocksFinalization() async throws {
+        let fixture = makeFixture(
+            packets: [makeOnlinePacket(index: 0)],
+            writerFailsAppendTracks: [.microphone],
+            repositoryDegradationFailures: 2
+        )
+
+        let meetingID = try await fixture.coordinator.start(mode: .online)
+        for _ in 0..<1_000 {
+            if await fixture.repository
+                .degradationPersistenceAttemptCount() == 1 {
+                break
+            }
+            await Task.yield()
+        }
+        await fixture.events.removeAll()
+
+        do {
+            try await fixture.coordinator.stop()
+            XCTFail("Expected degradation persistence failure")
+        } catch {
+            XCTAssertEqual(
+                error as? MeetingCoordinatorError,
+                .sourceDegradationPersistenceFailed
+            )
+        }
+
+        let events = await fixture.events.values()
+        let snapshot = await fixture.coordinator.snapshot()
+        let attempts = await fixture.repository
+            .degradationPersistenceAttemptCount()
+        let persistedState = await fixture.repository.savedState(for: meetingID)
+        let codes = await fixture.repository.savedDegradationCodes()
+        let finalization = await fixture.repository.finalization()
+        let canDelete = await fixture.coordinator.canDeleteMeeting(id: meetingID)
+        let masterFinishCount = await fixture.writer(for: .master)
+            .finishCallCount()
+        let microphoneFinishCount = await fixture.writer(for: .microphone)
+            .finishCallCount()
+        let systemFinishCount = await fixture.writer(for: .system)
+            .finishCallCount()
+        XCTAssertEqual(attempts, 2)
+        XCTAssertTrue(codes.isEmpty)
+        XCTAssertNil(finalization)
+        XCTAssertFalse(events.contains("transcriber.drain"))
+        XCTAssertFalse(events.contains("repository.finalize"))
+        XCTAssertEqual(snapshot.state, .finalizing)
+        XCTAssertEqual(snapshot.meetingID, meetingID)
+        XCTAssertFalse(snapshot.captureFailed)
+        XCTAssertEqual(persistedState, .finalizing)
+        XCTAssertTrue(canDelete)
+        XCTAssertEqual(masterFinishCount, 1)
+        XCTAssertEqual(microphoneFinishCount, 1)
+        XCTAssertEqual(systemFinishCount, 1)
+    }
+
+    func testSourceFinishFailurePersistsDegradationAndStillFinalizesMaster() async throws {
+        let fixture = makeFixture(
+            writerFailsFinishTracks: [.microphone]
+        )
+
+        let meetingID = try await fixture.coordinator.start(mode: .online)
+        try await fixture.coordinator.stop()
+
+        let codes = await fixture.repository.savedDegradationCodes()
+        let persistedState = await fixture.repository.savedState(for: meetingID)
+        let finalization = await fixture.repository.finalization()
+        let masterFinishCount = await fixture.writer(for: .master)
+            .finishCallCount()
+        let microphoneFinishCount = await fixture.writer(for: .microphone)
+            .finishCallCount()
+        let systemFinishCount = await fixture.writer(for: .system)
+            .finishCallCount()
+        XCTAssertEqual(codes, ["source_track_finish_failed_microphone"])
+        XCTAssertEqual(persistedState, .ready)
+        XCTAssertNotNil(finalization)
+        XCTAssertEqual(masterFinishCount, 1)
+        XCTAssertEqual(microphoneFinishCount, 1)
+        XCTAssertEqual(systemFinishCount, 1)
+    }
+
     func testOnlineStopFinishesSourceWritersBeforePostProcessing() async throws {
         let fixture = makeFixture()
         try await fixture.coordinator.start(mode: .online)
@@ -809,6 +933,7 @@ final class MeetingCoordinatorTests: XCTestCase {
         writerFailsAppendTracks: Set<AudioTrack> = [],
         writerFailsFinishTracks: Set<AudioTrack> = [],
         writerFactoryFailsForTrack: AudioTrack? = nil,
+        repositoryDegradationFailures: Int = 0,
         repositoryFailsFinalizingUpdate: Bool = false,
         repositoryFailsFinalize: Bool = false,
         captureSuspendsPause: Bool = false,
@@ -846,6 +971,7 @@ final class MeetingCoordinatorTests: XCTestCase {
         )
         let repository = FakeCoordinatorRepository(
             events: events,
+            degradationFailures: repositoryDegradationFailures,
             failsFinalizingUpdate: repositoryFailsFinalizingUpdate,
             failsFinalize: repositoryFailsFinalize
         )
@@ -930,6 +1056,7 @@ private struct CoordinatorFixture {
 private enum CoordinatorTestError: Error, Equatable {
     case captureStart
     case repositoryUpdate
+    case repositoryDegradation
     case writerAppend
     case writerFactory
     case writerFinish
@@ -1238,20 +1365,24 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
     }
 
     private let events: CoordinatorEventLog
+    private var remainingDegradationFailures: Int
     private let failsFinalizingUpdate: Bool
     private let failsFinalize: Bool
     private var meetings: [SavedMeeting] = []
     private var bookmarks: [TimeInterval] = []
     private var transcripts: [TranscriptDraft] = []
     private var degradationCodes: [String] = []
+    private var degradationPersistenceAttempts = 0
     private var savedFinalization: Finalization?
 
     init(
         events: CoordinatorEventLog,
+        degradationFailures: Int,
         failsFinalizingUpdate: Bool,
         failsFinalize: Bool
     ) {
         self.events = events
+        remainingDegradationFailures = degradationFailures
         self.failsFinalizingUpdate = failsFinalizingUpdate
         self.failsFinalize = failsFinalize
     }
@@ -1302,6 +1433,11 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
         errorCode: String
     ) async throws {
         _ = meetingID
+        degradationPersistenceAttempts += 1
+        if remainingDegradationFailures > 0 {
+            remainingDegradationFailures -= 1
+            throw CoordinatorTestError.repositoryDegradation
+        }
         degradationCodes.append(errorCode)
     }
 
@@ -1338,6 +1474,10 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
 
     func savedDegradationCodes() -> [String] {
         degradationCodes
+    }
+
+    func degradationPersistenceAttemptCount() -> Int {
+        degradationPersistenceAttempts
     }
 
     func finalization() -> Finalization? {
