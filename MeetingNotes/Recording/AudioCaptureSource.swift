@@ -1,7 +1,7 @@
 import Foundation
 
 protocol AudioCaptureSource: Sendable {
-    func start() async throws -> AsyncThrowingStream<CapturedAudioFrame, Error>
+    func start() async throws -> AsyncThrowingStream<CapturedAudioPacket, Error>
     func pause() async throws
     func resume() async throws
     func stop() async

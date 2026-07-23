@@ -278,26 +278,88 @@ final class ScreenAudioCaptureConfigurationTests: XCTestCase {
 
     func testBuilds16kTranscriptionPayloadWithoutChanging48kStorage() throws {
         let builder = ScreenAudioTranscriptionFrameBuilder()
-        let storage = CapturedAudioFrame(
+        let master = CapturedAudioFrame(
             timestamp: 0.5,
             sampleRate: PCMConverter.playbackSampleRate,
             samples: Array(repeating: 0.2, count: 4_800)
         )
+        let microphone = CapturedAudioFrame(
+            timestamp: 0.5,
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: Array(repeating: 0.1, count: 4_800)
+        )
+        let system = CapturedAudioFrame(
+            timestamp: 0.5,
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: Array(repeating: 0.3, count: 4_800)
+        )
+        let storage = CapturedAudioPacket(
+            master: master,
+            sourceFrames: [
+                .microphone: microphone,
+                .system: system,
+            ]
+        )
 
         let output = try builder.build(from: storage)
 
-        XCTAssertEqual(output.timestamp, 0.5)
-        XCTAssertEqual(output.sampleRate, 48_000)
-        XCTAssertEqual(output.samples, storage.samples)
-        XCTAssertEqual(output.transcriptionSampleRate, 16_000)
+        XCTAssertEqual(output.master.timestamp, 0.5)
+        XCTAssertEqual(output.master.sampleRate, 48_000)
+        XCTAssertEqual(output.master.samples, master.samples)
+        XCTAssertEqual(output.master.transcriptionSampleRate, 16_000)
         let transcriptionSamples = try XCTUnwrap(
-            output.transcriptionSamples
+            output.master.transcriptionSamples
         )
         XCTAssertEqual(transcriptionSamples.count, 1_600)
         XCTAssertEqual(
             transcriptionSamples[transcriptionSamples.count / 2],
             0.2,
             accuracy: 0.001
+        )
+        XCTAssertEqual(output.sourceFrames[.microphone], microphone)
+        XCTAssertEqual(output.sourceFrames[.system], system)
+        XCTAssertNil(output.sourceFrames[.microphone]?.transcriptionSamples)
+        XCTAssertNil(output.sourceFrames[.system]?.transcriptionSamples)
+    }
+
+    func testPacketTimestampNormalizerUsesOneOriginForMasterAndSources() throws {
+        var normalizer = ScreenAudioPacketTimestampNormalizer()
+        let first = packet(timestamp: 3.5)
+        let second = packet(timestamp: 3.52)
+
+        let normalizedFirst = normalizer.normalize(first)
+        let normalizedSecond = normalizer.normalize(second)
+
+        XCTAssertEqual(normalizedFirst.master.timestamp, 0)
+        XCTAssertEqual(
+            normalizedFirst.sourceFrames[.microphone]?.timestamp,
+            0
+        )
+        XCTAssertEqual(normalizedFirst.sourceFrames[.system]?.timestamp, 0)
+        XCTAssertEqual(
+            normalizedSecond.master.timestamp,
+            0.02,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(
+                normalizedSecond.sourceFrames[.microphone]?.timestamp
+            ),
+            0.02,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(normalizedSecond.sourceFrames[.system]?.timestamp),
+            0.02,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            normalizedSecond.sourceFrames[.microphone]?.sampleRate,
+            48_000
+        )
+        XCTAssertEqual(
+            normalizedSecond.sourceFrames[.system]?.sampleRate,
+            48_000
         )
     }
 
@@ -354,6 +416,29 @@ final class ScreenAudioCaptureConfigurationTests: XCTestCase {
             sampleRate: 16_000,
             channelCount: 1,
             samples: [sample]
+        )
+    }
+
+    private func packet(timestamp: TimeInterval) -> CapturedAudioPacket {
+        let master = CapturedAudioFrame(
+            timestamp: timestamp,
+            sampleRate: 48_000,
+            samples: [0.5]
+        )
+        return CapturedAudioPacket(
+            master: master,
+            sourceFrames: [
+                .microphone: CapturedAudioFrame(
+                    timestamp: timestamp,
+                    sampleRate: 48_000,
+                    samples: [0.2]
+                ),
+                .system: CapturedAudioFrame(
+                    timestamp: timestamp,
+                    sampleRate: 48_000,
+                    samples: [0.3]
+                ),
+            ]
         )
     }
 }

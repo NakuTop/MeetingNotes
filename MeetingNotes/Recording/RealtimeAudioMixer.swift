@@ -39,27 +39,33 @@ actor RealtimeAudioMixer {
             }
         }
 
-        func mixedSamples() -> [Float] {
-            let mixedSamples = microphoneSums.indices.map { index in
-                let microphone = microphoneCounts[index] > 0
-                    ? microphoneSums[index] / Float(microphoneCounts[index])
-                    : nil
-                let system = systemCounts[index] > 0
-                    ? systemSums[index] / Float(systemCounts[index])
-                    : nil
-                let mixed: Float
-                switch (microphone, system) {
-                case let (.some(microphone), .some(system)):
-                    mixed = system + microphone
-                case let (.some(microphone), .none):
-                    mixed = microphone
-                case let (.none, .some(system)):
-                    mixed = system
-                case (.none, .none):
-                    mixed = 0
-                }
-                return mixed
+        func sourceSamples(
+            for source: RealtimeAudioSource
+        ) -> [Float] {
+            let sums: [Float]
+            let counts: [Int]
+            switch source {
+            case .microphone:
+                sums = microphoneSums
+                counts = microphoneCounts
+            case .system:
+                sums = systemSums
+                counts = systemCounts
             }
+            return sums.indices.map { index in
+                guard counts[index] > 0 else { return 0 }
+                return sums[index] / Float(counts[index])
+            }
+        }
+
+        func mixedSamples(
+            microphoneSamples: [Float],
+            systemSamples: [Float]
+        ) -> [Float] {
+            let mixedSamples = zip(
+                microphoneSamples,
+                systemSamples
+            ).map(+)
             let containsMicrophone = microphoneCounts.contains { $0 > 0 }
             let containsSystem = systemCounts.contains { $0 > 0 }
             guard containsMicrophone,
@@ -93,7 +99,7 @@ actor RealtimeAudioMixer {
     func ingest(
         _ frame: CapturedAudioFrame,
         source: RealtimeAudioSource
-    ) throws -> [CapturedAudioFrame] {
+    ) throws -> [CapturedAudioPacket] {
         guard abs(frame.sampleRate - Self.sampleRate) < 0.001 else {
             throw RealtimeAudioMixerError.unsupportedSampleRate(frame.sampleRate)
         }
@@ -148,34 +154,34 @@ actor RealtimeAudioMixer {
         return emitReadyWindows()
     }
 
-    func flush() -> [CapturedAudioFrame] {
+    func flush() -> [CapturedAudioPacket] {
         guard let firstWindow = nextWindowIndex,
               let lastWindow = buckets.keys.max() else {
             reset()
             return []
         }
-        var result: [CapturedAudioFrame] = []
+        var result: [CapturedAudioPacket] = []
         for windowIndex in firstWindow...lastWindow {
-            if let frame = makeFrame(windowIndex: windowIndex) {
-                result.append(frame)
+            if let packet = makePacket(windowIndex: windowIndex) {
+                result.append(packet)
             }
         }
         reset()
         return result
     }
 
-    private func emitReadyWindows() -> [CapturedAudioFrame] {
+    private func emitReadyWindows() -> [CapturedAudioPacket] {
         guard let watermark = emissionWatermark() else {
             return []
         }
-        var result: [CapturedAudioFrame] = []
+        var result: [CapturedAudioPacket] = []
         while let windowIndex = nextWindowIndex {
             let lastSampleInWindow = ((windowIndex + 1) * windowSampleCount) - 1
             guard lastSampleInWindow <= watermark else {
                 break
             }
-            if let frame = makeFrame(windowIndex: windowIndex) {
-                result.append(frame)
+            if let packet = makePacket(windowIndex: windowIndex) {
+                result.append(packet)
             }
             nextWindowIndex = windowIndex + 1
         }
@@ -194,15 +200,40 @@ actor RealtimeAudioMixer {
         return max(minimum, maximum - holdbackSampleCount)
     }
 
-    private func makeFrame(windowIndex: Int) -> CapturedAudioFrame? {
+    private func makePacket(
+        windowIndex: Int
+    ) -> CapturedAudioPacket? {
         guard let bucket = buckets.removeValue(forKey: windowIndex) else {
             return nil
         }
-        return CapturedAudioFrame(
-            timestamp: Double(windowIndex * windowSampleCount) / Self.sampleRate,
+        let timestamp = Double(windowIndex * windowSampleCount) / Self.sampleRate
+        let microphoneSamples = bucket.sourceSamples(for: .microphone)
+        let systemSamples = bucket.sourceSamples(for: .system)
+        let master = CapturedAudioFrame(
+            timestamp: timestamp,
             sampleRate: Self.sampleRate,
             channelCount: 1,
-            samples: bucket.mixedSamples()
+            samples: bucket.mixedSamples(
+                microphoneSamples: microphoneSamples,
+                systemSamples: systemSamples
+            )
+        )
+        return CapturedAudioPacket(
+            master: master,
+            sourceFrames: [
+                .microphone: CapturedAudioFrame(
+                    timestamp: timestamp,
+                    sampleRate: Self.sampleRate,
+                    channelCount: 1,
+                    samples: microphoneSamples
+                ),
+                .system: CapturedAudioFrame(
+                    timestamp: timestamp,
+                    sampleRate: Self.sampleRate,
+                    channelCount: 1,
+                    samples: systemSamples
+                ),
+            ]
         )
     }
 

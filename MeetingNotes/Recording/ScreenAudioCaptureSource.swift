@@ -365,8 +365,50 @@ final class ScreenAudioTranscriptionFrameBuilder: @unchecked Sendable {
         )
     }
 
+    func build(
+        from storagePacket: CapturedAudioPacket
+    ) throws -> CapturedAudioPacket {
+        CapturedAudioPacket(
+            master: try build(from: storagePacket.master),
+            sourceFrames: storagePacket.sourceFrames
+        )
+    }
+
     func reset() {
         converter.reset()
+    }
+}
+
+struct ScreenAudioPacketTimestampNormalizer {
+    private var origin: TimeInterval?
+
+    mutating func normalize(
+        _ packet: CapturedAudioPacket
+    ) -> CapturedAudioPacket {
+        if origin == nil {
+            origin = packet.master.timestamp
+        }
+        let origin = origin ?? packet.master.timestamp
+        return CapturedAudioPacket(
+            master: normalize(packet.master, relativeTo: origin),
+            sourceFrames: packet.sourceFrames.mapValues {
+                normalize($0, relativeTo: origin)
+            }
+        )
+    }
+
+    private func normalize(
+        _ frame: CapturedAudioFrame,
+        relativeTo origin: TimeInterval
+    ) -> CapturedAudioFrame {
+        CapturedAudioFrame(
+            timestamp: max(0, frame.timestamp - origin),
+            sampleRate: frame.sampleRate,
+            channelCount: frame.channelCount,
+            samples: frame.samples,
+            transcriptionSamples: frame.transcriptionSamples,
+            transcriptionSampleRate: frame.transcriptionSampleRate
+        )
     }
 }
 
@@ -384,8 +426,8 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
     )
     private var stream: SCStream?
     private var relay: ScreenAudioStreamRelay?
-    private var continuation: AsyncThrowingStream<CapturedAudioFrame, Error>.Continuation?
-    private var outputTimestampOrigin: TimeInterval?
+    private var continuation: AsyncThrowingStream<CapturedAudioPacket, Error>.Continuation?
+    private var outputTimestampNormalizer = ScreenAudioPacketTimestampNormalizer()
     private var frameSynchronizer: ScreenAudioFrameSynchronizer?
 
     init(
@@ -399,7 +441,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         self.transcriptionFrameBuilder = transcriptionFrameBuilder
     }
 
-    func start() async throws -> AsyncThrowingStream<CapturedAudioFrame, Error> {
+    func start() async throws -> AsyncThrowingStream<CapturedAudioPacket, Error> {
         guard stream == nil else {
             throw AudioCaptureError.alreadyRunning
         }
@@ -429,9 +471,9 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             exceptingWindows: []
         )
         let configuration = ScreenAudioCaptureConfiguration.makeStreamConfiguration()
-        let streamPair = AsyncThrowingStream<CapturedAudioFrame, Error>.makeStream()
+        let streamPair = AsyncThrowingStream<CapturedAudioPacket, Error>.makeStream()
         continuation = streamPair.continuation
-        outputTimestampOrigin = nil
+        outputTimestampNormalizer = ScreenAudioPacketTimestampNormalizer()
         frameSynchronizer = ScreenAudioFrameSynchronizer(
             sessionStartedAt: ProcessInfo.processInfo.systemUptime
         )
@@ -544,7 +586,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         continuation = nil
         self.stream = nil
         self.relay = nil
-        outputTimestampOrigin = nil
+        outputTimestampNormalizer = ScreenAudioPacketTimestampNormalizer()
         frameSynchronizer = nil
     }
 
@@ -594,29 +636,12 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         }
     }
 
-    private func normalizeOutputTimestamp(
-        _ frame: CapturedAudioFrame
-    ) -> CapturedAudioFrame {
-        if outputTimestampOrigin == nil {
-            outputTimestampOrigin = frame.timestamp
-        }
-        let origin = outputTimestampOrigin ?? frame.timestamp
-        return CapturedAudioFrame(
-            timestamp: max(0, frame.timestamp - origin),
-            sampleRate: frame.sampleRate,
-            channelCount: frame.channelCount,
-            samples: frame.samples,
-            transcriptionSamples: frame.transcriptionSamples,
-            transcriptionSampleRate: frame.transcriptionSampleRate
-        )
-    }
-
     private func yieldMixedFrames(
-        _ frames: [CapturedAudioFrame]
+        _ packets: [CapturedAudioPacket]
     ) throws {
-        for frame in frames {
-            let output = try transcriptionFrameBuilder.build(from: frame)
-            continuation?.yield(normalizeOutputTimestamp(output))
+        for packet in packets {
+            let output = try transcriptionFrameBuilder.build(from: packet)
+            continuation?.yield(outputTimestampNormalizer.normalize(output))
         }
     }
 
@@ -646,7 +671,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         continuation = nil
         stream = nil
         relay = nil
-        outputTimestampOrigin = nil
+        outputTimestampNormalizer = ScreenAudioPacketTimestampNormalizer()
         frameSynchronizer = nil
     }
 }

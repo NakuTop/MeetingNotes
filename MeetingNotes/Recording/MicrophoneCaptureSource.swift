@@ -11,7 +11,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
     private let engine: AVAudioEngine
     private let storageConverter: PCMConverter
     private let transcriptionConverter: PCMConverter
-    private var continuation: AsyncThrowingStream<CapturedAudioFrame, Error>.Continuation?
+    private var continuation: AsyncThrowingStream<CapturedAudioPacket, Error>.Continuation?
     private var isRunning = false
     private var isPaused = false
     private var firstSampleTime: AVAudioFramePosition?
@@ -30,7 +30,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         self.transcriptionConverter = transcriptionConverter
     }
 
-    func start() async throws -> AsyncThrowingStream<CapturedAudioFrame, Error> {
+    func start() async throws -> AsyncThrowingStream<CapturedAudioPacket, Error> {
         guard !isRunning else {
             throw AudioCaptureError.alreadyRunning
         }
@@ -42,7 +42,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
             throw AudioCaptureError.invalidInputFormat
         }
 
-        let streamPair = AsyncThrowingStream<CapturedAudioFrame, Error>.makeStream()
+        let streamPair = AsyncThrowingStream<CapturedAudioPacket, Error>.makeStream()
         continuation = streamPair.continuation
         isRunning = true
         isPaused = false
@@ -213,10 +213,16 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
                 transcriptionSamples: transcriptionFrame.samples,
                 transcriptionSampleRate: transcriptionFrame.sampleRate
             )
-            continuation?.yield(frame)
+            continuation?.yield(Self.packet(from: frame))
         } catch {
             finishAfterFailure(error)
         }
+    }
+
+    nonisolated static func packet(
+        from frame: CapturedAudioFrame
+    ) -> CapturedAudioPacket {
+        CapturedAudioPacket(master: frame, sourceFrames: [:])
     }
 
     private func finishAfterFailure(_ error: Error) {

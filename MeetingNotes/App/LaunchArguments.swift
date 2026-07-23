@@ -263,20 +263,23 @@ private struct UITestCaptureFactory: MeetingCaptureSourceFactory {
 
 private actor UITestCaptureSource: AudioCaptureSource {
     private var continuation:
-        AsyncThrowingStream<CapturedAudioFrame, Error>.Continuation?
+        AsyncThrowingStream<CapturedAudioPacket, Error>.Continuation?
 
-    func start() async throws -> AsyncThrowingStream<CapturedAudioFrame, Error> {
-        let pair = AsyncThrowingStream<CapturedAudioFrame, Error>.makeStream()
+    func start() async throws -> AsyncThrowingStream<CapturedAudioPacket, Error> {
+        let pair = AsyncThrowingStream<CapturedAudioPacket, Error>.makeStream()
         continuation = pair.continuation
         pair.continuation.yield(
-            CapturedAudioFrame(
-                timestamp: 0,
-                sampleRate: AudioSegmentManifest.transcriptionSampleRate,
-                samples: Array(
-                    repeating: 0.1,
-                    count: MeetingCoordinator
-                        .productionTranscriptionChunkSampleCount
-                )
+            CapturedAudioPacket(
+                master: CapturedAudioFrame(
+                    timestamp: 0,
+                    sampleRate: AudioSegmentManifest.transcriptionSampleRate,
+                    samples: Array(
+                        repeating: 0.1,
+                        count: MeetingCoordinator
+                            .productionTranscriptionChunkSampleCount
+                    )
+                ),
+                sourceFrames: [:]
             )
         )
         return pair.stream

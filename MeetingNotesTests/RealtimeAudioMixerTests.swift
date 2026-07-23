@@ -20,7 +20,7 @@ final class RealtimeAudioMixerTests: XCTestCase {
 
         let window = try XCTUnwrap(emitted.first)
         XCTAssertEqual(emitted.count, 1)
-        XCTAssertEqual(window.samples.count, 960)
+        XCTAssertEqual(window.master.samples.count, 960)
     }
 
     func testIngestsFrameAcrossMultipleDefaultWindows() async throws {
@@ -34,10 +34,10 @@ final class RealtimeAudioMixerTests: XCTestCase {
         )
 
         XCTAssertEqual(emitted.count, 2)
-        assertSamples(emitted[0].samples, equalTo: firstWindow)
-        assertSamples(emitted[1].samples, equalTo: secondWindow)
-        XCTAssertEqual(emitted[0].timestamp, 0, accuracy: 0.000_001)
-        XCTAssertEqual(emitted[1].timestamp, 0.02, accuracy: 0.000_001)
+        assertSamples(emitted[0].master.samples, equalTo: firstWindow)
+        assertSamples(emitted[1].master.samples, equalTo: secondWindow)
+        XCTAssertEqual(emitted[0].master.timestamp, 0, accuracy: 0.000_001)
+        XCTAssertEqual(emitted[1].master.timestamp, 0.02, accuracy: 0.000_001)
     }
 
     func testSkipsSamplesForEmittedWindowAndKeepsNewWindow() async throws {
@@ -59,10 +59,10 @@ final class RealtimeAudioMixerTests: XCTestCase {
         XCTAssertTrue(emitted.isEmpty)
         let frame = try XCTUnwrap(remainder.first)
         assertSamples(
-            frame.samples,
+            frame.master.samples,
             equalTo: [0.3, 0.4] + Array(repeating: 0, count: 958)
         )
-        XCTAssertEqual(frame.timestamp, 0.02, accuracy: 0.000_001)
+        XCTAssertEqual(frame.master.timestamp, 0.02, accuracy: 0.000_001)
     }
 
     func testPreservesSystemSignalWhileAddingAudibleMicrophone() async throws {
@@ -79,7 +79,44 @@ final class RealtimeAudioMixerTests: XCTestCase {
 
         XCTAssertTrue(first.isEmpty)
         XCTAssertEqual(second.count, 1)
-        assertSamples(second[0].samples, equalTo: [0.8, 0.6, -0.8, -0.6])
+        assertSamples(
+            second[0].master.samples,
+            equalTo: [0.8, 0.6, -0.8, -0.6]
+        )
+        assertSamples(
+            try XCTUnwrap(second[0].sourceFrames[.microphone]).samples,
+            equalTo: [0.2, 0.4, -0.2, -0.4]
+        )
+        assertSamples(
+            try XCTUnwrap(second[0].sourceFrames[.system]).samples,
+            equalTo: [0.6, 0.2, -0.6, -0.2]
+        )
+    }
+
+    func testFillsMissingOnlineSourceWithAlignedSilence() async throws {
+        let mixer = RealtimeAudioMixer(
+            windowSampleCount: 4,
+            holdbackWindowCount: 1
+        )
+
+        let emitted = try await mixer.ingest(
+            frame(samples: [0.1, 0.2, 0.3, 0.4, -0.1, -0.2, -0.3, -0.4]),
+            source: .microphone
+        )
+
+        let packet = try XCTUnwrap(emitted.first)
+        let microphone = try XCTUnwrap(
+            packet.sourceFrames[.microphone]
+        )
+        let system = try XCTUnwrap(packet.sourceFrames[.system])
+        XCTAssertEqual(microphone.timestamp, packet.master.timestamp)
+        XCTAssertEqual(system.timestamp, packet.master.timestamp)
+        XCTAssertEqual(microphone.sampleRate, RealtimeAudioMixer.sampleRate)
+        XCTAssertEqual(system.sampleRate, RealtimeAudioMixer.sampleRate)
+        XCTAssertEqual(microphone.samples.count, packet.master.samples.count)
+        XCTAssertEqual(system.samples.count, packet.master.samples.count)
+        assertSamples(microphone.samples, equalTo: [0.1, 0.2, 0.3, 0.4])
+        assertSamples(system.samples, equalTo: [0, 0, 0, 0])
     }
 
     func testDoesNotAmplifyMicrophoneNoiseWhilePreservingSystemAudio() async throws {
@@ -96,7 +133,7 @@ final class RealtimeAudioMixerTests: XCTestCase {
 
         XCTAssertEqual(emitted.count, 1)
         assertSamples(
-            emitted[0].samples,
+            emitted[0].master.samples,
             equalTo: [0.403, 0.297, -0.397, -0.303]
         )
     }
@@ -115,7 +152,7 @@ final class RealtimeAudioMixerTests: XCTestCase {
 
         XCTAssertEqual(emitted.count, 1)
         assertSamples(
-            emitted[0].samples,
+            emitted[0].master.samples,
             equalTo: [0.003, -0.003, 0.002, -0.002]
         )
     }
@@ -143,14 +180,14 @@ final class RealtimeAudioMixerTests: XCTestCase {
         )
 
         let mixed = try XCTUnwrap(emitted.first)
-        XCTAssertEqual(mixed.samples.count, converted.samples.count)
+        XCTAssertEqual(mixed.master.samples.count, converted.samples.count)
         XCTAssertEqual(
             converted.samples.map(abs).max() ?? 0,
             0.003,
             accuracy: 0.000_001
         )
         XCTAssertEqual(
-            mixed.samples.map { abs($0 - 0.4) }.max() ?? 0,
+            mixed.master.samples.map { abs($0 - 0.4) }.max() ?? 0,
             0.003,
             accuracy: 0.000_001
         )
@@ -169,12 +206,20 @@ final class RealtimeAudioMixerTests: XCTestCase {
 
         let frame = try XCTUnwrap(emitted.first)
         XCTAssertEqual(
-            try XCTUnwrap(frame.samples.map(abs).max()),
+            try XCTUnwrap(frame.master.samples.map(abs).max()),
             0.98,
             accuracy: 0.000_001
         )
-        XCTAssertEqual(frame.samples[2], 0.28, accuracy: 0.000_001)
-        XCTAssertEqual(frame.samples[3], -0.28, accuracy: 0.000_001)
+        XCTAssertEqual(frame.master.samples[2], 0.28, accuracy: 0.000_001)
+        XCTAssertEqual(frame.master.samples[3], -0.28, accuracy: 0.000_001)
+        assertSamples(
+            try XCTUnwrap(frame.sourceFrames[.microphone]).samples,
+            equalTo: [0.7, -0.7, 0.2, -0.2]
+        )
+        assertSamples(
+            try XCTUnwrap(frame.sourceFrames[.system]).samples,
+            equalTo: [0.7, -0.7, 0.2, -0.2]
+        )
     }
 
     func testKeepsSingleAvailableSource() async throws {
@@ -190,9 +235,15 @@ final class RealtimeAudioMixerTests: XCTestCase {
         let flushed = await singleSourceMixer.flush()
 
         XCTAssertEqual(emitted.count, 1)
-        assertSamples(emitted[0].samples, equalTo: [0.1, 0.2, 0.3, 0.4])
+        assertSamples(
+            emitted[0].master.samples,
+            equalTo: [0.1, 0.2, 0.3, 0.4]
+        )
         XCTAssertEqual(flushed.count, 1)
-        assertSamples(flushed[0].samples, equalTo: [-0.1, -0.2, -0.3, -0.4])
+        assertSamples(
+            flushed[0].master.samples,
+            equalTo: [-0.1, -0.2, -0.3, -0.4]
+        )
     }
 
     func testLeavesSingleSourceWindowUnchangedWhenPeakExceedsLimit() async throws {
@@ -207,7 +258,7 @@ final class RealtimeAudioMixerTests: XCTestCase {
         )
 
         let frame = try XCTUnwrap(emitted.first)
-        assertSamples(frame.samples, equalTo: [2, -2, 4, -4])
+        assertSamples(frame.master.samples, equalTo: [2, -2, 4, -4])
     }
 
     func testAlignsJitteredStartsIntoFixedWindows() async throws {
@@ -238,15 +289,21 @@ final class RealtimeAudioMixerTests: XCTestCase {
 
         XCTAssertEqual(firstWindow.count, 1)
         XCTAssertTrue(secondIngest.isEmpty)
-        XCTAssertEqual(firstWindow[0].timestamp, 0, accuracy: 0.000_001)
-        assertSamples(firstWindow[0].samples, equalTo: [0.98, 0.98, 0.98, 0.98])
+        XCTAssertEqual(firstWindow[0].master.timestamp, 0, accuracy: 0.000_001)
+        assertSamples(
+            firstWindow[0].master.samples,
+            equalTo: [0.98, 0.98, 0.98, 0.98]
+        )
         XCTAssertEqual(remainder.count, 1)
         XCTAssertEqual(
-            remainder[0].timestamp,
+            remainder[0].master.timestamp,
             4 / RealtimeAudioMixer.sampleRate,
             accuracy: 0.000_001
         )
-        assertSamples(remainder[0].samples, equalTo: [0.98, 0.98, 0.98, 0.98])
+        assertSamples(
+            remainder[0].master.samples,
+            equalTo: [0.98, 0.98, 0.98, 0.98]
+        )
     }
 
     private func frame(

@@ -324,12 +324,12 @@ actor MeetingCoordinator {
     }
 
     private func makeStreamTask(
-        _ stream: AsyncThrowingStream<CapturedAudioFrame, Error>
+        _ stream: AsyncThrowingStream<CapturedAudioPacket, Error>
     ) -> Task<Void, Never> {
         Task { [weak self] in
             do {
-                for try await frame in stream {
-                    try await self?.consume(frame)
+                for try await packet in stream {
+                    try await self?.consume(packet.master)
                 }
             } catch {
                 await self?.handleCaptureFailure()

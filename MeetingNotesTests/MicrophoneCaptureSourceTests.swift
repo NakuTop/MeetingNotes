@@ -2,6 +2,20 @@ import XCTest
 @testable import MeetingNotes
 
 final class MicrophoneCaptureSourceTests: XCTestCase {
+    func testWrapsOfflineFrameAsMasterWithoutDuplicateSourceTrack() {
+        let frame = CapturedAudioFrame(
+            timestamp: 0.25,
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: [0.1, -0.2]
+        )
+
+        let packet = MicrophoneCaptureSource.packet(from: frame)
+
+        XCTAssertEqual(packet.master, frame)
+        XCTAssertTrue(packet.sourceFrames.isEmpty)
+        requireSendable(packet)
+    }
+
     func testFinishAndWaitDrainsAcceptedBuffersInStrictOrder() async {
         let gate = MicrophoneDrainTestGate()
         let recorder = MicrophoneDrainRecorder()
@@ -76,6 +90,10 @@ final class MicrophoneCaptureSourceTests: XCTestCase {
         let overflowCount = overflow.count()
         XCTAssertEqual(completedValues, [1, 2, 3])
         XCTAssertEqual(overflowCount, 1)
+    }
+
+    private func requireSendable<T: Sendable>(_ value: T) {
+        _ = value
     }
 }
 

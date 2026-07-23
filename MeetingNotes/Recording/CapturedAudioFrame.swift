@@ -24,3 +24,8 @@ struct CapturedAudioFrame: Equatable, Sendable {
         self.transcriptionSampleRate = transcriptionSampleRate
     }
 }
+
+struct CapturedAudioPacket: Equatable, Sendable {
+    let master: CapturedAudioFrame
+    let sourceFrames: [AudioTrack: CapturedAudioFrame]
+}

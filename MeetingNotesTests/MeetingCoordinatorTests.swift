@@ -736,7 +736,7 @@ private actor FakeCoordinatorCapture: AudioCaptureSource {
     private let failsToStart: Bool
     private let frames: [CapturedAudioFrame]
     private let suspendsPause: Bool
-    private var continuation: AsyncThrowingStream<CapturedAudioFrame, Error>.Continuation?
+    private var continuation: AsyncThrowingStream<CapturedAudioPacket, Error>.Continuation?
     private var pauseContinuation: CheckedContinuation<Void, Never>?
 
     init(
@@ -751,15 +751,17 @@ private actor FakeCoordinatorCapture: AudioCaptureSource {
         self.suspendsPause = suspendsPause
     }
 
-    func start() async throws -> AsyncThrowingStream<CapturedAudioFrame, Error> {
+    func start() async throws -> AsyncThrowingStream<CapturedAudioPacket, Error> {
         await events.append("capture.start")
         if failsToStart {
             throw CoordinatorTestError.captureStart
         }
-        let pair = AsyncThrowingStream<CapturedAudioFrame, Error>.makeStream()
+        let pair = AsyncThrowingStream<CapturedAudioPacket, Error>.makeStream()
         continuation = pair.continuation
         for frame in frames {
-            continuation?.yield(frame)
+            continuation?.yield(
+                CapturedAudioPacket(master: frame, sourceFrames: [:])
+            )
         }
         return pair.stream
     }
