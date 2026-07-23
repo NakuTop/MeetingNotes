@@ -297,9 +297,11 @@ private actor UITestCaptureSource: AudioCaptureSource {
 private struct UITestWriterFactory: MeetingAudioWriterFactory {
     func makeWriter(
         meetingID: UUID,
+        track: AudioTrack,
         sampleRate: Double
     ) async throws -> any MeetingAudioWriting {
         _ = meetingID
+        _ = track
         _ = sampleRate
         return UITestWriter()
     }

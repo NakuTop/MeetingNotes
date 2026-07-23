@@ -27,7 +27,8 @@ actor MeetingCoordinator {
     private var meetingID: UUID?
     private var mode: MeetingMode?
     private var capture: (any AudioCaptureSource)?
-    private var writer: (any MeetingAudioWriting)?
+    private var masterWriter: (any MeetingAudioWriting)?
+    private var sourceWriters: [AudioTrack: any MeetingAudioWriting] = [:]
     private var transcriber: (any MeetingTranscriptionQueueing)?
     private var timeline: ActiveRecordingTimeline?
     private var streamTask: Task<Void, Never>?
@@ -73,7 +74,8 @@ actor MeetingCoordinator {
         }
         return !lifecycleOperationInProgress
             && capture == nil
-            && writer == nil
+            && masterWriter == nil
+            && sourceWriters.isEmpty
             && transcriber == nil
             && timeline == nil
             && streamTask == nil
@@ -103,7 +105,8 @@ actor MeetingCoordinator {
 
         var newMeetingID: UUID?
         var newCapture: (any AudioCaptureSource)?
-        var newWriter: (any MeetingAudioWriting)?
+        var newMasterWriter: (any MeetingAudioWriting)?
+        var newSourceWriters: [AudioTrack: any MeetingAudioWriting] = [:]
         var newTranscriber: (any MeetingTranscriptionQueueing)?
 
         do {
@@ -118,11 +121,22 @@ actor MeetingCoordinator {
             )
             newMeetingID = createdID
             let writerSampleRate = PCMConverter.playbackSampleRate
-            let createdWriter = try await dependencies.writerFactory.makeWriter(
+            let createdMasterWriter = try await dependencies.writerFactory.makeWriter(
                 meetingID: createdID,
+                track: .master,
                 sampleRate: writerSampleRate
             )
-            newWriter = createdWriter
+            newMasterWriter = createdMasterWriter
+            if mode == .online {
+                for track in [AudioTrack.microphone, .system] {
+                    newSourceWriters[track] = try await dependencies.writerFactory
+                        .makeWriter(
+                            meetingID: createdID,
+                            track: track,
+                            sampleRate: writerSampleRate
+                        )
+                }
+            }
             let createdTranscriber = try await dependencies.transcriptionFactory
                 .makeQueue()
             newTranscriber = createdTranscriber
@@ -142,7 +156,8 @@ actor MeetingCoordinator {
             meetingID = createdID
             self.mode = mode
             capture = createdCapture
-            writer = createdWriter
+            masterWriter = createdMasterWriter
+            sourceWriters = newSourceWriters
             transcriber = createdTranscriber
             timeline = ActiveRecordingTimeline(startedAt: timelineStart)
             stateMachine = recordingMachine
@@ -175,8 +190,13 @@ actor MeetingCoordinator {
             if let newCapture {
                 await newCapture.stop()
             }
-            if let newWriter {
-                _ = try? await newWriter.finish()
+            for track in [AudioTrack.microphone, .system] {
+                if let writer = newSourceWriters[track] {
+                    _ = try? await writer.finish()
+                }
+            }
+            if let newMasterWriter {
+                _ = try? await newMasterWriter.finish()
             }
             if let newTranscriber {
                 await newTranscriber.drain()
@@ -275,7 +295,7 @@ actor MeetingCoordinator {
         try finalizingMachine.send(.stop)
         guard let meetingID,
               let capture,
-              let writer,
+              let masterWriter,
               let transcriber,
               let timeline else {
             throw MeetingCoordinatorError.sessionUnavailable
@@ -294,7 +314,8 @@ actor MeetingCoordinator {
             let task = streamTask
             await capture.stop()
             await task?.value
-            _ = try await writer.finish()
+            await finishSurvivingSourceWriters(meetingID: meetingID)
+            _ = try await masterWriter.finish()
             await enqueueRemainingTranscriptionSamples(using: transcriber)
             await transcriber.drain()
             await transcriber.finishUpdates()
@@ -329,7 +350,7 @@ actor MeetingCoordinator {
         Task { [weak self] in
             do {
                 for try await packet in stream {
-                    try await self?.consume(packet.master)
+                    try await self?.consume(packet)
                 }
             } catch {
                 await self?.handleCaptureFailure()
@@ -337,19 +358,37 @@ actor MeetingCoordinator {
         }
     }
 
-    private func consume(_ frame: CapturedAudioFrame) async throws {
-        guard let writer, let transcriber else {
+    private func consume(_ packet: CapturedAudioPacket) async throws {
+        guard let masterWriter, let transcriber else {
             return
         }
+        let frame = packet.master
         let writerTimestamp = Double(totalSampleCount)
             / frame.sampleRate
-        let storageFrame = CapturedAudioFrame(
-            timestamp: writerTimestamp,
-            sampleRate: frame.sampleRate,
-            channelCount: frame.channelCount,
-            samples: frame.samples
+        try await masterWriter.append(
+            storageFrame(from: frame, timestamp: writerTimestamp)
         )
-        try await writer.append(storageFrame)
+
+        for track in [AudioTrack.microphone, .system] {
+            guard let sourceFrame = packet.sourceFrames[track],
+                  let writer = sourceWriters[track] else {
+                continue
+            }
+            do {
+                try await writer.append(
+                    storageFrame(
+                        from: sourceFrame,
+                        timestamp: writerTimestamp
+                    )
+                )
+            } catch {
+                await handleSourceWriterFailure(
+                    track: track,
+                    meetingID: meetingID
+                )
+            }
+        }
+
         totalSampleCount += frame.samples.count
         let transcriptionInput: [Float]
         if let samples = frame.transcriptionSamples {
@@ -379,6 +418,51 @@ actor MeetingCoordinator {
                 / AudioSegmentManifest.transcriptionSampleRate
             nextTranscriptionSampleOffset += chunk.count
             await transcriber.enqueue(samples: chunk, startingAt: startingAt)
+        }
+    }
+
+    private func storageFrame(
+        from frame: CapturedAudioFrame,
+        timestamp: TimeInterval
+    ) -> CapturedAudioFrame {
+        CapturedAudioFrame(
+            timestamp: timestamp,
+            sampleRate: frame.sampleRate,
+            channelCount: frame.channelCount,
+            samples: frame.samples
+        )
+    }
+
+    private func handleSourceWriterFailure(
+        track: AudioTrack,
+        meetingID: UUID?
+    ) async {
+        guard let writer = sourceWriters.removeValue(forKey: track) else {
+            return
+        }
+        _ = try? await writer.finish()
+        guard let meetingID else {
+            return
+        }
+        try? await dependencies.repository.markSpeakerProcessingDegraded(
+            meetingID: meetingID,
+            errorCode: "source_track_write_failed_\(track.rawValue)"
+        )
+    }
+
+    private func finishSurvivingSourceWriters(meetingID: UUID) async {
+        for track in [AudioTrack.microphone, .system] {
+            guard let writer = sourceWriters.removeValue(forKey: track) else {
+                continue
+            }
+            do {
+                _ = try await writer.finish()
+            } catch {
+                try? await dependencies.repository.markSpeakerProcessingDegraded(
+                    meetingID: meetingID,
+                    errorCode: "source_track_finish_failed_\(track.rawValue)"
+                )
+            }
         }
     }
 
@@ -415,7 +499,8 @@ actor MeetingCoordinator {
         meetingID = nil
         mode = nil
         capture = nil
-        writer = nil
+        masterWriter = nil
+        sourceWriters.removeAll(keepingCapacity: true)
         transcriber = nil
         timeline = nil
         streamTask = nil
@@ -431,7 +516,8 @@ actor MeetingCoordinator {
     private func resetStrandedFinalizationBeforeNewStart() {
         guard stateMachine.state == .finalizing,
               capture == nil,
-              writer == nil,
+              masterWriter == nil,
+              sourceWriters.isEmpty,
               transcriber == nil,
               timeline == nil,
               streamTask == nil,
@@ -455,7 +541,8 @@ actor MeetingCoordinator {
 
     private func releaseActiveResources() {
         capture = nil
-        writer = nil
+        masterWriter = nil
+        sourceWriters.removeAll(keepingCapacity: true)
         transcriber = nil
         timeline = nil
         streamTask = nil

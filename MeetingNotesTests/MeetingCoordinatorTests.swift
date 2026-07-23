@@ -17,22 +17,38 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertTrue(savedMeeting.speakerDiarizationRequested)
     }
 
-    func testOnlineMeetingCreatesWriterAtPlaybackSampleRate() async throws {
+    func testOnlineMeetingCreatesOneWriterPerTrackAtPlaybackSampleRate() async throws {
         let fixture = makeFixture()
 
         try await fixture.coordinator.start(mode: .online)
 
-        let sampleRates = await fixture.writerSampleRates.values()
-        XCTAssertEqual(sampleRates, [PCMConverter.playbackSampleRate])
+        let requests = await fixture.writerRequests.values()
+        XCTAssertEqual(
+            requests.map(\.track),
+            [.master, .microphone, .system]
+        )
+        XCTAssertEqual(
+            requests.map(\.sampleRate),
+            Array(repeating: PCMConverter.playbackSampleRate, count: 3)
+        )
+        XCTAssertEqual(
+            Set(requests.map { "\($0.meetingID.uuidString):\($0.track.rawValue)" })
+                .count,
+            3
+        )
     }
 
-    func testOfflineMeetingCreatesWriterAtPlaybackSampleRate() async throws {
+    func testOfflineMeetingCreatesOnlyMasterWriterAtPlaybackSampleRate() async throws {
         let fixture = makeFixture()
 
         try await fixture.coordinator.start(mode: .offline)
 
-        let sampleRates = await fixture.writerSampleRates.values()
-        XCTAssertEqual(sampleRates, [PCMConverter.playbackSampleRate])
+        let requests = await fixture.writerRequests.values()
+        XCTAssertEqual(requests.map(\.track), [.master])
+        XCTAssertEqual(
+            requests.map(\.sampleRate),
+            [PCMConverter.playbackSampleRate]
+        )
     }
 
     func testPermissionsMustBeAuthorizedBeforeRecording() async throws {
@@ -84,6 +100,48 @@ final class MeetingCoordinatorTests: XCTestCase {
                 "repository.delete"
             ]
         )
+    }
+
+    func testOnlineStartFailureFinishesEveryCreatedWriterExactlyOnce() async throws {
+        let fixture = makeFixture(captureFailsToStart: true)
+
+        do {
+            try await fixture.coordinator.start(mode: .online)
+            XCTFail("Expected capture start failure")
+        } catch {
+            XCTAssertEqual(error as? CoordinatorTestError, .captureStart)
+        }
+
+        let masterFinishCount = await fixture.writer(for: .master)
+            .finishCallCount()
+        let microphoneFinishCount = await fixture.writer(for: .microphone)
+            .finishCallCount()
+        let systemFinishCount = await fixture.writer(for: .system)
+            .finishCallCount()
+        XCTAssertEqual(masterFinishCount, 1)
+        XCTAssertEqual(microphoneFinishCount, 1)
+        XCTAssertEqual(systemFinishCount, 1)
+    }
+
+    func testOnlineWriterCreationFailureFinishesOnlyCreatedWritersOnce() async throws {
+        let fixture = makeFixture(writerFactoryFailsForTrack: .system)
+
+        do {
+            try await fixture.coordinator.start(mode: .online)
+            XCTFail("Expected system writer creation failure")
+        } catch {
+            XCTAssertEqual(error as? CoordinatorTestError, .writerFactory)
+        }
+
+        let masterFinishCount = await fixture.writer(for: .master)
+            .finishCallCount()
+        let microphoneFinishCount = await fixture.writer(for: .microphone)
+            .finishCallCount()
+        let systemFinishCount = await fixture.writer(for: .system)
+            .finishCallCount()
+        XCTAssertEqual(masterFinishCount, 1)
+        XCTAssertEqual(microphoneFinishCount, 1)
+        XCTAssertEqual(systemFinishCount, 0)
     }
 
     func testPauseResumeAndBookmarkUseOnlyActiveTimeWithoutPanelMutation() async throws {
@@ -316,6 +374,150 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertEqual(chunks.map(\.samples), [[10, 11, 12, 13]])
     }
 
+    func testRoutesOnlineMasterAndSourceFramesAtMasterTimelineTimestamps() async throws {
+        let first = CapturedAudioPacket(
+            master: CapturedAudioFrame(
+                timestamp: 50,
+                sampleRate: 48_000,
+                samples: [1, 2, 3, 4],
+                transcriptionSamples: [1, 2],
+                transcriptionSampleRate: 16_000
+            ),
+            sourceFrames: [
+                .microphone: CapturedAudioFrame(
+                    timestamp: 51,
+                    sampleRate: 48_000,
+                    samples: [10, 11, 12, 13]
+                ),
+                .system: CapturedAudioFrame(
+                    timestamp: 52,
+                    sampleRate: 48_000,
+                    samples: [20, 21, 22, 23]
+                )
+            ]
+        )
+        let second = CapturedAudioPacket(
+            master: CapturedAudioFrame(
+                timestamp: 60,
+                sampleRate: 48_000,
+                samples: [5, 6],
+                transcriptionSamples: [3],
+                transcriptionSampleRate: 16_000
+            ),
+            sourceFrames: [
+                .microphone: CapturedAudioFrame(
+                    timestamp: 61,
+                    sampleRate: 48_000,
+                    samples: [14, 15]
+                ),
+                .system: CapturedAudioFrame(
+                    timestamp: 62,
+                    sampleRate: 48_000,
+                    samples: [24, 25]
+                )
+            ]
+        )
+        let fixture = makeFixture(
+            packets: [first, second],
+            transcriptionChunkSampleCount: 100
+        )
+
+        try await fixture.coordinator.start(mode: .online)
+        try await fixture.coordinator.stop()
+
+        let expectedTimestamps: [TimeInterval] = [0, 4.0 / 48_000]
+        let master = await fixture.writer(for: .master).writtenFrames()
+        let microphone = await fixture.writer(for: .microphone).writtenFrames()
+        let system = await fixture.writer(for: .system).writtenFrames()
+        XCTAssertEqual(master.map(\.timestamp), expectedTimestamps)
+        XCTAssertEqual(microphone.map(\.timestamp), expectedTimestamps)
+        XCTAssertEqual(system.map(\.timestamp), expectedTimestamps)
+        XCTAssertEqual(master.map(\.samples), [[1, 2, 3, 4], [5, 6]])
+        XCTAssertEqual(
+            microphone.map(\.samples),
+            [[10, 11, 12, 13], [14, 15]]
+        )
+        XCTAssertEqual(system.map(\.samples), [[20, 21, 22, 23], [24, 25]])
+    }
+
+    func testSourceAppendFailureDegradesOnlyThatTrackAndMasterKeepsWriting() async throws {
+        let packets = [
+            makeOnlinePacket(index: 0),
+            makeOnlinePacket(index: 1)
+        ]
+        let fixture = makeFixture(
+            packets: packets,
+            writerFailsAppendTracks: [.microphone],
+            writerFailsFinishTracks: [.microphone]
+        )
+
+        try await fixture.coordinator.start(mode: .online)
+        for _ in 0..<1_000 {
+            if await fixture.writer(for: .master).writtenFrames().count == 2 {
+                break
+            }
+            await Task.yield()
+        }
+
+        let recordingSnapshot = await fixture.coordinator.snapshot()
+        let degradationCodes = await fixture.repository.savedDegradationCodes()
+        let masterSamples = await fixture.writer(for: .master)
+            .writtenFrames()
+            .map(\.samples)
+        let microphoneAppendCount = await fixture.writer(for: .microphone)
+            .appendCallCount()
+        let microphoneFinishCount = await fixture.writer(for: .microphone)
+            .finishCallCount()
+        let systemSamples = await fixture.writer(for: .system)
+            .writtenFrames()
+            .map(\.samples)
+        XCTAssertFalse(recordingSnapshot.captureFailed)
+        XCTAssertEqual(masterSamples, [[0], [1]])
+        XCTAssertEqual(microphoneAppendCount, 1)
+        XCTAssertEqual(microphoneFinishCount, 1)
+        XCTAssertEqual(systemSamples, [[20], [21]])
+        XCTAssertEqual(
+            degradationCodes,
+            ["source_track_write_failed_microphone"]
+        )
+
+        try await fixture.coordinator.stop()
+        let finalMicrophoneFinishCount = await fixture.writer(for: .microphone)
+            .finishCallCount()
+        XCTAssertEqual(
+            finalMicrophoneFinishCount,
+            1,
+            "Removed source writers must not be finished again during stop"
+        )
+    }
+
+    func testOnlineStopFinishesSourceWritersBeforePostProcessing() async throws {
+        let fixture = makeFixture()
+        try await fixture.coordinator.start(mode: .online)
+        await fixture.events.removeAll()
+
+        try await fixture.coordinator.stop()
+
+        let events = await fixture.events.values()
+        let microphoneFinish = try XCTUnwrap(
+            events.firstIndex(of: "writer.microphone.finish")
+        )
+        let systemFinish = try XCTUnwrap(
+            events.firstIndex(of: "writer.system.finish")
+        )
+        let transcriptionDrain = try XCTUnwrap(
+            events.firstIndex(of: "transcriber.drain")
+        )
+        XCTAssertLessThan(microphoneFinish, transcriptionDrain)
+        XCTAssertLessThan(systemFinish, transcriptionDrain)
+        let microphoneFinishCount = await fixture.writer(for: .microphone)
+            .finishCallCount()
+        let systemFinishCount = await fixture.writer(for: .system)
+            .finishCallCount()
+        XCTAssertEqual(microphoneFinishCount, 1)
+        XCTAssertEqual(systemFinishCount, 1)
+    }
+
     func testDeletionSafetyAllowsOnlyReleasedOrUnrelatedSessions() async throws {
         let fixture = makeFixture(repositoryFailsFinalize: true)
         let meetingID = try await fixture.coordinator.start(mode: .offline)
@@ -458,11 +660,20 @@ final class MeetingCoordinatorTests: XCTestCase {
 
         let snapshot = await fixture.coordinator.snapshot()
         let persistedState = await fixture.repository.savedState(for: meetingID)
+        let masterFinishCount = await fixture.writer(for: .master)
+            .finishCallCount()
+        let microphoneFinishCount = await fixture.writer(for: .microphone)
+            .finishCallCount()
+        let systemFinishCount = await fixture.writer(for: .system)
+            .finishCallCount()
         XCTAssertEqual(snapshot.state, .finalizing)
         XCTAssertEqual(snapshot.meetingID, meetingID)
         XCTAssertEqual(snapshot.mode, .online)
         XCTAssertEqual(snapshot.activeTime, 25, accuracy: 0.001)
         XCTAssertEqual(persistedState, .finalizing)
+        XCTAssertEqual(masterFinishCount, 1)
+        XCTAssertEqual(microphoneFinishCount, 1)
+        XCTAssertEqual(systemFinishCount, 1)
     }
 
     func testStartsNewMeetingAfterFinalizeFailureWithoutDeletingRecoveryRecord() async throws {
@@ -554,6 +765,35 @@ final class MeetingCoordinatorTests: XCTestCase {
         try await fixture.coordinator.stop()
     }
 
+    private func makeOnlinePacket(index: Int) -> CapturedAudioPacket {
+        let timestamp = Double(index)
+        let sample = Float(index)
+        let master = CapturedAudioFrame(
+            timestamp: timestamp,
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: [sample],
+            transcriptionSamples: [sample],
+            transcriptionSampleRate: 16_000
+        )
+        let microphone = CapturedAudioFrame(
+            timestamp: timestamp,
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: [Float(10 + index)]
+        )
+        let system = CapturedAudioFrame(
+            timestamp: timestamp,
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: [Float(20 + index)]
+        )
+        return CapturedAudioPacket(
+            master: master,
+            sourceFrames: [
+                .microphone: microphone,
+                .system: system
+            ]
+        )
+    }
+
     private func makeFixture(
         permissions: [CapturePermission: CapturePermissionStatus] = [
             .microphone: .authorized,
@@ -561,10 +801,14 @@ final class MeetingCoordinatorTests: XCTestCase {
         ],
         captureFailsToStart: Bool = false,
         frames: [CapturedAudioFrame] = [],
+        packets: [CapturedAudioPacket]? = nil,
         transcriptionChunkSampleCount: Int? = nil,
         transcriberEmitsDrafts: Bool = false,
         writerFailsAppend: Bool = false,
         writerFailsFinish: Bool = false,
+        writerFailsAppendTracks: Set<AudioTrack> = [],
+        writerFailsFinishTracks: Set<AudioTrack> = [],
+        writerFactoryFailsForTrack: AudioTrack? = nil,
         repositoryFailsFinalizingUpdate: Bool = false,
         repositoryFailsFinalize: Bool = false,
         captureSuspendsPause: Bool = false,
@@ -572,17 +816,29 @@ final class MeetingCoordinatorTests: XCTestCase {
     ) -> CoordinatorFixture {
         let events = CoordinatorEventLog()
         let captureModes = CoordinatorModeLog()
-        let writerSampleRates = CoordinatorSampleRateLog()
+        let writerRequests = CoordinatorWriterRequestLog()
         let capture = FakeCoordinatorCapture(
             events: events,
             failsToStart: captureFailsToStart,
-            frames: frames,
+            packets: packets ?? frames.map {
+                CapturedAudioPacket(master: $0, sourceFrames: [:])
+            },
             suspendsPause: captureSuspendsPause
         )
-        let writer = FakeCoordinatorWriter(
-            events: events,
-            failsAppend: writerFailsAppend,
-            failsFinish: writerFailsFinish
+        let writers = Dictionary(
+            uniqueKeysWithValues: AudioTrack.allCases.map { track in
+                (
+                    track,
+                    FakeCoordinatorWriter(
+                        track: track,
+                        events: events,
+                        failsAppend: writerFailsAppendTracks.contains(track)
+                            || (track == .master && writerFailsAppend),
+                        failsFinish: writerFailsFinishTracks.contains(track)
+                            || (track == .master && writerFailsFinish)
+                    )
+                )
+            }
         )
         let transcriber = FakeCoordinatorTranscriber(
             events: events,
@@ -609,8 +865,9 @@ final class MeetingCoordinatorTests: XCTestCase {
                 modes: captureModes
             ),
             writerFactory: FakeCoordinatorWriterFactory(
-                writer: writer,
-                sampleRates: writerSampleRates
+                writers: writers,
+                requests: writerRequests,
+                failsForTrack: writerFactoryFailsForTrack
             ),
             transcriptionFactory: FakeCoordinatorTranscriptionFactory(
                 transcriber: transcriber
@@ -633,9 +890,9 @@ final class MeetingCoordinatorTests: XCTestCase {
             coordinator: coordinator,
             events: events,
             captureModes: captureModes,
-            writerSampleRates: writerSampleRates,
+            writerRequests: writerRequests,
             capture: capture,
-            writer: writer,
+            writers: writers,
             transcriber: transcriber,
             repository: repository,
             speakerDiarizationPreference: speakerDiarizationPreference,
@@ -649,20 +906,32 @@ private struct CoordinatorFixture {
     let coordinator: MeetingCoordinator
     let events: CoordinatorEventLog
     let captureModes: CoordinatorModeLog
-    let writerSampleRates: CoordinatorSampleRateLog
+    let writerRequests: CoordinatorWriterRequestLog
     let capture: FakeCoordinatorCapture
-    let writer: FakeCoordinatorWriter
+    let writers: [AudioTrack: FakeCoordinatorWriter]
     let transcriber: FakeCoordinatorTranscriber
     let repository: FakeCoordinatorRepository
     let speakerDiarizationPreference: MutableSpeakerDiarizationPreference
     let panel: FakeCoordinatorPanel
     let clock: ManualCoordinatorClock
+
+    var writer: FakeCoordinatorWriter {
+        writer(for: .master)
+    }
+
+    func writer(for track: AudioTrack) -> FakeCoordinatorWriter {
+        guard let writer = writers[track] else {
+            preconditionFailure("Missing fake writer for \(track)")
+        }
+        return writer
+    }
 }
 
 private enum CoordinatorTestError: Error, Equatable {
     case captureStart
     case repositoryUpdate
     case writerAppend
+    case writerFactory
     case writerFinish
     case repositoryFinalize
 }
@@ -695,15 +964,21 @@ private actor CoordinatorModeLog {
     }
 }
 
-private actor CoordinatorSampleRateLog {
-    private var sampleRates: [Double] = []
-
-    func append(_ sampleRate: Double) {
-        sampleRates.append(sampleRate)
+private actor CoordinatorWriterRequestLog {
+    struct Request: Equatable, Sendable {
+        let meetingID: UUID
+        let track: AudioTrack
+        let sampleRate: Double
     }
 
-    func values() -> [Double] {
-        sampleRates
+    private var requests: [Request] = []
+
+    func append(_ request: Request) {
+        requests.append(request)
+    }
+
+    func values() -> [Request] {
+        requests
     }
 }
 
@@ -734,7 +1009,7 @@ private struct FakeCoordinatorCaptureFactory: MeetingCaptureSourceFactory {
 private actor FakeCoordinatorCapture: AudioCaptureSource {
     private let events: CoordinatorEventLog
     private let failsToStart: Bool
-    private let frames: [CapturedAudioFrame]
+    private let packets: [CapturedAudioPacket]
     private let suspendsPause: Bool
     private var continuation: AsyncThrowingStream<CapturedAudioPacket, Error>.Continuation?
     private var pauseContinuation: CheckedContinuation<Void, Never>?
@@ -742,12 +1017,12 @@ private actor FakeCoordinatorCapture: AudioCaptureSource {
     init(
         events: CoordinatorEventLog,
         failsToStart: Bool,
-        frames: [CapturedAudioFrame],
+        packets: [CapturedAudioPacket],
         suspendsPause: Bool
     ) {
         self.events = events
         self.failsToStart = failsToStart
-        self.frames = frames
+        self.packets = packets
         self.suspendsPause = suspendsPause
     }
 
@@ -758,10 +1033,8 @@ private actor FakeCoordinatorCapture: AudioCaptureSource {
         }
         let pair = AsyncThrowingStream<CapturedAudioPacket, Error>.makeStream()
         continuation = pair.continuation
-        for frame in frames {
-            continuation?.yield(
-                CapturedAudioPacket(master: frame, sourceFrames: [:])
-            )
+        for packet in packets {
+            continuation?.yield(packet)
         }
         return pair.stream
     }
@@ -794,29 +1067,50 @@ private actor FakeCoordinatorCapture: AudioCaptureSource {
 }
 
 private struct FakeCoordinatorWriterFactory: MeetingAudioWriterFactory {
-    let writer: FakeCoordinatorWriter
-    let sampleRates: CoordinatorSampleRateLog
+    let writers: [AudioTrack: FakeCoordinatorWriter]
+    let requests: CoordinatorWriterRequestLog
+    let failsForTrack: AudioTrack?
 
-    func makeWriter(meetingID: UUID, sampleRate: Double) async throws -> any MeetingAudioWriting {
-        _ = meetingID
-        await sampleRates.append(sampleRate)
+    func makeWriter(
+        meetingID: UUID,
+        track: AudioTrack,
+        sampleRate: Double
+    ) async throws -> any MeetingAudioWriting {
+        await requests.append(
+            .init(
+                meetingID: meetingID,
+                track: track,
+                sampleRate: sampleRate
+            )
+        )
+        if failsForTrack == track {
+            throw CoordinatorTestError.writerFactory
+        }
+        guard let writer = writers[track] else {
+            preconditionFailure("Missing fake writer for \(track)")
+        }
         await writer.configure(expectedSampleRate: sampleRate)
         return writer
     }
 }
 
 private actor FakeCoordinatorWriter: MeetingAudioWriting {
+    private let track: AudioTrack
     private let events: CoordinatorEventLog
     private let failsAppend: Bool
     private let failsFinish: Bool
     private var expectedSampleRate: Double?
     private var frames: [CapturedAudioFrame] = []
+    private var appendCalls = 0
+    private var finishCalls = 0
 
     init(
+        track: AudioTrack,
         events: CoordinatorEventLog,
         failsAppend: Bool,
         failsFinish: Bool
     ) {
+        self.track = track
         self.events = events
         self.failsAppend = failsAppend
         self.failsFinish = failsFinish
@@ -827,6 +1121,7 @@ private actor FakeCoordinatorWriter: MeetingAudioWriting {
     }
 
     func append(_ frame: CapturedAudioFrame) async throws {
+        appendCalls += 1
         guard let expectedSampleRate,
               abs(frame.sampleRate - expectedSampleRate) < 0.001 else {
             throw CoordinatorTestError.writerAppend
@@ -838,7 +1133,11 @@ private actor FakeCoordinatorWriter: MeetingAudioWriting {
     }
 
     func finish() async throws -> AudioSegmentManifest {
-        await events.append("writer.finish")
+        finishCalls += 1
+        let event = track == .master
+            ? "writer.finish"
+            : "writer.\(track.rawValue).finish"
+        await events.append(event)
         if failsFinish {
             throw CoordinatorTestError.writerFinish
         }
@@ -847,6 +1146,14 @@ private actor FakeCoordinatorWriter: MeetingAudioWriting {
 
     func writtenFrames() -> [CapturedAudioFrame] {
         frames
+    }
+
+    func appendCallCount() -> Int {
+        appendCalls
+    }
+
+    func finishCallCount() -> Int {
+        finishCalls
     }
 }
 
@@ -936,6 +1243,7 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
     private var meetings: [SavedMeeting] = []
     private var bookmarks: [TimeInterval] = []
     private var transcripts: [TranscriptDraft] = []
+    private var degradationCodes: [String] = []
     private var savedFinalization: Finalization?
 
     init(
@@ -989,6 +1297,14 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
         transcripts.append(draft)
     }
 
+    func markSpeakerProcessingDegraded(
+        meetingID: UUID,
+        errorCode: String
+    ) async throws {
+        _ = meetingID
+        degradationCodes.append(errorCode)
+    }
+
     func finalizeMeeting(
         meetingID: UUID,
         endedAt: Date,
@@ -1018,6 +1334,10 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
 
     func savedTranscripts() -> [TranscriptDraft] {
         transcripts
+    }
+
+    func savedDegradationCodes() -> [String] {
+        degradationCodes
     }
 
     func finalization() -> Finalization? {

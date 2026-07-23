@@ -20,7 +20,11 @@ protocol MeetingAudioWriting: Sendable {
 extension SegmentedPCMWriter: MeetingAudioWriting {}
 
 protocol MeetingAudioWriterFactory: Sendable {
-    func makeWriter(meetingID: UUID, sampleRate: Double) async throws -> any MeetingAudioWriting
+    func makeWriter(
+        meetingID: UUID,
+        track: AudioTrack,
+        sampleRate: Double
+    ) async throws -> any MeetingAudioWriting
 }
 
 protocol MeetingTranscriptionQueueing: Sendable {
@@ -62,6 +66,10 @@ protocol MeetingLifecycleRepository: Sendable {
     func updateState(meetingID: UUID, state: RecordingState) async throws
     func appendBookmark(meetingID: UUID, timestamp: TimeInterval) async throws
     func appendTranscript(meetingID: UUID, draft: TranscriptDraft) async throws
+    func markSpeakerProcessingDegraded(
+        meetingID: UUID,
+        errorCode: String
+    ) async throws
     func finalizeMeeting(
         meetingID: UUID,
         endedAt: Date,
@@ -127,8 +135,17 @@ struct LiveMeetingCaptureFactory: MeetingCaptureSourceFactory {
 struct LiveMeetingAudioWriterFactory: MeetingAudioWriterFactory {
     let fileStore: MeetingFileStore
 
-    func makeWriter(meetingID: UUID, sampleRate: Double) async throws -> any MeetingAudioWriting {
-        try SegmentedPCMWriter(meetingID: meetingID, fileStore: fileStore, sampleRate: sampleRate)
+    func makeWriter(
+        meetingID: UUID,
+        track: AudioTrack,
+        sampleRate: Double
+    ) async throws -> any MeetingAudioWriting {
+        try SegmentedPCMWriter(
+            meetingID: meetingID,
+            fileStore: fileStore,
+            track: track,
+            sampleRate: sampleRate
+        )
     }
 }
 
@@ -221,6 +238,27 @@ final class MeetingRepositoryLifecycleAdapter: MeetingLifecycleRepository {
             end: draft.endTime,
             text: draft.text
         )
+    }
+
+    func markSpeakerProcessingDegraded(
+        meetingID: UUID,
+        errorCode: String
+    ) async throws {
+        let meeting = try repository.meeting(id: meetingID)
+        let previousState = meeting.speakerProcessingState
+        let previousErrorCode = meeting.speakerProcessingErrorCode
+        meeting.speakerProcessingState = .degraded
+        meeting.speakerProcessingErrorCode = errorCode
+        do {
+            try repository.updateMeetingState(
+                id: meetingID,
+                state: meeting.state
+            )
+        } catch {
+            meeting.speakerProcessingState = previousState
+            meeting.speakerProcessingErrorCode = previousErrorCode
+            throw error
+        }
     }
 
     func finalizeMeeting(
