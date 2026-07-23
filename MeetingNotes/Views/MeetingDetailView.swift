@@ -10,12 +10,40 @@ private struct MeetingPlaybackPreparationKey: Hashable {
     }
 }
 
+enum TranscriptDisclosurePolicy {
+    static func initialIsExpanded(hasSummary: Bool) -> Bool {
+        !hasSummary
+    }
+
+    static func shouldCollapse(
+        previouslyHadSummary: Bool,
+        hasSummary: Bool,
+        userHasInteracted: Bool
+    ) -> Bool {
+        !previouslyHadSummary && hasSummary && !userHasInteracted
+    }
+}
+
+private struct TranscriptDisclosureContext: Equatable {
+    let meetingID: UUID
+    let hasSummary: Bool
+
+    init(meeting: MeetingRecord) {
+        meetingID = meeting.id
+        hasSummary = meeting.summary != nil
+    }
+}
+
 struct MeetingDetailView: View {
     @State private var viewModel: MeetingDetailViewModel
     @State private var isEditingTitle = false
     @State private var titleDraft = ""
     @State private var renameTask: Task<Void, Never>?
     @State private var renameGeneration = 0
+    @State private var transcriptMeetingID: UUID?
+    @State private var transcriptIsExpanded = true
+    @State private var transcriptPreviouslyHadSummary = false
+    @State private var transcriptDisclosureUserHasInteracted = false
     @Bindable private var audioPlayerController: MeetingAudioPlayerController
     @FocusState private var isTitleFieldFocused: Bool
     private let onReturnHome: () -> Void
@@ -65,20 +93,29 @@ struct MeetingDetailView: View {
 
     private func detailContent(_ meeting: MeetingRecord) -> some View {
         let playbackKey = MeetingPlaybackPreparationKey(meeting: meeting)
+        let disclosureContext = TranscriptDisclosureContext(meeting: meeting)
         return ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 AdaptiveGlassCard {
                     header(meeting)
                 }
                 audioSection(meeting)
+                summarySection(meeting)
 
-                GroupBox("转录") {
-                    TranscriptView(
-                        transcripts: meeting.transcripts,
-                        bookmarks: meeting.bookmarks
-                    )
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 4)
+                GroupBox {
+                    DisclosureGroup(
+                        isExpanded: transcriptDisclosureBinding
+                    ) {
+                        TranscriptView(
+                            transcripts: meeting.transcripts,
+                            bookmarks: meeting.bookmarks
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 8)
+                    } label: {
+                        Text("完整转录内容")
+                            .font(.headline)
+                    }
                 }
 
                 GroupBox("书签") {
@@ -86,14 +123,15 @@ struct MeetingDetailView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 4)
                 }
-
-                summarySection(meeting)
             }
             .padding(24)
             .frame(maxWidth: 860, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
         .accessibilityIdentifier("meeting.detail")
+        .onChange(of: disclosureContext, initial: true) { _, context in
+            synchronizeTranscriptDisclosure(with: context)
+        }
         .task(id: playbackKey) {
             if playbackKey.isPlayable {
                 await audioPlayerController.prepare(
@@ -109,6 +147,38 @@ struct MeetingDetailView: View {
         .onDisappear {
             audioPlayerController.stop(meetingID: meeting.id)
         }
+    }
+
+    private var transcriptDisclosureBinding: Binding<Bool> {
+        Binding(
+            get: { transcriptIsExpanded },
+            set: { isExpanded in
+                transcriptIsExpanded = isExpanded
+                transcriptDisclosureUserHasInteracted = true
+            }
+        )
+    }
+
+    private func synchronizeTranscriptDisclosure(
+        with context: TranscriptDisclosureContext
+    ) {
+        guard transcriptMeetingID == context.meetingID else {
+            transcriptMeetingID = context.meetingID
+            transcriptIsExpanded = TranscriptDisclosurePolicy
+                .initialIsExpanded(hasSummary: context.hasSummary)
+            transcriptPreviouslyHadSummary = context.hasSummary
+            transcriptDisclosureUserHasInteracted = false
+            return
+        }
+
+        if TranscriptDisclosurePolicy.shouldCollapse(
+            previouslyHadSummary: transcriptPreviouslyHadSummary,
+            hasSummary: context.hasSummary,
+            userHasInteracted: transcriptDisclosureUserHasInteracted
+        ) {
+            transcriptIsExpanded = false
+        }
+        transcriptPreviouslyHadSummary = context.hasSummary
     }
 
     private func header(_ meeting: MeetingRecord) -> some View {
