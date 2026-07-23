@@ -2,6 +2,21 @@ import XCTest
 @testable import MeetingNotes
 
 final class MeetingCoordinatorTests: XCTestCase {
+    func testStartSnapshotsSpeakerDiarizationPreferenceForCreatedMeeting() async throws {
+        let fixture = makeFixture(speakerDiarizationEnabled: true)
+
+        let meetingID = try await fixture.coordinator.start(mode: .online)
+        fixture.speakerDiarizationPreference.isEnabled = false
+        let savedMeetings = await fixture.repository.savedMeetings()
+
+        let savedMeeting = try XCTUnwrap(
+            savedMeetings.first {
+                $0.id == meetingID
+            }
+        )
+        XCTAssertTrue(savedMeeting.speakerDiarizationRequested)
+    }
+
     func testOnlineMeetingCreatesWriterAtPlaybackSampleRate() async throws {
         let fixture = makeFixture()
 
@@ -552,7 +567,8 @@ final class MeetingCoordinatorTests: XCTestCase {
         writerFailsFinish: Bool = false,
         repositoryFailsFinalizingUpdate: Bool = false,
         repositoryFailsFinalize: Bool = false,
-        captureSuspendsPause: Bool = false
+        captureSuspendsPause: Bool = false,
+        speakerDiarizationEnabled: Bool = false
     ) -> CoordinatorFixture {
         let events = CoordinatorEventLog()
         let captureModes = CoordinatorModeLog()
@@ -582,6 +598,10 @@ final class MeetingCoordinatorTests: XCTestCase {
             date: Date(timeIntervalSince1970: 1_000),
             monotonic: 100
         )
+        let speakerDiarizationPreference =
+            MutableSpeakerDiarizationPreference(
+                isEnabled: speakerDiarizationEnabled
+            )
         let dependencies = MeetingCoordinatorDependencies(
             permissions: FakeCoordinatorPermissions(statuses: permissions),
             captureFactory: FakeCoordinatorCaptureFactory(
@@ -596,6 +616,7 @@ final class MeetingCoordinatorTests: XCTestCase {
                 transcriber: transcriber
             ),
             repository: repository,
+            speakerDiarizationPreference: speakerDiarizationPreference,
             panel: panel,
             clock: clock
         )
@@ -617,6 +638,7 @@ final class MeetingCoordinatorTests: XCTestCase {
             writer: writer,
             transcriber: transcriber,
             repository: repository,
+            speakerDiarizationPreference: speakerDiarizationPreference,
             panel: panel,
             clock: clock
         )
@@ -632,6 +654,7 @@ private struct CoordinatorFixture {
     let writer: FakeCoordinatorWriter
     let transcriber: FakeCoordinatorTranscriber
     let repository: FakeCoordinatorRepository
+    let speakerDiarizationPreference: MutableSpeakerDiarizationPreference
     let panel: FakeCoordinatorPanel
     let clock: ManualCoordinatorClock
 }
@@ -897,6 +920,7 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
         let id: UUID
         let mode: MeetingMode
         var state: RecordingState
+        var speakerDiarizationRequested = false
     }
 
     struct Finalization: Equatable, Sendable {
@@ -922,12 +946,21 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
         self.failsFinalize = failsFinalize
     }
 
-    func createMeeting(mode: MeetingMode, startedAt: Date) async throws -> UUID {
+    func createMeeting(
+        mode: MeetingMode,
+        startedAt: Date,
+        speakerDiarizationRequested: Bool
+    ) async throws -> UUID {
         _ = startedAt
         await events.append("repository.create")
         let meetingID = UUID()
         meetings.append(
-            SavedMeeting(id: meetingID, mode: mode, state: .preparing)
+            SavedMeeting(
+                id: meetingID,
+                mode: mode,
+                state: .preparing,
+                speakerDiarizationRequested: speakerDiarizationRequested
+            )
         )
         return meetingID
     }
@@ -995,6 +1028,34 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
 
     func savedState(for meetingID: UUID) -> RecordingState? {
         meetings.first(where: { $0.id == meetingID })?.state
+    }
+}
+
+private final class MutableSpeakerDiarizationPreference:
+    SpeakerDiarizationPreferenceReading,
+    @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedIsEnabled: Bool
+
+    init(isEnabled: Bool) {
+        storedIsEnabled = isEnabled
+    }
+
+    var isEnabled: Bool {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedIsEnabled
+        }
+        set {
+            lock.lock()
+            storedIsEnabled = newValue
+            lock.unlock()
+        }
+    }
+
+    var isSpeakerDiarizationEnabled: Bool {
+        isEnabled
     }
 }
 

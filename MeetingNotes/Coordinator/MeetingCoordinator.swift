@@ -108,9 +108,13 @@ actor MeetingCoordinator {
 
         do {
             let startedAt = await dependencies.clock.now()
+            let speakerDiarizationRequested = dependencies
+                .speakerDiarizationPreference
+                .isSpeakerDiarizationEnabled
             let createdID = try await dependencies.repository.createMeeting(
                 mode: mode,
-                startedAt: startedAt
+                startedAt: startedAt,
+                speakerDiarizationRequested: speakerDiarizationRequested
             )
             newMeetingID = createdID
             let writerSampleRate = PCMConverter.playbackSampleRate

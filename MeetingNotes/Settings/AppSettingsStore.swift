@@ -2,13 +2,17 @@ import Foundation
 import Observation
 
 @Observable
-final class AppSettingsStore: @unchecked Sendable {
+final class AppSettingsStore:
+    SpeakerDiarizationPreferenceReading,
+    @unchecked Sendable {
     static let defaultDeepSeekModel = "deepseek-v4-flash"
 
     private enum Key {
         static let deepSeekModel = "settings.deepSeekModel"
         static let notionParentPageURL = "settings.notionParentPageURL"
         static let notionArchivingEnabled = "settings.notionArchivingEnabled"
+        static let speakerDiarizationEnabled =
+            "settings.speakerDiarizationEnabled"
     }
 
     @ObservationIgnored
@@ -52,6 +56,18 @@ final class AppSettingsStore: @unchecked Sendable {
         set {
             withMutation(keyPath: \AppSettingsStore.isNotionArchivingEnabled) {
                 defaults.set(newValue, forKey: Key.notionArchivingEnabled)
+            }
+        }
+    }
+
+    var isSpeakerDiarizationEnabled: Bool {
+        get {
+            access(keyPath: \AppSettingsStore.isSpeakerDiarizationEnabled)
+            return defaults.bool(forKey: Key.speakerDiarizationEnabled)
+        }
+        set {
+            withMutation(keyPath: \AppSettingsStore.isSpeakerDiarizationEnabled) {
+                defaults.set(newValue, forKey: Key.speakerDiarizationEnabled)
             }
         }
     }

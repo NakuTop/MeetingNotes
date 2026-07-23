@@ -48,6 +48,8 @@ final class AppContainer {
     ) {
         self.repository = repository
         self.fileStore = fileStore
+        let settingsStore = settingsStore ?? AppSettingsStore()
+        self.settingsStore = settingsStore
 
         let controlRouter = MeetingControlRouter()
         self.controlRouter = controlRouter
@@ -69,6 +71,7 @@ final class AppContainer {
         let dependencies = coordinatorDependencies?(panelPresenter) ?? .live(
             repository: repository,
             fileStore: fileStore,
+            speakerDiarizationPreference: settingsStore,
             panel: panelPresenter,
             transcriptionService: transcriptionService
         )
@@ -106,8 +109,6 @@ final class AppContainer {
             recordingsURL: recordingsURL
         )
         self.libraryViewModel = libraryViewModel
-        let settingsStore = settingsStore ?? AppSettingsStore()
-        self.settingsStore = settingsStore
         let summarizeAndArchiveUseCase = SummarizeAndArchiveUseCase(
             repository: repository,
             credentialStore: credentialStore,

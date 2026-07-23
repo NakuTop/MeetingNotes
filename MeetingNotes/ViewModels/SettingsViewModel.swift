@@ -66,6 +66,7 @@ final class SettingsViewModel {
     var selectedModel = AppSettingsStore.defaultDeepSeekModel
     var notionParentPageURL = ""
     var isNotionArchivingEnabled = true
+    var isSpeakerDiarizationEnabled = false
 
     private(set) var availableModels = [
         AppSettingsStore.defaultDeepSeekModel
@@ -96,6 +97,8 @@ final class SettingsViewModel {
         selectedModel = settingsStore.deepSeekModel
         notionParentPageURL = settingsStore.notionParentPageURL
         isNotionArchivingEnabled = settingsStore.isNotionArchivingEnabled
+        isSpeakerDiarizationEnabled =
+            settingsStore.isSpeakerDiarizationEnabled
         if !availableModels.contains(selectedModel) {
             availableModels.append(selectedModel)
         }
@@ -136,6 +139,8 @@ final class SettingsViewModel {
             settingsStore.notionParentPageURL = notionParentPageURL
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             settingsStore.isNotionArchivingEnabled = isNotionArchivingEnabled
+            settingsStore.isSpeakerDiarizationEnabled =
+                isSpeakerDiarizationEnabled
             notionParentPageURL = settingsStore.notionParentPageURL
             selectedModel = settingsStore.deepSeekModel
             deepSeekAPIKeyInput = ""

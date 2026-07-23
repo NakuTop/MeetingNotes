@@ -68,7 +68,8 @@ final class MeetingRepository {
         mode: MeetingMode,
         startedAt: Date,
         title: String = MeetingRecord.defaultTitle,
-        audioManifestPath: String? = nil
+        audioManifestPath: String? = nil,
+        speakerDiarizationRequested: Bool = false
     ) throws -> UUID {
         let meeting = MeetingRecord(
             id: id,
@@ -78,7 +79,8 @@ final class MeetingRepository {
             startedAt: startedAt,
             audioManifestPath: audioManifestPath,
             createdAt: startedAt,
-            updatedAt: startedAt
+            updatedAt: startedAt,
+            speakerDiarizationRequested: speakerDiarizationRequested
         )
         context.insert(meeting)
         try saveContext()

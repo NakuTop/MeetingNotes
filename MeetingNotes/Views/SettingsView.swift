@@ -126,6 +126,27 @@ struct SettingsView: View {
                     }
                 }
 
+                AdaptiveGlassCard {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("试验功能")
+                            .font(.headline)
+
+                        Toggle(
+                            "FluidAudio 说话人分离",
+                            isOn: $viewModel.isSpeakerDiarizationEnabled
+                        )
+                        .accessibilityIdentifier(
+                            "settings.speakerDiarization.enabled"
+                        )
+
+                        Text(
+                            "默认关闭，所有分离均在本地运行。首次使用可能需要下载模型，并会增加会后处理时间。录音中修改只影响下一场会议。"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+
                 HStack(spacing: 12) {
                     ConnectionStateView(state: viewModel.saveState)
                     Spacer()

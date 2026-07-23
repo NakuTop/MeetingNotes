@@ -3,6 +3,35 @@ import XCTest
 
 @MainActor
 final class MeetingRepositoryTests: XCTestCase {
+    func testCreateMeetingDefaultsSpeakerProcessingToNotRequested() throws {
+        let repository = try MeetingRepository.inMemory()
+
+        let id = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 1_000)
+        )
+
+        let meeting = try repository.meeting(id: id)
+        XCTAssertFalse(meeting.speakerDiarizationRequested)
+        XCTAssertEqual(meeting.speakerProcessingState, .notRequested)
+        XCTAssertNil(meeting.speakerProcessingErrorCode)
+    }
+
+    func testCreateMeetingSnapshotsRequestedSpeakerDiarizationAsPending() throws {
+        let repository = try MeetingRepository.inMemory()
+
+        let id = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            speakerDiarizationRequested: true
+        )
+
+        let meeting = try repository.meeting(id: id)
+        XCTAssertTrue(meeting.speakerDiarizationRequested)
+        XCTAssertEqual(meeting.speakerProcessingState, .pending)
+        XCTAssertNil(meeting.speakerProcessingErrorCode)
+    }
+
     func testCreateAppendAndReloadCompleteMeeting() throws {
         let repository = try MeetingRepository.inMemory()
         let startedAt = Date(timeIntervalSince1970: 1_000)

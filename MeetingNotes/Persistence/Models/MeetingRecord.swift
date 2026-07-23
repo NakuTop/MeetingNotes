@@ -6,6 +6,14 @@ enum MeetingMode: String, Codable, CaseIterable, Equatable, Sendable {
     case online
 }
 
+enum SpeakerProcessingState: String, Codable, Equatable, Sendable {
+    case notRequested
+    case pending
+    case processing
+    case completed
+    case degraded
+}
+
 @Model
 final class MeetingRecord {
     static let defaultTitle = "未命名会议"
@@ -25,6 +33,10 @@ final class MeetingRecord {
     var notionPageID: String?
     var notionPageURL: String?
     var lastErrorCode: String?
+    var speakerDiarizationRequested = false
+    var speakerProcessingStateRawValue =
+        SpeakerProcessingState.notRequested.rawValue
+    var speakerProcessingErrorCode: String?
 
     @Relationship(deleteRule: .cascade, inverse: \TranscriptRecord.meeting)
     var transcripts: [TranscriptRecord] = []
@@ -52,6 +64,16 @@ final class MeetingRecord {
         pinnedAt != nil
     }
 
+    var speakerProcessingState: SpeakerProcessingState {
+        get {
+            SpeakerProcessingState(rawValue: speakerProcessingStateRawValue)
+                ?? .notRequested
+        }
+        set {
+            speakerProcessingStateRawValue = newValue.rawValue
+        }
+    }
+
     init(
         id: UUID = UUID(),
         title: String,
@@ -67,7 +89,10 @@ final class MeetingRecord {
         suggestedTitle: String? = nil,
         notionPageID: String? = nil,
         notionPageURL: String? = nil,
-        lastErrorCode: String? = nil
+        lastErrorCode: String? = nil,
+        speakerDiarizationRequested: Bool = false,
+        speakerProcessingState: SpeakerProcessingState? = nil,
+        speakerProcessingErrorCode: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -84,5 +109,9 @@ final class MeetingRecord {
         self.notionPageID = notionPageID
         self.notionPageURL = notionPageURL
         self.lastErrorCode = lastErrorCode
+        self.speakerDiarizationRequested = speakerDiarizationRequested
+        self.speakerProcessingState = speakerProcessingState
+            ?? (speakerDiarizationRequested ? .pending : .notRequested)
+        self.speakerProcessingErrorCode = speakerProcessingErrorCode
     }
 }

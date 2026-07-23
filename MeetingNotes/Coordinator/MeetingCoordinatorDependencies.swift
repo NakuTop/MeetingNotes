@@ -35,8 +35,21 @@ protocol MeetingTranscriptionQueueFactory: Sendable {
     func makeQueue() async throws -> any MeetingTranscriptionQueueing
 }
 
+protocol SpeakerDiarizationPreferenceReading: Sendable {
+    var isSpeakerDiarizationEnabled: Bool { get }
+}
+
+struct DisabledSpeakerDiarizationPreference:
+    SpeakerDiarizationPreferenceReading {
+    let isSpeakerDiarizationEnabled = false
+}
+
 protocol MeetingLifecycleRepository: Sendable {
-    func createMeeting(mode: MeetingMode, startedAt: Date) async throws -> UUID
+    func createMeeting(
+        mode: MeetingMode,
+        startedAt: Date,
+        speakerDiarizationRequested: Bool
+    ) async throws -> UUID
     func updateState(meetingID: UUID, state: RecordingState) async throws
     func appendBookmark(meetingID: UUID, timestamp: TimeInterval) async throws
     func appendTranscript(meetingID: UUID, draft: TranscriptDraft) async throws
@@ -64,6 +77,8 @@ struct MeetingCoordinatorDependencies: Sendable {
     let writerFactory: any MeetingAudioWriterFactory
     let transcriptionFactory: any MeetingTranscriptionQueueFactory
     let repository: any MeetingLifecycleRepository
+    let speakerDiarizationPreference:
+        any SpeakerDiarizationPreferenceReading
     let panel: any RecordingPanelPresenting
     let clock: any MeetingClock
 
@@ -73,6 +88,9 @@ struct MeetingCoordinatorDependencies: Sendable {
         writerFactory: any MeetingAudioWriterFactory,
         transcriptionFactory: any MeetingTranscriptionQueueFactory,
         repository: any MeetingLifecycleRepository,
+        speakerDiarizationPreference:
+            any SpeakerDiarizationPreferenceReading =
+                DisabledSpeakerDiarizationPreference(),
         panel: any RecordingPanelPresenting,
         clock: any MeetingClock
     ) {
@@ -81,6 +99,7 @@ struct MeetingCoordinatorDependencies: Sendable {
         self.writerFactory = writerFactory
         self.transcriptionFactory = transcriptionFactory
         self.repository = repository
+        self.speakerDiarizationPreference = speakerDiarizationPreference
         self.panel = panel
         self.clock = clock
     }
@@ -158,8 +177,16 @@ final class MeetingRepositoryLifecycleAdapter: MeetingLifecycleRepository {
         self.repository = repository
     }
 
-    func createMeeting(mode: MeetingMode, startedAt: Date) async throws -> UUID {
-        try repository.createMeeting(mode: mode, startedAt: startedAt)
+    func createMeeting(
+        mode: MeetingMode,
+        startedAt: Date,
+        speakerDiarizationRequested: Bool
+    ) async throws -> UUID {
+        try repository.createMeeting(
+            mode: mode,
+            startedAt: startedAt,
+            speakerDiarizationRequested: speakerDiarizationRequested
+        )
     }
 
     func updateState(meetingID: UUID, state: RecordingState) async throws {
@@ -225,6 +252,8 @@ extension MeetingCoordinatorDependencies {
     static func live(
         repository: MeetingRepository,
         fileStore: MeetingFileStore,
+        speakerDiarizationPreference:
+            any SpeakerDiarizationPreferenceReading,
         permissionSystem: any CapturePermissionSystem = LiveCapturePermissionSystem(),
         panel: any RecordingPanelPresenting = NoopRecordingPanelPresenter(),
         transcriptionService: any TranscriptionService =
@@ -239,6 +268,7 @@ extension MeetingCoordinatorDependencies {
                 service: transcriptionService
             ),
             repository: MeetingRepositoryLifecycleAdapter(repository: repository),
+            speakerDiarizationPreference: speakerDiarizationPreference,
             panel: panel,
             clock: SystemMeetingClock()
         )

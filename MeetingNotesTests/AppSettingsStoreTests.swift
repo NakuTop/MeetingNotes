@@ -3,6 +3,54 @@ import XCTest
 @testable import MeetingNotes
 
 final class AppSettingsStoreTests: XCTestCase {
+    func testSpeakerDiarizationDefaultsToDisabledWhenPreferenceIsMissing() throws {
+        let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let store = AppSettingsStore(defaults: defaults)
+
+        XCTAssertFalse(store.isSpeakerDiarizationEnabled)
+    }
+
+    func testEnabledSpeakerDiarizationPersistsAcrossStoreInstances() throws {
+        let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let first = AppSettingsStore(defaults: defaults)
+
+        first.isSpeakerDiarizationEnabled = true
+
+        let reloaded = AppSettingsStore(defaults: defaults)
+        XCTAssertTrue(reloaded.isSpeakerDiarizationEnabled)
+    }
+
+    func testSpeakerDiarizationMutationNotifiesObservationTracking() throws {
+        let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let store = AppSettingsStore(defaults: defaults)
+        let changeObserved = expectation(
+            description: "Speaker diarization preference change observed"
+        )
+
+        withObservationTracking {
+            _ = store.isSpeakerDiarizationEnabled
+        } onChange: {
+            changeObserved.fulfill()
+        }
+
+        store.isSpeakerDiarizationEnabled = true
+
+        wait(for: [changeObserved], timeout: 0.1)
+    }
+
     func testNotionArchivingDefaultsToEnabledWhenPreferenceIsMissing() throws {
         let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

@@ -4,6 +4,22 @@ import XCTest
 
 @MainActor
 final class SettingsViewModelTests: XCTestCase {
+    func testSpeakerDiarizationPreferenceDefaultsOffAndLoadsAndSaves() throws {
+        let fixture = try makeFixture()
+
+        fixture.viewModel.load()
+
+        XCTAssertFalse(fixture.viewModel.isSpeakerDiarizationEnabled)
+
+        fixture.viewModel.isSpeakerDiarizationEnabled = true
+        fixture.viewModel.save()
+        fixture.viewModel.isSpeakerDiarizationEnabled = false
+        fixture.viewModel.load()
+
+        XCTAssertTrue(fixture.settings.isSpeakerDiarizationEnabled)
+        XCTAssertTrue(fixture.viewModel.isSpeakerDiarizationEnabled)
+    }
+
     func testNotionArchivingPreferenceLoadsAndSaves() throws {
         let fixture = try makeFixture()
         fixture.settings.isNotionArchivingEnabled = false
