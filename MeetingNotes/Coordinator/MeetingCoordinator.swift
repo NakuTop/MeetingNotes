@@ -6,7 +6,6 @@ enum MeetingCoordinatorError: Error, Equatable, Sendable {
     case operationInProgress
     case capturePipelineFailed
     case transcriptPersistenceFailed
-    case sourceDegradationPersistenceFailed
 }
 
 private enum SourceDegradationReason: Equatable, Sendable {
@@ -325,6 +324,7 @@ actor MeetingCoordinator {
         )
         stateMachine = finalizingMachine
         await dependencies.panel.hide()
+        var transcriptionUpdatesFinished = false
 
         do {
             let task = streamTask
@@ -332,17 +332,10 @@ actor MeetingCoordinator {
             await task?.value
             await finishSurvivingSourceWriters(meetingID: meetingID)
             _ = try await masterWriter.finish()
-            do {
-                try await persistPendingSourceDegradations(
-                    meetingID: meetingID
-                )
-            } catch {
-                throw MeetingCoordinatorError
-                    .sourceDegradationPersistenceFailed
-            }
             await enqueueRemainingTranscriptionSamples(using: transcriber)
             await transcriber.drain()
             await transcriber.finishUpdates()
+            transcriptionUpdatesFinished = true
             if let transcriptPersistenceTask,
                !(await transcriptPersistenceTask.value) {
                 throw MeetingCoordinatorError.transcriptPersistenceFailed
@@ -352,19 +345,21 @@ actor MeetingCoordinator {
             try await dependencies.repository.finalizeMeeting(
                 meetingID: meetingID,
                 endedAt: endedAt,
-                activeDuration: activeDuration
+                activeDuration: activeDuration,
+                sourceDegradationErrorCode:
+                    pendingSourceDegradations.first?.errorCode
             )
+            pendingSourceDegradations.removeAll(keepingCapacity: true)
             var readyMachine = stateMachine
             try readyMachine.send(.finalized)
             stateMachine = readyMachine
             resetAfterSuccessfulStop()
         } catch {
             finalActiveDuration = activeDuration
-            if error as? MeetingCoordinatorError
-                != .sourceDegradationPersistenceFailed {
+            if !transcriptionUpdatesFinished {
                 await transcriber.drain()
+                await transcriber.finishUpdates()
             }
-            await transcriber.finishUpdates()
             _ = await transcriptPersistenceTask?.value
             releaseActiveResources()
             throw error
@@ -597,7 +592,6 @@ actor MeetingCoordinator {
         timeline = nil
         streamTask = nil
         transcriptPersistenceTask = nil
-        pendingSourceDegradations.removeAll(keepingCapacity: true)
         pendingTranscriptionSamples.removeAll(keepingCapacity: true)
         nextTranscriptionSampleOffset = 0
         totalSampleCount = 0

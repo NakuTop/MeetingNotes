@@ -316,6 +316,141 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(meeting.updatedAt, endedAt)
     }
 
+    func testFinalizingMeetingAtomicallyPersistsSourceDegradation() throws {
+        let repository = try MeetingRepository.inMemory()
+        let id = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 100),
+            speakerDiarizationRequested: true
+        )
+        let endedAt = Date(timeIntervalSince1970: 145)
+
+        try repository.finalizeMeeting(
+            id: id,
+            endedAt: endedAt,
+            activeDuration: 31,
+            sourceDegradationErrorCode:
+                "source_track_write_failed_microphone"
+        )
+
+        let meeting = try repository.meeting(id: id)
+        XCTAssertEqual(meeting.state, .ready)
+        XCTAssertEqual(meeting.endedAt, endedAt)
+        XCTAssertEqual(meeting.activeDuration, 31, accuracy: 0.001)
+        XCTAssertEqual(meeting.updatedAt, endedAt)
+        XCTAssertEqual(meeting.speakerProcessingState, .degraded)
+        XCTAssertEqual(
+            meeting.speakerProcessingErrorCode,
+            "source_track_write_failed_microphone"
+        )
+    }
+
+    func testAtomicFinalizationRestoresEveryFieldWhenSaveFails() throws {
+        var saveAttempts = 0
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                saveAttempts += 1
+                if saveAttempts == 2 {
+                    throw InjectedRepositorySaveError.forced
+                }
+                try context.save()
+            }
+        )
+        let startedAt = Date(timeIntervalSince1970: 100)
+        let id = try repository.createMeeting(
+            mode: .online,
+            startedAt: startedAt,
+            speakerDiarizationRequested: true
+        )
+        let meeting = try repository.meeting(id: id)
+        let originalStateRawValue = meeting.stateRawValue
+        let originalEndedAt = meeting.endedAt
+        let originalActiveDuration = meeting.activeDuration
+        let originalUpdatedAt = meeting.updatedAt
+        let originalSpeakerStateRawValue =
+            meeting.speakerProcessingStateRawValue
+        let originalSpeakerErrorCode = meeting.speakerProcessingErrorCode
+
+        XCTAssertThrowsError(
+            try repository.finalizeMeeting(
+                id: id,
+                endedAt: Date(timeIntervalSince1970: 145),
+                activeDuration: 31,
+                sourceDegradationErrorCode:
+                    "source_track_write_failed_microphone"
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? InjectedRepositorySaveError,
+                .forced
+            )
+        }
+
+        let reloaded = try repository.meeting(id: id)
+        XCTAssertTrue(reloaded === meeting)
+        XCTAssertEqual(reloaded.stateRawValue, originalStateRawValue)
+        XCTAssertEqual(reloaded.endedAt, originalEndedAt)
+        XCTAssertEqual(reloaded.activeDuration, originalActiveDuration)
+        XCTAssertEqual(reloaded.updatedAt, originalUpdatedAt)
+        XCTAssertEqual(
+            reloaded.speakerProcessingStateRawValue,
+            originalSpeakerStateRawValue
+        )
+        XCTAssertEqual(
+            reloaded.speakerProcessingErrorCode,
+            originalSpeakerErrorCode
+        )
+        XCTAssertEqual(saveAttempts, 2)
+    }
+
+    func testDegradationAdapterRestoresUpdatedAtWhenSaveFails() async throws {
+        var saveAttempts = 0
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                saveAttempts += 1
+                if saveAttempts == 2 {
+                    throw InjectedRepositorySaveError.forced
+                }
+                try context.save()
+            }
+        )
+        let id = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 100),
+            speakerDiarizationRequested: true
+        )
+        let meeting = try repository.meeting(id: id)
+        let originalStateRawValue =
+            meeting.speakerProcessingStateRawValue
+        let originalErrorCode = meeting.speakerProcessingErrorCode
+        let originalUpdatedAt = meeting.updatedAt
+        let adapter = MeetingRepositoryLifecycleAdapter(
+            repository: repository
+        )
+
+        do {
+            try await adapter.markSpeakerProcessingDegraded(
+                meetingID: id,
+                errorCode: "source_track_write_failed_microphone"
+            )
+            XCTFail("Expected injected repository save failure")
+        } catch {
+            XCTAssertEqual(
+                error as? InjectedRepositorySaveError,
+                .forced
+            )
+        }
+
+        let reloaded = try repository.meeting(id: id)
+        XCTAssertEqual(
+            reloaded.speakerProcessingStateRawValue,
+            originalStateRawValue
+        )
+        XCTAssertEqual(reloaded.speakerProcessingErrorCode, originalErrorCode)
+        XCTAssertEqual(reloaded.updatedAt, originalUpdatedAt)
+        XCTAssertEqual(saveAttempts, 2)
+    }
+
     func testDeletingMeetingCascadesToAllRelatedRecords() throws {
         let repository = try MeetingRepository.inMemory()
         let id = try repository.createMeeting(mode: .online, startedAt: .now)

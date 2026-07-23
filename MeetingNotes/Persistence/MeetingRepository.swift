@@ -271,14 +271,40 @@ final class MeetingRepository {
     func finalizeMeeting(
         id: UUID,
         endedAt: Date,
-        activeDuration: TimeInterval
+        activeDuration: TimeInterval,
+        sourceDegradationErrorCode: String? = nil
     ) throws {
         let meeting = try meeting(id: id)
+        let previousStateRawValue = meeting.stateRawValue
+        let previousEndedAt = meeting.endedAt
+        let previousActiveDuration = meeting.activeDuration
+        let previousUpdatedAt = meeting.updatedAt
+        let previousSpeakerProcessingStateRawValue =
+            meeting.speakerProcessingStateRawValue
+        let previousSpeakerProcessingErrorCode =
+            meeting.speakerProcessingErrorCode
         meeting.state = .ready
         meeting.endedAt = endedAt
         meeting.activeDuration = activeDuration
         meeting.updatedAt = endedAt
-        try saveContext()
+        if let sourceDegradationErrorCode {
+            meeting.speakerProcessingState = .degraded
+            meeting.speakerProcessingErrorCode =
+                sourceDegradationErrorCode
+        }
+        do {
+            try saveContext()
+        } catch {
+            meeting.stateRawValue = previousStateRawValue
+            meeting.endedAt = previousEndedAt
+            meeting.activeDuration = previousActiveDuration
+            meeting.updatedAt = previousUpdatedAt
+            meeting.speakerProcessingStateRawValue =
+                previousSpeakerProcessingStateRawValue
+            meeting.speakerProcessingErrorCode =
+                previousSpeakerProcessingErrorCode
+            throw error
+        }
     }
 
     func saveArchiveCheckpoint(

@@ -73,7 +73,8 @@ protocol MeetingLifecycleRepository: Sendable {
     func finalizeMeeting(
         meetingID: UUID,
         endedAt: Date,
-        activeDuration: TimeInterval
+        activeDuration: TimeInterval,
+        sourceDegradationErrorCode: String?
     ) async throws
     func deleteMeeting(meetingID: UUID) async throws
 }
@@ -245,8 +246,10 @@ final class MeetingRepositoryLifecycleAdapter: MeetingLifecycleRepository {
         errorCode: String
     ) async throws {
         let meeting = try repository.meeting(id: meetingID)
-        let previousState = meeting.speakerProcessingState
+        let previousStateRawValue =
+            meeting.speakerProcessingStateRawValue
         let previousErrorCode = meeting.speakerProcessingErrorCode
+        let previousUpdatedAt = meeting.updatedAt
         meeting.speakerProcessingState = .degraded
         meeting.speakerProcessingErrorCode = errorCode
         do {
@@ -255,8 +258,10 @@ final class MeetingRepositoryLifecycleAdapter: MeetingLifecycleRepository {
                 state: meeting.state
             )
         } catch {
-            meeting.speakerProcessingState = previousState
+            meeting.speakerProcessingStateRawValue =
+                previousStateRawValue
             meeting.speakerProcessingErrorCode = previousErrorCode
+            meeting.updatedAt = previousUpdatedAt
             throw error
         }
     }
@@ -264,12 +269,14 @@ final class MeetingRepositoryLifecycleAdapter: MeetingLifecycleRepository {
     func finalizeMeeting(
         meetingID: UUID,
         endedAt: Date,
-        activeDuration: TimeInterval
+        activeDuration: TimeInterval,
+        sourceDegradationErrorCode: String?
     ) async throws {
         try repository.finalizeMeeting(
             id: meetingID,
             endedAt: endedAt,
-            activeDuration: activeDuration
+            activeDuration: activeDuration,
+            sourceDegradationErrorCode: sourceDegradationErrorCode
         )
     }
 
