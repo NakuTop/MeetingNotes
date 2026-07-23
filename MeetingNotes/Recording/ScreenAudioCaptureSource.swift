@@ -12,10 +12,12 @@ enum ScreenAudioCaptureError: Error, Equatable, Sendable {
     case streamStopped
     case invalidAudioSample
     case deliveryOverflow
+    case packetBufferOverflow
 }
 
 enum ScreenAudioCaptureConfiguration {
     static let eventQueueCapacity = 256
+    static let packetBufferCapacity = 256
 
     static let registeredOutputTypes: [SCStreamOutputType] = [
         .audio,
@@ -30,6 +32,36 @@ enum ScreenAudioCaptureConfiguration {
         configuration.sampleRate = Int(PCMConverter.playbackSampleRate)
         configuration.channelCount = 1
         return configuration
+    }
+}
+
+enum ScreenAudioPacketDeliveryResult: Equatable, Sendable {
+    case enqueued
+    case terminated
+}
+
+enum ScreenAudioPacketDelivery {
+    static func deliver(
+        _ packet: CapturedAudioPacket,
+        to continuation: AsyncThrowingStream<
+            CapturedAudioPacket,
+            Error
+        >.Continuation
+    ) throws -> ScreenAudioPacketDeliveryResult {
+        switch continuation.yield(packet) {
+        case .enqueued:
+            return .enqueued
+        case .dropped:
+            let error = ScreenAudioCaptureError.packetBufferOverflow
+            continuation.finish(throwing: error)
+            throw error
+        case .terminated:
+            return .terminated
+        @unknown default:
+            let error = ScreenAudioCaptureError.packetBufferOverflow
+            continuation.finish(throwing: error)
+            throw error
+        }
     }
 }
 
@@ -429,6 +461,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
     private var continuation: AsyncThrowingStream<CapturedAudioPacket, Error>.Continuation?
     private var outputTimestampNormalizer = ScreenAudioPacketTimestampNormalizer()
     private var frameSynchronizer: ScreenAudioFrameSynchronizer?
+    private var isTerminating = false
 
     init(
         mixer: RealtimeAudioMixer = RealtimeAudioMixer(),
@@ -442,7 +475,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
     }
 
     func start() async throws -> AsyncThrowingStream<CapturedAudioPacket, Error> {
-        guard stream == nil else {
+        guard stream == nil, !isTerminating else {
             throw AudioCaptureError.alreadyRunning
         }
         resetConverters()
@@ -471,7 +504,14 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             exceptingWindows: []
         )
         let configuration = ScreenAudioCaptureConfiguration.makeStreamConfiguration()
-        let streamPair = AsyncThrowingStream<CapturedAudioPacket, Error>.makeStream()
+        let streamPair = AsyncThrowingStream<
+            CapturedAudioPacket,
+            Error
+        >.makeStream(
+            bufferingPolicy: .bufferingOldest(
+                ScreenAudioCaptureConfiguration.packetBufferCapacity
+            )
+        )
         continuation = streamPair.continuation
         outputTimestampNormalizer = ScreenAudioPacketTimestampNormalizer()
         frameSynchronizer = ScreenAudioFrameSynchronizer(
@@ -540,7 +580,10 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
     }
 
     func pause() async throws {
-        guard stream != nil, continuation != nil, let relay else {
+        guard !isTerminating,
+              stream != nil,
+              continuation != nil,
+              let relay else {
             throw AudioCaptureError.notRunning
         }
         guard await relay.suspendAndWait(
@@ -559,7 +602,10 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
     }
 
     func resume() async throws {
-        guard stream != nil, continuation != nil, let relay else {
+        guard !isTerminating,
+              stream != nil,
+              continuation != nil,
+              let relay else {
             throw AudioCaptureError.notRunning
         }
         guard relay.resume() else {
@@ -568,10 +614,14 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
     }
 
     func stop() async {
+        guard !isTerminating else {
+            return
+        }
         guard let stream, let relay else {
             resetConverters()
             return
         }
+        isTerminating = true
         try? await stream.stopCapture()
         removeRegisteredOutputs(from: stream, relay: relay)
         await waitForCallbackQueues()
@@ -588,6 +638,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         self.relay = nil
         outputTimestampNormalizer = ScreenAudioPacketTimestampNormalizer()
         frameSynchronizer = nil
+        isTerminating = false
     }
 
     private func queue(for outputType: SCStreamOutputType) -> DispatchQueue {
@@ -614,7 +665,9 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         source: RealtimeAudioSource,
         receivedAt: TimeInterval
     ) async {
-        guard stream != nil, var frameSynchronizer else {
+        guard !isTerminating,
+              stream != nil,
+              var frameSynchronizer else {
             return
         }
         let orderedFrames = frameSynchronizer.ingest(
@@ -639,9 +692,27 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
     private func yieldMixedFrames(
         _ packets: [CapturedAudioPacket]
     ) throws {
+        guard let continuation else {
+            return
+        }
         for packet in packets {
             let output = try transcriptionFrameBuilder.build(from: packet)
-            continuation?.yield(outputTimestampNormalizer.normalize(output))
+            let normalized = outputTimestampNormalizer.normalize(output)
+            do {
+                switch try ScreenAudioPacketDelivery.deliver(
+                    normalized,
+                    to: continuation
+                ) {
+                case .enqueued:
+                    continue
+                case .terminated:
+                    self.continuation = nil
+                    throw ScreenAudioCaptureError.streamStopped
+                }
+            } catch {
+                self.continuation = nil
+                throw error
+            }
         }
     }
 
@@ -651,9 +722,10 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
     }
 
     private func handleStreamFailure(_ error: Error) async {
-        guard stream != nil, continuation != nil else {
+        guard stream != nil, !isTerminating else {
             return
         }
+        isTerminating = true
         if let stream, let relay {
             relay.finishAccepting()
             try? await stream.stopCapture()
@@ -673,6 +745,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         relay = nil
         outputTimestampNormalizer = ScreenAudioPacketTimestampNormalizer()
         frameSynchronizer = nil
+        isTerminating = false
     }
 }
 

@@ -16,11 +16,67 @@ final class ScreenAudioCaptureConfigurationTests: XCTestCase {
             256
         )
         XCTAssertEqual(
+            ScreenAudioCaptureConfiguration.packetBufferCapacity,
+            256
+        )
+        XCTAssertEqual(
             ScreenAudioCaptureConfiguration.registeredOutputTypes,
             [.audio, .microphone]
         )
         XCTAssertFalse(
             ScreenAudioCaptureConfiguration.registeredOutputTypes.contains(.screen)
+        )
+    }
+
+    func testPacketDeliveryFailsExplicitlyAndTerminatesAfterBufferOverflow() async {
+        let pair = AsyncThrowingStream<
+            CapturedAudioPacket,
+            Error
+        >.makeStream(bufferingPolicy: .bufferingOldest(1))
+        let first = packet(timestamp: 0)
+        let dropped = packet(timestamp: 0.02)
+        let rejectedAfterTermination = packet(timestamp: 0.04)
+
+        XCTAssertEqual(
+            try ScreenAudioPacketDelivery.deliver(
+                first,
+                to: pair.continuation
+            ),
+            .enqueued
+        )
+        XCTAssertThrowsError(
+            try ScreenAudioPacketDelivery.deliver(
+                dropped,
+                to: pair.continuation
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ScreenAudioCaptureError,
+                .packetBufferOverflow
+            )
+        }
+        XCTAssertEqual(
+            try ScreenAudioPacketDelivery.deliver(
+                rejectedAfterTermination,
+                to: pair.continuation
+            ),
+            .terminated
+        )
+
+        var received: [CapturedAudioPacket] = []
+        var terminalError: Error?
+        do {
+            for try await packet in pair.stream {
+                received.append(packet)
+            }
+        } catch {
+            terminalError = error
+        }
+
+        XCTAssertEqual(received, [first])
+        XCTAssertEqual(
+            terminalError as? ScreenAudioCaptureError,
+            .packetBufferOverflow
         )
     }
 
