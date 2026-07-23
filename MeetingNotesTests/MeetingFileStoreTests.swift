@@ -2,6 +2,108 @@ import XCTest
 @testable import MeetingNotes
 
 final class MeetingFileStoreTests: XCTestCase {
+    func testAudioTracksUseExactManifestAndSegmentNames() {
+        XCTAssertEqual(AudioTrack.allCases, [.master, .microphone, .system])
+        XCTAssertEqual(AudioTrack.allCases.map(\.rawValue), [
+            "master",
+            "microphone",
+            "system"
+        ])
+        XCTAssertEqual(AudioTrack.master.manifestFileName, "manifest.json")
+        XCTAssertEqual(AudioTrack.master.segmentFileNamePrefix, "segment")
+        XCTAssertEqual(
+            AudioTrack.microphone.manifestFileName,
+            "microphone-manifest.json"
+        )
+        XCTAssertEqual(
+            AudioTrack.microphone.segmentFileNamePrefix,
+            "microphone-segment"
+        )
+        XCTAssertEqual(
+            AudioTrack.system.manifestFileName,
+            "system-manifest.json"
+        )
+        XCTAssertEqual(
+            AudioTrack.system.segmentFileNamePrefix,
+            "system-segment"
+        )
+        XCTAssertEqual(
+            MeetingFileStore.manifestFileName,
+            AudioTrack.master.manifestFileName
+        )
+    }
+
+    func testTrackManifestsAreStoredIndependentlyAndDefaultToMaster() async throws {
+        let root = try makeTemporaryRoot()
+        let store = MeetingFileStore(rootURL: root)
+        let meetingID = UUID()
+        let master = AudioSegmentManifest(segments: [
+            segment(fileName: "segment-0001.caf", frameCount: 1)
+        ])
+        let microphone = AudioSegmentManifest(segments: [
+            segment(fileName: "microphone-segment-0001.caf", frameCount: 2)
+        ])
+        let system = AudioSegmentManifest(segments: [
+            segment(fileName: "system-segment-0001.caf", frameCount: 3)
+        ])
+
+        try await store.saveManifest(master, meetingID: meetingID)
+        try await store.saveManifest(
+            microphone,
+            meetingID: meetingID,
+            track: .microphone
+        )
+        try await store.saveManifest(
+            system,
+            meetingID: meetingID,
+            track: .system
+        )
+
+        let reloadedMaster = try await store.loadManifest(meetingID: meetingID)
+        let reloadedMicrophone = try await store.loadManifest(
+            meetingID: meetingID,
+            track: .microphone
+        )
+        let reloadedSystem = try await store.loadManifest(
+            meetingID: meetingID,
+            track: .system
+        )
+        XCTAssertEqual(reloadedMaster, master)
+        XCTAssertEqual(reloadedMicrophone, microphone)
+        XCTAssertEqual(reloadedSystem, system)
+
+        let masterPath = await store.relativeManifestPath(for: meetingID)
+        let microphonePath = await store.relativeManifestPath(
+            for: meetingID,
+            track: .microphone
+        )
+        let systemPath = await store.relativeManifestPath(
+            for: meetingID,
+            track: .system
+        )
+        XCTAssertEqual(masterPath, "\(meetingID.uuidString)/manifest.json")
+        XCTAssertEqual(
+            microphonePath,
+            "\(meetingID.uuidString)/microphone-manifest.json"
+        )
+        XCTAssertEqual(
+            systemPath,
+            "\(meetingID.uuidString)/system-manifest.json"
+        )
+
+        let meetingDirectory = root.appendingPathComponent(meetingID.uuidString)
+        XCTAssertEqual(
+            Set(try FileManager.default.contentsOfDirectory(
+                atPath: meetingDirectory.path
+            )),
+            Set([
+                "manifest.json",
+                "microphone-manifest.json",
+                "system-manifest.json"
+            ])
+        )
+    }
+
     func testEachMeetingUsesAnIndependentUUIDDirectory() async throws {
         let root = try makeTemporaryRoot()
         let store = MeetingFileStore(rootURL: root)
@@ -157,6 +259,19 @@ final class MeetingFileStoreTests: XCTestCase {
             try? FileManager.default.removeItem(at: root)
         }
         return root
+    }
+
+    private func segment(
+        fileName: String,
+        frameCount: Int64
+    ) -> AudioSegmentManifest.Segment {
+        .init(
+            fileName: fileName,
+            startTime: 0,
+            endTime: Double(frameCount) / 16_000,
+            frameCount: frameCount,
+            isComplete: true
+        )
     }
 }
 

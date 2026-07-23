@@ -1,5 +1,33 @@
 import Foundation
 
+enum AudioTrack: String, CaseIterable, Codable, Hashable, Sendable {
+    case master
+    case microphone
+    case system
+
+    var manifestFileName: String {
+        switch self {
+        case .master:
+            "manifest.json"
+        case .microphone:
+            "microphone-manifest.json"
+        case .system:
+            "system-manifest.json"
+        }
+    }
+
+    var segmentFileNamePrefix: String {
+        switch self {
+        case .master:
+            "segment"
+        case .microphone:
+            "microphone-segment"
+        case .system:
+            "system-segment"
+        }
+    }
+}
+
 struct AudioSegmentManifest: Codable, Equatable, Sendable {
     static let currentVersion = 1
     static let transcriptionSampleRate = 16_000.0

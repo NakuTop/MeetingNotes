@@ -3,6 +3,88 @@ import XCTest
 @testable import MeetingNotes
 
 final class SegmentedPCMWriterTests: XCTestCase {
+    func testThreeTracksWriteIndependentSegmentsAndManifests() async throws {
+        let root = try makeTemporaryRoot()
+        let fileStore = MeetingFileStore(rootURL: root)
+        let meetingID = UUID()
+        let masterWriter = try SegmentedPCMWriter(
+            meetingID: meetingID,
+            fileStore: fileStore,
+            frameLimit: 3
+        )
+        let microphoneWriter = try SegmentedPCMWriter(
+            meetingID: meetingID,
+            fileStore: fileStore,
+            track: .microphone,
+            frameLimit: 3
+        )
+        let systemWriter = try SegmentedPCMWriter(
+            meetingID: meetingID,
+            fileStore: fileStore,
+            track: .system,
+            frameLimit: 3
+        )
+        let masterFrame = CapturedAudioFrame(
+            timestamp: 0,
+            sampleRate: 16_000,
+            samples: [0.1, 0.2, 0.3, 0.4]
+        )
+        let microphoneFrame = CapturedAudioFrame(
+            timestamp: 0,
+            sampleRate: 16_000,
+            samples: [0.5, 0.6, 0.7, 0.8]
+        )
+        let systemFrame = CapturedAudioFrame(
+            timestamp: 0,
+            sampleRate: 16_000,
+            samples: [0.9, 1.0, 0.9, 0.8]
+        )
+
+        async let masterAppend: Void = masterWriter.append(masterFrame)
+        async let microphoneAppend: Void = microphoneWriter.append(microphoneFrame)
+        async let systemAppend: Void = systemWriter.append(systemFrame)
+        _ = try await (masterAppend, microphoneAppend, systemAppend)
+
+        async let masterManifest = masterWriter.finish()
+        async let microphoneManifest = microphoneWriter.finish()
+        async let systemManifest = systemWriter.finish()
+        let manifests = try await (
+            masterManifest,
+            microphoneManifest,
+            systemManifest
+        )
+
+        XCTAssertEqual(
+            manifests.0.segments.map(\.fileName),
+            ["segment-0001.caf", "segment-0002.caf"]
+        )
+        XCTAssertEqual(
+            manifests.1.segments.map(\.fileName),
+            [
+                "microphone-segment-0001.caf",
+                "microphone-segment-0002.caf"
+            ]
+        )
+        XCTAssertEqual(
+            manifests.2.segments.map(\.fileName),
+            ["system-segment-0001.caf", "system-segment-0002.caf"]
+        )
+        let reloadedMaster = try await fileStore.loadManifest(
+            meetingID: meetingID
+        )
+        let reloadedMicrophone = try await fileStore.loadManifest(
+            meetingID: meetingID,
+            track: .microphone
+        )
+        let reloadedSystem = try await fileStore.loadManifest(
+            meetingID: meetingID,
+            track: .system
+        )
+        XCTAssertEqual(reloadedMaster, manifests.0)
+        XCTAssertEqual(reloadedMicrophone, manifests.1)
+        XCTAssertEqual(reloadedSystem, manifests.2)
+    }
+
     func testWritesAndDescribes48kPlaybackAudio() async throws {
         let root = try makeTemporaryRoot()
         let fileStore = MeetingFileStore(rootURL: root)

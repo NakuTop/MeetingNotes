@@ -21,7 +21,7 @@ struct ResolvedMeetingRecordingSegment: Equatable, Sendable {
 }
 
 actor MeetingFileStore {
-    static let manifestFileName = "manifest.json"
+    static let manifestFileName = AudioTrack.master.manifestFileName
     static let waveformFileName = "waveform-v1.json"
 
     private let rootURL: URL
@@ -54,12 +54,13 @@ actor MeetingFileStore {
 
     func saveManifest(
         _ manifest: AudioSegmentManifest,
-        meetingID: UUID
+        meetingID: UUID,
+        track: AudioTrack = .master
     ) throws {
         let directory = try prepareMeetingDirectory(for: meetingID)
-        let destination = directory.appendingPathComponent(Self.manifestFileName)
+        let destination = directory.appendingPathComponent(track.manifestFileName)
         let temporary = directory.appendingPathComponent(
-            ".manifest-\(UUID().uuidString).tmp"
+            ".\(track.rawValue)-manifest-\(UUID().uuidString).tmp"
         )
         let data = try encoder.encode(manifest)
 
@@ -79,8 +80,11 @@ actor MeetingFileStore {
         }
     }
 
-    func loadManifest(meetingID: UUID) throws -> AudioSegmentManifest {
-        let relativePath = "\(meetingID.uuidString)/\(Self.manifestFileName)"
+    func loadManifest(
+        meetingID: UUID,
+        track: AudioTrack = .master
+    ) throws -> AudioSegmentManifest {
+        let relativePath = "\(meetingID.uuidString)/\(track.manifestFileName)"
         let url = try resolve(relativePath: relativePath)
         guard fileManager.fileExists(atPath: url.path) else {
             throw MeetingFileStoreError.manifestNotFound(meetingID)
@@ -130,8 +134,11 @@ actor MeetingFileStore {
         )
     }
 
-    func relativeManifestPath(for meetingID: UUID) -> String {
-        "\(meetingID.uuidString)/\(Self.manifestFileName)"
+    func relativeManifestPath(
+        for meetingID: UUID,
+        track: AudioTrack = .master
+    ) -> String {
+        "\(meetingID.uuidString)/\(track.manifestFileName)"
     }
 
     func resolveSegmentURL(meetingID: UUID, fileName: String) throws -> URL {

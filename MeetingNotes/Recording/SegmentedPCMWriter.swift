@@ -15,6 +15,7 @@ actor SegmentedPCMWriter {
 
     private let meetingID: UUID
     private let fileStore: MeetingFileStore
+    private let track: AudioTrack
     private let frameLimit: Int
     private let format: AVAudioFormat
 
@@ -26,6 +27,7 @@ actor SegmentedPCMWriter {
     init(
         meetingID: UUID,
         fileStore: MeetingFileStore,
+        track: AudioTrack = .master,
         frameLimit: Int? = nil,
         sampleRate: Double = AudioSegmentManifest.transcriptionSampleRate
     ) throws {
@@ -52,6 +54,7 @@ actor SegmentedPCMWriter {
 
         self.meetingID = meetingID
         self.fileStore = fileStore
+        self.track = track
         self.frameLimit = resolvedFrameLimit
         self.format = format
         manifest = AudioSegmentManifest(sampleRate: resolvedRate)
@@ -110,7 +113,11 @@ actor SegmentedPCMWriter {
     func finish() async throws -> AudioSegmentManifest {
         if !isFinished {
             try await closeCurrentSegment()
-            try await fileStore.saveManifest(manifest, meetingID: meetingID)
+            try await fileStore.saveManifest(
+                manifest,
+                meetingID: meetingID,
+                track: track
+            )
             isFinished = true
         }
         return manifest
@@ -119,7 +126,7 @@ actor SegmentedPCMWriter {
     private func openSegment(startTime: TimeInterval) async throws {
         let directory = try await fileStore.prepareMeetingDirectory(for: meetingID)
         let fileName = String(
-            format: "segment-%04d.caf",
+            format: "\(track.segmentFileNamePrefix)-%04d.caf",
             manifest.segments.count + 1
         )
         let fileURL = directory.appendingPathComponent(fileName)
@@ -141,7 +148,11 @@ actor SegmentedPCMWriter {
                 isComplete: false
             )
         )
-        try await fileStore.saveManifest(manifest, meetingID: meetingID)
+        try await fileStore.saveManifest(
+            manifest,
+            meetingID: meetingID,
+            track: track
+        )
     }
 
     private func write(
@@ -181,6 +192,10 @@ actor SegmentedPCMWriter {
         try handle.close()
 
         manifest.segments[segmentIndex].isComplete = true
-        try await fileStore.saveManifest(manifest, meetingID: meetingID)
+        try await fileStore.saveManifest(
+            manifest,
+            meetingID: meetingID,
+            track: track
+        )
     }
 }

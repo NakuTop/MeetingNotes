@@ -3,6 +3,80 @@ import XCTest
 @testable import MeetingNotes
 
 final class MeetingAudioSourceLoaderTests: XCTestCase {
+    func testLoadsRequestedSourceTrackWithoutUsingMasterManifest() async throws {
+        let fixture = try makeFixture()
+        let systemWriter = try SegmentedPCMWriter(
+            meetingID: fixture.meetingID,
+            fileStore: fixture.fileStore,
+            track: .system,
+            frameLimit: 3
+        )
+        try await systemWriter.append(
+            CapturedAudioFrame(
+                timestamp: 0,
+                sampleRate: 16_000,
+                samples: [0.1, 0.2, 0.3, 0.4]
+            )
+        )
+        _ = try await systemWriter.finish()
+        let loader = MeetingAudioSourceLoader(fileStore: fixture.fileStore)
+
+        let source = try await loader.load(
+            meetingID: fixture.meetingID,
+            track: .system
+        )
+
+        XCTAssertEqual(source.totalFrames, 4)
+        XCTAssertEqual(source.segmentURLs.map(\.lastPathComponent), [
+            "system-segment-0001.caf",
+            "system-segment-0002.caf"
+        ])
+    }
+
+    func testMissingRequestedSourceTrackMapsToManifestNotFound() async throws {
+        let fixture = try await makeThreeSegmentFixture()
+        let loader = MeetingAudioSourceLoader(fileStore: fixture.fileStore)
+
+        await assertLoaderError(
+            try await loader.load(
+                meetingID: fixture.meetingID,
+                track: .microphone
+            ),
+            equals: .manifestNotFound
+        )
+    }
+
+    func testDefaultLoadKeepsReadingLegacyMasterManifest() async throws {
+        let fixture = try await makeThreeSegmentFixture()
+        let meetingDirectory = fixture.root.appendingPathComponent(
+            fixture.meetingID.uuidString
+        )
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: meetingDirectory
+                .appendingPathComponent("manifest.json")
+                .path
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: meetingDirectory
+                .appendingPathComponent("microphone-manifest.json")
+                .path
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: meetingDirectory
+                .appendingPathComponent("system-manifest.json")
+                .path
+        ))
+        let loader = MeetingAudioSourceLoader(fileStore: fixture.fileStore)
+
+        let source = try await loader.load(meetingID: fixture.meetingID)
+
+        XCTAssertEqual(
+            source.segmentURLs.map(\.lastPathComponent),
+            ["segment-0001.caf", "segment-0002.caf", "segment-0003.caf"]
+        )
+        XCTAssertEqual(source.totalFrames, 7)
+    }
+
     func testLoads48kPlaybackRecording() async throws {
         let fixture = try await makeThreeSegmentFixture(sampleRate: 48_000)
         let loader = MeetingAudioSourceLoader(fileStore: fixture.fileStore)

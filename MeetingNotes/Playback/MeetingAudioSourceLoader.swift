@@ -96,9 +96,19 @@ actor MeetingAudioSourceLoader {
     }
 
     func load(meetingID: UUID) async throws -> MeetingAudioSource {
+        try await load(meetingID: meetingID, track: .master)
+    }
+
+    func load(
+        meetingID: UUID,
+        track: AudioTrack = .master
+    ) async throws -> MeetingAudioSource {
         let manifest: AudioSegmentManifest
         do {
-            manifest = try await fileStore.loadManifest(meetingID: meetingID)
+            manifest = try await fileStore.loadManifest(
+                meetingID: meetingID,
+                track: track
+            )
         } catch MeetingFileStoreError.manifestNotFound {
             throw MeetingAudioSourceLoaderError.manifestNotFound
         } catch {
