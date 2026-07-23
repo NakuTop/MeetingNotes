@@ -66,6 +66,11 @@ protocol MeetingLifecycleRepository: Sendable {
     func updateState(meetingID: UUID, state: RecordingState) async throws
     func appendBookmark(meetingID: UUID, timestamp: TimeInterval) async throws
     func appendTranscript(meetingID: UUID, draft: TranscriptDraft) async throws
+    func replaceTranscripts(
+        meetingID: UUID,
+        drafts: [AttributedTranscriptDraft],
+        sourceRevision: Int
+    ) async throws
     func markSpeakerProcessingDegraded(
         meetingID: UUID,
         errorCode: String
@@ -238,6 +243,18 @@ final class MeetingRepositoryLifecycleAdapter: MeetingLifecycleRepository {
             start: draft.startTime,
             end: draft.endTime,
             text: draft.text
+        )
+    }
+
+    func replaceTranscripts(
+        meetingID: UUID,
+        drafts: [AttributedTranscriptDraft],
+        sourceRevision: Int
+    ) async throws {
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: drafts,
+            sourceRevision: sourceRevision
         )
     }
 

@@ -1,5 +1,12 @@
 import Foundation
 
+enum TranscriptAudioSource: String, Codable, Sendable {
+    case microphone
+    case system
+    case mixed
+    case room
+}
+
 struct TranscriptDraft: Equatable, Sendable {
     let startTime: TimeInterval
     let endTime: TimeInterval
@@ -14,6 +21,12 @@ struct TranscriptDraft: Equatable, Sendable {
         self.endTime = endTime
         self.text = text
     }
+}
+
+struct AttributedTranscriptDraft: Equatable, Sendable {
+    let transcript: TranscriptDraft
+    let speakerID: String?
+    let source: TranscriptAudioSource
 }
 
 protocol TranscriptionService: Sendable {

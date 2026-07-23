@@ -3,6 +3,22 @@ import XCTest
 
 @MainActor
 final class MeetingRepositoryTests: XCTestCase {
+    func testTranscriptSourceFallsBackToMixedForNilAndUnknownValues() {
+        let transcript = TranscriptRecord(
+            startTime: 0,
+            endTime: 1,
+            text: "旧记录",
+            isFinal: true
+        )
+
+        XCTAssertNil(transcript.sourceRawValue)
+        XCTAssertEqual(transcript.source, .mixed)
+
+        transcript.sourceRawValue = "legacy-unknown-source"
+
+        XCTAssertEqual(transcript.source, .mixed)
+    }
+
     func testLegacyNilSpeakerFieldsFallBackToSafeBusinessDefaults() {
         let meeting = MeetingRecord(
             title: "旧会议",
@@ -120,6 +136,8 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertTrue(transcript.isFinal)
         XCTAssertNil(transcript.speakerID)
         XCTAssertEqual(transcript.sourceRevision, 2)
+        XCTAssertNil(transcript.sourceRawValue)
+        XCTAssertEqual(transcript.source, .mixed)
 
         let bookmark = try XCTUnwrap(meeting.bookmarks.first)
         XCTAssertEqual(bookmark.timestamp, 4, accuracy: 0.001)
@@ -451,6 +469,142 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(saveAttempts, 2)
     }
 
+    func testReplaceTranscriptsPersistsAttributedFinalRevision() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "临时转录"
+        )
+
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 4,
+                        endTime: 6,
+                        text: "远端发言"
+                    ),
+                    speakerID: "remote",
+                    source: .system
+                ),
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 1,
+                        endTime: 3,
+                        text: "本地发言"
+                    ),
+                    speakerID: "me",
+                    source: .microphone
+                )
+            ],
+            sourceRevision: 7
+        )
+
+        let persistedMeeting = try repository.meeting(id: meetingID)
+        let transcripts = persistedMeeting.transcripts.sorted {
+            $0.startTime < $1.startTime
+        }
+        XCTAssertEqual(transcripts.count, 2)
+        XCTAssertEqual(
+            transcripts.map(\.text),
+            ["本地发言", "远端发言"]
+        )
+        XCTAssertEqual(transcripts.map(\.speakerID), ["me", "remote"])
+        XCTAssertEqual(transcripts.map(\.source), [.microphone, .system])
+        XCTAssertEqual(transcripts.map(\.sourceRevision), [7, 7])
+        XCTAssertTrue(transcripts.allSatisfy(\.isFinal))
+        XCTAssertTrue(
+            transcripts.allSatisfy { $0.meeting === persistedMeeting }
+        )
+        XCTAssertEqual(try repository.count(TranscriptRecord.self), 2)
+    }
+
+    func testReplaceTranscriptsRestoresExactPreviousStateWhenSaveFails() throws {
+        var saveAttempts = 0
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                saveAttempts += 1
+                if saveAttempts == 4 {
+                    throw InjectedRepositorySaveError.forced
+                }
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 2,
+            text: "旧转录一",
+            isFinal: false,
+            speakerID: "legacy-1",
+            sourceRevision: 2
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 3,
+            end: 5,
+            text: "旧转录二",
+            isFinal: true,
+            speakerID: "legacy-2",
+            sourceRevision: 3
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let oldTranscripts = meeting.transcripts
+        let oldMetadata = oldTranscripts.map(TranscriptMetadata.init)
+        let oldUpdatedAt = meeting.updatedAt
+
+        XCTAssertThrowsError(
+            try repository.replaceTranscripts(
+                meetingID: meetingID,
+                drafts: [
+                    AttributedTranscriptDraft(
+                        transcript: TranscriptDraft(
+                            startTime: 10,
+                            endTime: 12,
+                            text: "不应残留"
+                        ),
+                        speakerID: "remote",
+                        source: .system
+                    )
+                ],
+                sourceRevision: 9
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? InjectedRepositorySaveError,
+                .forced
+            )
+        }
+
+        let reloaded = try repository.meeting(id: meetingID)
+        XCTAssertTrue(reloaded === meeting)
+        XCTAssertEqual(reloaded.updatedAt, oldUpdatedAt)
+        XCTAssertEqual(reloaded.transcripts.count, oldTranscripts.count)
+        XCTAssertTrue(
+            zip(reloaded.transcripts, oldTranscripts).allSatisfy(===)
+        )
+        XCTAssertEqual(
+            reloaded.transcripts.map(TranscriptMetadata.init),
+            oldMetadata
+        )
+        XCTAssertTrue(
+            reloaded.transcripts.allSatisfy { $0.meeting === meeting }
+        )
+        XCTAssertEqual(try repository.count(TranscriptRecord.self), 2)
+        XCTAssertEqual(saveAttempts, 4)
+    }
+
     func testDeletingMeetingCascadesToAllRelatedRecords() throws {
         let repository = try MeetingRepository.inMemory()
         let id = try repository.createMeeting(mode: .online, startedAt: .now)
@@ -509,4 +663,26 @@ final class MeetingRepositoryTests: XCTestCase {
 
 private enum InjectedRepositorySaveError: Error, Equatable {
     case forced
+}
+
+private struct TranscriptMetadata: Equatable {
+    let id: UUID
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+    let text: String
+    let isFinal: Bool
+    let speakerID: String?
+    let sourceRevision: Int
+    let sourceRawValue: String?
+
+    init(_ transcript: TranscriptRecord) {
+        id = transcript.id
+        startTime = transcript.startTime
+        endTime = transcript.endTime
+        text = transcript.text
+        isFinal = transcript.isFinal
+        speakerID = transcript.speakerID
+        sourceRevision = transcript.sourceRevision
+        sourceRawValue = transcript.sourceRawValue
+    }
 }

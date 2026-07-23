@@ -9,8 +9,19 @@ final class TranscriptRecord {
     var text: String
     var isFinal: Bool
     var speakerID: String?
+    var sourceRawValue: String?
     var sourceRevision: Int
     var meeting: MeetingRecord?
+
+    var source: TranscriptAudioSource {
+        get {
+            sourceRawValue.flatMap(TranscriptAudioSource.init)
+                ?? .mixed
+        }
+        set {
+            sourceRawValue = newValue.rawValue
+        }
+    }
 
     init(
         id: UUID = UUID(),
@@ -19,6 +30,7 @@ final class TranscriptRecord {
         text: String,
         isFinal: Bool,
         speakerID: String? = nil,
+        sourceRawValue: String? = nil,
         sourceRevision: Int = 0,
         meeting: MeetingRecord? = nil
     ) {
@@ -28,6 +40,7 @@ final class TranscriptRecord {
         self.text = text
         self.isFinal = isFinal
         self.speakerID = speakerID
+        self.sourceRawValue = sourceRawValue
         self.sourceRevision = sourceRevision
         self.meeting = meeting
     }

@@ -1483,6 +1483,16 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
         await events.append("repository.transcript")
     }
 
+    func replaceTranscripts(
+        meetingID: UUID,
+        drafts: [AttributedTranscriptDraft],
+        sourceRevision: Int
+    ) async throws {
+        _ = meetingID
+        _ = sourceRevision
+        transcripts = drafts.map(\.transcript)
+    }
+
     func markSpeakerProcessingDegraded(
         meetingID: UUID,
         errorCode: String

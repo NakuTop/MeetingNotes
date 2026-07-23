@@ -151,6 +151,43 @@ final class MeetingRepository {
         try saveContext()
     }
 
+    func replaceTranscripts(
+        meetingID: UUID,
+        drafts: [AttributedTranscriptDraft],
+        sourceRevision: Int
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+        let previousTranscripts = meeting.transcripts
+        let previousUpdatedAt = meeting.updatedAt
+
+        let replacements = drafts.map { draft in
+            TranscriptRecord(
+                startTime: draft.transcript.startTime,
+                endTime: draft.transcript.endTime,
+                text: draft.transcript.text,
+                isFinal: true,
+                speakerID: draft.speakerID,
+                sourceRawValue: draft.source.rawValue,
+                sourceRevision: sourceRevision
+            )
+        }
+
+        replacements.forEach(context.insert)
+        meeting.transcripts = replacements
+        meeting.updatedAt = .now
+        previousTranscripts.forEach(context.delete)
+
+        do {
+            try saveContext()
+        } catch {
+            context.rollback()
+            previousTranscripts.forEach { $0.meeting = meeting }
+            meeting.transcripts = previousTranscripts
+            meeting.updatedAt = previousUpdatedAt
+            throw error
+        }
+    }
+
     func appendBookmark(
         meetingID: UUID,
         timestamp: TimeInterval,
