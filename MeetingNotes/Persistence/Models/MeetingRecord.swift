@@ -33,9 +33,8 @@ final class MeetingRecord {
     var notionPageID: String?
     var notionPageURL: String?
     var lastErrorCode: String?
-    var speakerDiarizationRequested = false
-    var speakerProcessingStateRawValue =
-        SpeakerProcessingState.notRequested.rawValue
+    var speakerDiarizationRequestedBacking: Bool?
+    var speakerProcessingStateRawValue: String?
     var speakerProcessingErrorCode: String?
 
     @Relationship(deleteRule: .cascade, inverse: \TranscriptRecord.meeting)
@@ -64,9 +63,14 @@ final class MeetingRecord {
         pinnedAt != nil
     }
 
+    var speakerDiarizationRequested: Bool {
+        get { speakerDiarizationRequestedBacking ?? false }
+        set { speakerDiarizationRequestedBacking = newValue }
+    }
+
     var speakerProcessingState: SpeakerProcessingState {
         get {
-            SpeakerProcessingState(rawValue: speakerProcessingStateRawValue)
+            speakerProcessingStateRawValue.flatMap(SpeakerProcessingState.init)
                 ?? .notRequested
         }
         set {

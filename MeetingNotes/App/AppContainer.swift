@@ -33,8 +33,10 @@ final class AppContainer {
         repository: MeetingRepository,
         fileStore: MeetingFileStore,
         recordingsURL: URL,
-        coordinatorDependencies: ((any RecordingPanelPresenting) ->
-            MeetingCoordinatorDependencies)? = nil,
+        coordinatorDependencies: ((
+            any RecordingPanelPresenting,
+            any SpeakerDiarizationPreferenceReading
+        ) -> MeetingCoordinatorDependencies)? = nil,
         modelPreparer: (any TranscriptionModelPreparing)? = nil,
         credentialStore: (any CredentialStore)? = nil,
         settingsStore: AppSettingsStore? = nil,
@@ -50,6 +52,10 @@ final class AppContainer {
         self.fileStore = fileStore
         let settingsStore = settingsStore ?? AppSettingsStore()
         self.settingsStore = settingsStore
+        let speakerDiarizationPreference =
+            MainActorSpeakerDiarizationPreferenceAdapter(
+                settingsStore: settingsStore
+            )
 
         let controlRouter = MeetingControlRouter()
         self.controlRouter = controlRouter
@@ -68,10 +74,13 @@ final class AppContainer {
             preparer: modelPreparer ?? transcriptionService
         )
         self.onboardingState = onboardingState ?? OnboardingState()
-        let dependencies = coordinatorDependencies?(panelPresenter) ?? .live(
+        let dependencies = coordinatorDependencies?(
+            panelPresenter,
+            speakerDiarizationPreference
+        ) ?? .live(
             repository: repository,
             fileStore: fileStore,
-            speakerDiarizationPreference: settingsStore,
+            speakerDiarizationPreference: speakerDiarizationPreference,
             panel: panelPresenter,
             transcriptionService: transcriptionService
         )

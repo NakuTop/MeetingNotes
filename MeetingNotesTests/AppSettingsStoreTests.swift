@@ -3,6 +3,24 @@ import XCTest
 @testable import MeetingNotes
 
 final class AppSettingsStoreTests: XCTestCase {
+    @MainActor
+    func testMainActorSpeakerPreferenceAdapterReadsStoreAsynchronously() async throws {
+        let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let store = AppSettingsStore(defaults: defaults)
+        let reader = MainActorSpeakerDiarizationPreferenceAdapter(
+            settingsStore: store
+        )
+        store.isSpeakerDiarizationEnabled = true
+
+        let isEnabled = await reader.isSpeakerDiarizationEnabled()
+
+        XCTAssertTrue(isEnabled)
+    }
+
     func testSpeakerDiarizationDefaultsToDisabledWhenPreferenceIsMissing() throws {
         let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

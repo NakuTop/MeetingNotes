@@ -36,12 +36,21 @@ protocol MeetingTranscriptionQueueFactory: Sendable {
 }
 
 protocol SpeakerDiarizationPreferenceReading: Sendable {
-    var isSpeakerDiarizationEnabled: Bool { get }
+    func isSpeakerDiarizationEnabled() async -> Bool
 }
 
-struct DisabledSpeakerDiarizationPreference:
+@MainActor
+final class MainActorSpeakerDiarizationPreferenceAdapter:
     SpeakerDiarizationPreferenceReading {
-    let isSpeakerDiarizationEnabled = false
+    private let settingsStore: AppSettingsStore
+
+    init(settingsStore: AppSettingsStore) {
+        self.settingsStore = settingsStore
+    }
+
+    func isSpeakerDiarizationEnabled() async -> Bool {
+        settingsStore.isSpeakerDiarizationEnabled
+    }
 }
 
 protocol MeetingLifecycleRepository: Sendable {
@@ -89,8 +98,7 @@ struct MeetingCoordinatorDependencies: Sendable {
         transcriptionFactory: any MeetingTranscriptionQueueFactory,
         repository: any MeetingLifecycleRepository,
         speakerDiarizationPreference:
-            any SpeakerDiarizationPreferenceReading =
-                DisabledSpeakerDiarizationPreference(),
+            any SpeakerDiarizationPreferenceReading,
         panel: any RecordingPanelPresenting,
         clock: any MeetingClock
     ) {

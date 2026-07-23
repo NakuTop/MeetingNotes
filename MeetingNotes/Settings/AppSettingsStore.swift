@@ -2,9 +2,7 @@ import Foundation
 import Observation
 
 @Observable
-final class AppSettingsStore:
-    SpeakerDiarizationPreferenceReading,
-    @unchecked Sendable {
+final class AppSettingsStore {
     static let defaultDeepSeekModel = "deepseek-v4-flash"
 
     private enum Key {

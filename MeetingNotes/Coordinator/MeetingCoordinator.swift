@@ -108,9 +108,9 @@ actor MeetingCoordinator {
 
         do {
             let startedAt = await dependencies.clock.now()
-            let speakerDiarizationRequested = dependencies
+            let speakerDiarizationRequested = await dependencies
                 .speakerDiarizationPreference
-                .isSpeakerDiarizationEnabled
+                .isSpeakerDiarizationEnabled()
             let createdID = try await dependencies.repository.createMeeting(
                 mode: mode,
                 startedAt: startedAt,

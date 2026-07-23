@@ -58,7 +58,9 @@ final class LaunchArgumentsTests: XCTestCase {
     @MainActor
     func testUITestingContainerRecordsAndTranscribesWithoutLiveServices() async throws {
         #if DEBUG
-        let container = try AppContainer.uiTesting()
+        let container = try AppContainer.uiTesting(
+            speakerDiarizationEnabled: true
+        )
         XCTAssertFalse(
             container.onboardingState.shouldPresentPrivacyAndConsent
         )
@@ -74,6 +76,7 @@ final class LaunchArgumentsTests: XCTestCase {
         XCTAssertEqual(snapshot.state, .idle)
         let meeting = try XCTUnwrap(container.libraryViewModel.meetings.first)
         XCTAssertEqual(meeting.state, .ready)
+        XCTAssertTrue(meeting.speakerDiarizationRequested)
         XCTAssertEqual(
             meeting.transcripts.map(\.text),
             ["UI 测试会议转录"]

@@ -3,6 +3,24 @@ import XCTest
 
 @MainActor
 final class MeetingRepositoryTests: XCTestCase {
+    func testLegacyNilSpeakerFieldsFallBackToSafeBusinessDefaults() {
+        let meeting = MeetingRecord(
+            title: "旧会议",
+            mode: .offline,
+            state: .ready,
+            startedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        meeting.speakerDiarizationRequestedBacking = nil
+        meeting.speakerProcessingStateRawValue = nil
+
+        XCTAssertFalse(meeting.speakerDiarizationRequested)
+        XCTAssertEqual(meeting.speakerProcessingState, .notRequested)
+
+        meeting.speakerProcessingStateRawValue = "legacy-unknown-state"
+
+        XCTAssertEqual(meeting.speakerProcessingState, .notRequested)
+    }
+
     func testCreateMeetingDefaultsSpeakerProcessingToNotRequested() throws {
         let repository = try MeetingRepository.inMemory()
 
@@ -13,7 +31,12 @@ final class MeetingRepositoryTests: XCTestCase {
 
         let meeting = try repository.meeting(id: id)
         XCTAssertFalse(meeting.speakerDiarizationRequested)
+        XCTAssertEqual(meeting.speakerDiarizationRequestedBacking, false)
         XCTAssertEqual(meeting.speakerProcessingState, .notRequested)
+        XCTAssertEqual(
+            meeting.speakerProcessingStateRawValue,
+            SpeakerProcessingState.notRequested.rawValue
+        )
         XCTAssertNil(meeting.speakerProcessingErrorCode)
     }
 
@@ -28,6 +51,7 @@ final class MeetingRepositoryTests: XCTestCase {
 
         let meeting = try repository.meeting(id: id)
         XCTAssertTrue(meeting.speakerDiarizationRequested)
+        XCTAssertEqual(meeting.speakerDiarizationRequestedBacking, true)
         XCTAssertEqual(meeting.speakerProcessingState, .pending)
         XCTAssertNil(meeting.speakerProcessingErrorCode)
     }

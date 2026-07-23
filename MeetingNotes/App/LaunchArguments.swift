@@ -63,7 +63,9 @@ enum LaunchArguments {
 #if DEBUG
 @MainActor
 extension AppContainer {
-    static func uiTesting() throws -> AppContainer {
+    static func uiTesting(
+        speakerDiarizationEnabled: Bool = false
+    ) throws -> AppContainer {
         let repository = try MeetingRepository.inMemory()
         let usesSlowRenameFixture =
             LaunchArguments.usesSlowRenameUITestFixture()
@@ -131,6 +133,7 @@ extension AppContainer {
         defaults.removePersistentDomain(forName: suiteName)
         let settings = AppSettingsStore(defaults: defaults)
         settings.deepSeekModel = "deepseek-chat"
+        settings.isSpeakerDiarizationEnabled = speakerDiarizationEnabled
         settings.notionParentPageURL =
             "https://www.notion.so/UI-Parent-1234567890abcdef1234567890abcdef"
         let onboarding = OnboardingState(defaults: defaults)
@@ -140,7 +143,7 @@ extension AppContainer {
             repository: repository,
             fileStore: fileStore,
             recordingsURL: recordingsURL,
-            coordinatorDependencies: { panel in
+            coordinatorDependencies: { panel, speakerPreference in
                 MeetingCoordinatorDependencies(
                     permissions: UITestPermissionAuthorizer(),
                     captureFactory: UITestCaptureFactory(),
@@ -149,6 +152,7 @@ extension AppContainer {
                     repository: MeetingRepositoryLifecycleAdapter(
                         repository: repository
                     ),
+                    speakerDiarizationPreference: speakerPreference,
                     panel: panel,
                     clock: UITestClock()
                 )

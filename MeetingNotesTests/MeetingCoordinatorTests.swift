@@ -1054,7 +1054,7 @@ private final class MutableSpeakerDiarizationPreference:
         }
     }
 
-    var isSpeakerDiarizationEnabled: Bool {
+    func isSpeakerDiarizationEnabled() async -> Bool {
         isEnabled
     }
 }
