@@ -368,22 +368,31 @@ actor MeetingCoordinator {
                 throw MeetingCoordinatorError.transcriptPersistenceFailed
             }
 
-            let provisional = await transcriber.transcripts()
-            if speakerDiarizationRequested {
-                try? await dependencies.repository
-                    .markSpeakerProcessingStarted(meetingID: meetingID)
+            let speakerDegradationCode: String?
+            if preferredSourceDegradation() == nil {
+                let provisional = await transcriber.transcripts()
+                if speakerDiarizationRequested {
+                    try? await dependencies.repository
+                        .markSpeakerProcessingStarted(meetingID: meetingID)
+                }
+                let speakerOutcome =
+                    await dependencies.speakerFinalizer.finalize(
+                        meetingID: meetingID,
+                        mode: mode,
+                        diarizationRequested: speakerDiarizationRequested,
+                        provisional: provisional
+                    )
+                speakerDegradationCode =
+                    await applySpeakerFinalizationOutcome(
+                        speakerOutcome,
+                        meetingID: meetingID
+                    )
+            } else {
+                // A source writer may still have a valid but truncated
+                // manifest. Never let that partial track replace the complete
+                // mixed provisional transcript.
+                speakerDegradationCode = nil
             }
-            let speakerOutcome = await dependencies.speakerFinalizer.finalize(
-                meetingID: meetingID,
-                mode: mode,
-                diarizationRequested: speakerDiarizationRequested,
-                provisional: provisional
-            )
-            let speakerDegradationCode =
-                await applySpeakerFinalizationOutcome(
-                    speakerOutcome,
-                    meetingID: meetingID
-                )
             let endedAt = await dependencies.clock.now()
             try await dependencies.repository.finalizeMeeting(
                 meetingID: meetingID,
