@@ -48,8 +48,25 @@ struct SpeakerIntervalAssigner: Sendable {
         _ drafts: [TranscriptDraft],
         intervals: [SpeakerInterval]
     ) -> [String?] {
-        drafts.map { draft in
-            bestInterval(for: draft, intervals: intervals)?
+        let validIntervals: [SpeakerInterval] = intervals.compactMap {
+            interval in
+            let rawSpeakerID = interval.rawSpeakerID
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !rawSpeakerID.isEmpty,
+                  interval.startTime.isFinite,
+                  interval.endTime.isFinite,
+                  interval.startTime >= 0,
+                  interval.endTime > interval.startTime else {
+                return nil
+            }
+            return SpeakerInterval(
+                rawSpeakerID: rawSpeakerID,
+                startTime: interval.startTime,
+                endTime: interval.endTime
+            )
+        }
+        return drafts.map { draft in
+            bestInterval(for: draft, intervals: validIntervals)?
                 .rawSpeakerID
         }
     }

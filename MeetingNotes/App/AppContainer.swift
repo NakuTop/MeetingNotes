@@ -82,10 +82,11 @@ final class AppContainer {
         let transcriptionService = WhisperKitTranscriptionService(
             model: Self.defaultModel,
             persistentModelFolder: Self.persistentModelFolder)
-        let speakerDiarizer = FluidAudioSpeakerDiarizer(
-            modelsDirectory: Self.fluidAudioModelsFolder
-        )
         let sourceLoader = MeetingAudioSourceLoader(fileStore: fileStore)
+        let speakerDiarizer = FluidAudioSpeakerDiarizer(
+            modelsDirectory: Self.fluidAudioModelsFolder,
+            sourceLoader: sourceLoader
+        )
         transcriptionModelViewModel = TranscriptionModelViewModel(
             preparer: modelPreparer ?? transcriptionService
         )

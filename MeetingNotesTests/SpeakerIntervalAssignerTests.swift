@@ -175,4 +175,31 @@ final class SpeakerIntervalAssignerTests: XCTestCase {
         )
         XCTAssertEqual(offline.map(\.source), [.room, .room])
     }
+
+    func testIgnoresInvalidIntervalsBeforeDeterministicSelection() {
+        let draft = TranscriptDraft(
+            startTime: 1,
+            endTime: 2,
+            text: "有效说话人"
+        )
+        let intervals = [
+            SpeakerInterval(
+                rawSpeakerID: "invalid",
+                startTime: .nan,
+                endTime: 2
+            ),
+            SpeakerInterval(
+                rawSpeakerID: "valid",
+                startTime: 1,
+                endTime: 2
+            ),
+        ]
+
+        let rawIDs = SpeakerIntervalAssigner().assignedRawSpeakerIDs(
+            [draft],
+            intervals: intervals
+        )
+
+        XCTAssertEqual(rawIDs, ["valid"])
+    }
 }

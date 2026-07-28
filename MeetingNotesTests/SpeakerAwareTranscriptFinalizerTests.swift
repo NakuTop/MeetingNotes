@@ -550,6 +550,14 @@ private struct FakeSpeakerAudioSourceLoader:
         }
         return source
     }
+
+    func confirmSegmentIdentity(
+        in source: MeetingAudioSource,
+        segmentIndex: Int
+    ) async throws {
+        _ = source
+        _ = segmentIndex
+    }
 }
 
 private actor FakeSpeakerDiarizer: SpeakerDiarizing {

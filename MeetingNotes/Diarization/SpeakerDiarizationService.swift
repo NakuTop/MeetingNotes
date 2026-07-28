@@ -22,6 +22,11 @@ protocol MeetingTrackAudioSourceLoading: Sendable {
         meetingID: UUID,
         track: AudioTrack
     ) async throws -> MeetingAudioSource
+
+    func confirmSegmentIdentity(
+        in source: MeetingAudioSource,
+        segmentIndex: Int
+    ) async throws
 }
 
 extension MeetingAudioSourceLoader: MeetingTrackAudioSourceLoading {}
