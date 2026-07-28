@@ -20,6 +20,22 @@ protocol DiarizationAudioConverting: Sendable {
     ) async throws -> Int
 }
 
+struct DiarizationTimelineLimits: Sendable {
+    let maximumTimelineFrames: Int64
+    let maximumSingleGapFrames: Int64
+    let maximumTimelineByteCount: Int64
+
+    // The local diarization path intentionally supports at most a 12-hour
+    // stitched meeting with no single positive gap longer than 2 hours.
+    static let production = DiarizationTimelineLimits(
+        maximumTimelineFrames: 12 * 60 * 60 * 48_000,
+        maximumSingleGapFrames: 2 * 60 * 60 * 48_000,
+        maximumTimelineByteCount:
+            12 * 60 * 60 * 48_000
+                * Int64(MemoryLayout<Float>.stride)
+    )
+}
+
 struct DiarizationDiskAudioSource: StreamingAudioSampleSource {
     private let mappedData: Data
     let fileURL: URL
@@ -67,12 +83,17 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
     private static let sourceSampleRate = 48_000
     private static let targetSampleRate = 16_000
     private static let bufferFrameCount: AVAudioFrameCount = 16_384
+    // FluidAudio 0.12.6 diarization timestamps follow the segmentation
+    // model's output grid over its 10-second window, rather than exact 16 kHz
+    // sample positions. One tenth of a second is a conservative frame bound.
+    private static let modelFrameEndTolerance: TimeInterval = 0.1
 
     private let modelsDirectory: URL
     private let sourceLoader: any MeetingTrackAudioSourceLoading
     private let engine: any DiarizationEngine
     private let converter: any DiarizationAudioConverting
     private let temporaryDirectory: URL
+    private let timelineLimits: DiarizationTimelineLimits
     private var modelsArePrepared = false
     private var operationIsActive = false
     private var operationWaiters: [OperationWaiter] = []
@@ -86,6 +107,7 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
         engine = OfflineFluidAudioDiarizationEngine()
         converter = AVAudioDiarizationConverter()
         temporaryDirectory = FileManager.default.temporaryDirectory
+        timelineLimits = .production
     }
 
     init(
@@ -93,13 +115,15 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
         sourceLoader: any MeetingTrackAudioSourceLoading,
         engine: any DiarizationEngine,
         converter: any DiarizationAudioConverting,
-        temporaryDirectory: URL
+        temporaryDirectory: URL,
+        timelineLimits: DiarizationTimelineLimits = .production
     ) {
         self.modelsDirectory = modelsDirectory
         self.sourceLoader = sourceLoader
         self.engine = engine
         self.converter = converter
         self.temporaryDirectory = temporaryDirectory
+        self.timelineLimits = timelineLimits
     }
 
     func diarize(
@@ -224,16 +248,7 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
     private func makeTimelineAudio(
         for source: MeetingAudioSource
     ) async throws -> PreparedTimelineAudio {
-        let segmentCount = source.resolvedSegments.count
-        guard segmentCount > 0,
-              source.segmentFrameCounts.count == segmentCount,
-              source.segmentStartTimes.count == segmentCount,
-              source.sampleRate == Double(Self.sourceSampleRate),
-              source.channelCount == 1,
-              source.totalFrames
-                == source.segmentFrameCounts.reduce(0, +) else {
-            throw SpeakerDiarizationError.inferenceFailed
-        }
+        let plan = try makeTimelinePlan(for: source)
 
         let outputURL = temporaryDirectory.appendingPathComponent(
             "meeting-notes-diarization-\(UUID().uuidString).caf"
@@ -246,55 +261,140 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
                 commonFormat: .pcmFormatFloat32,
                 interleaved: false
             )
-            var outputFrames: Int64 = 0
             defer { outputFile.close() }
 
-            for segmentIndex in 0..<segmentCount {
+            for segment in plan.segments {
                 try Task.checkCancellation()
-                let expectedFrames =
-                    source.segmentFrameCounts[segmentIndex]
-                let startTime = source.segmentStartTimes[segmentIndex]
-                guard expectedFrames > 0,
-                      startTime.isFinite,
-                      startTime >= 0 else {
-                    throw SpeakerDiarizationError.inferenceFailed
-                }
-                let startFrameValue =
-                    startTime * Double(Self.sourceSampleRate)
-                guard startFrameValue.isFinite,
-                      startFrameValue <= Double(Int64.max) else {
-                    throw SpeakerDiarizationError.inferenceFailed
-                }
-                let startFrame = Int64(startFrameValue.rounded())
-                guard startFrame >= outputFrames else {
-                    throw SpeakerDiarizationError.inferenceFailed
-                }
-
                 try writeSilence(
-                    frameCount: startFrame - outputFrames,
+                    frameCount: segment.gapFrames,
                     format: format,
                     to: outputFile
                 )
-                outputFrames = startFrame
                 try await appendSegment(
                     source: source,
-                    segmentIndex: segmentIndex,
-                    expectedFrames: expectedFrames,
+                    segmentIndex: segment.index,
+                    expectedFrames: segment.frameCount,
                     expectedFormat: format,
                     to: outputFile
                 )
-                outputFrames += expectedFrames
             }
             outputFile.close()
             return PreparedTimelineAudio(
                 url: outputURL,
-                duration: Double(outputFrames)
+                duration: Double(plan.totalFrames)
                     / Double(Self.sourceSampleRate)
             )
         } catch {
             try? FileManager.default.removeItem(at: outputURL)
             throw error
         }
+    }
+
+    private func makeTimelinePlan(
+        for source: MeetingAudioSource
+    ) throws -> DiarizationTimelinePlan {
+        let segmentCount = source.resolvedSegments.count
+        guard segmentCount > 0,
+              source.segmentFrameCounts.count == segmentCount,
+              source.segmentStartTimes.count == segmentCount,
+              source.sampleRate == Double(Self.sourceSampleRate),
+              source.channelCount == 1,
+              timelineLimits.maximumTimelineFrames > 0,
+              timelineLimits.maximumSingleGapFrames >= 0,
+              timelineLimits.maximumSingleGapFrames
+                <= timelineLimits.maximumTimelineFrames,
+              timelineLimits.maximumTimelineByteCount > 0 else {
+            throw SpeakerDiarizationError.inferenceFailed
+        }
+
+        var checkedSourceFrames: Int64 = 0
+        for frameCount in source.segmentFrameCounts {
+            guard frameCount > 0 else {
+                throw SpeakerDiarizationError.inferenceFailed
+            }
+            let addition = checkedSourceFrames.addingReportingOverflow(
+                frameCount
+            )
+            guard !addition.overflow,
+                  addition.partialValue
+                    <= timelineLimits.maximumTimelineFrames else {
+                throw SpeakerDiarizationError.inferenceFailed
+            }
+            checkedSourceFrames = addition.partialValue
+        }
+        guard checkedSourceFrames == source.totalFrames else {
+            throw SpeakerDiarizationError.inferenceFailed
+        }
+
+        let maximumStartTime =
+            Double(timelineLimits.maximumTimelineFrames)
+                / Double(Self.sourceSampleRate)
+        var outputFrames: Int64 = 0
+        var segments: [DiarizationTimelineSegmentPlan] = []
+        segments.reserveCapacity(segmentCount)
+
+        for index in 0..<segmentCount {
+            let startTime = source.segmentStartTimes[index]
+            guard startTime.isFinite,
+                  startTime >= 0,
+                  startTime <= maximumStartTime else {
+                throw SpeakerDiarizationError.inferenceFailed
+            }
+            let startFrameValue =
+                startTime * Double(Self.sourceSampleRate)
+            guard startFrameValue.isFinite,
+                  startFrameValue >= 0,
+                  startFrameValue
+                    <= Double(timelineLimits.maximumTimelineFrames) else {
+                throw SpeakerDiarizationError.inferenceFailed
+            }
+            let roundedStartFrame = startFrameValue.rounded()
+            guard roundedStartFrame >= 0,
+                  roundedStartFrame
+                    <= Double(timelineLimits.maximumTimelineFrames) else {
+                throw SpeakerDiarizationError.inferenceFailed
+            }
+            let startFrame = Int64(roundedStartFrame)
+
+            let gap = startFrame.subtractingReportingOverflow(outputFrames)
+            guard !gap.overflow,
+                  gap.partialValue >= 0,
+                  gap.partialValue
+                    <= timelineLimits.maximumSingleGapFrames else {
+                throw SpeakerDiarizationError.inferenceFailed
+            }
+
+            let frameCount = source.segmentFrameCounts[index]
+            let end = startFrame.addingReportingOverflow(frameCount)
+            guard !end.overflow,
+                  end.partialValue
+                    <= timelineLimits.maximumTimelineFrames else {
+                throw SpeakerDiarizationError.inferenceFailed
+            }
+            let byteCount = end.partialValue
+                .multipliedReportingOverflow(
+                    by: Int64(MemoryLayout<Float>.stride)
+                )
+            guard !byteCount.overflow,
+                  byteCount.partialValue
+                    <= timelineLimits.maximumTimelineByteCount else {
+                throw SpeakerDiarizationError.inferenceFailed
+            }
+
+            segments.append(
+                DiarizationTimelineSegmentPlan(
+                    index: index,
+                    gapFrames: gap.partialValue,
+                    frameCount: frameCount
+                )
+            )
+            outputFrames = end.partialValue
+        }
+
+        return DiarizationTimelinePlan(
+            segments: segments,
+            totalFrames: outputFrames
+        )
     }
 
     private func appendSegment(
@@ -443,7 +543,6 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
         _ intervals: [SpeakerInterval],
         timelineDuration: TimeInterval
     ) throws -> [SpeakerInterval] {
-        let endTolerance = 1 / Double(Self.targetSampleRate)
         return try intervals.map { interval in
             let speakerID = interval.rawSpeakerID
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -453,13 +552,21 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
                   interval.startTime >= 0,
                   interval.endTime > interval.startTime,
                   interval.endTime
-                    <= timelineDuration + endTolerance else {
+                    <= timelineDuration
+                        + Self.modelFrameEndTolerance else {
+                throw SpeakerDiarizationError.inferenceFailed
+            }
+            let clampedEnd = min(
+                interval.endTime,
+                timelineDuration
+            )
+            guard clampedEnd > interval.startTime else {
                 throw SpeakerDiarizationError.inferenceFailed
             }
             return SpeakerInterval(
                 rawSpeakerID: speakerID,
                 startTime: interval.startTime,
-                endTime: interval.endTime
+                endTime: clampedEnd
             )
         }
     }
@@ -477,6 +584,17 @@ private struct PreparedTimelineAudio: Sendable {
     func cleanup() {
         try? FileManager.default.removeItem(at: url)
     }
+}
+
+private struct DiarizationTimelinePlan: Sendable {
+    let segments: [DiarizationTimelineSegmentPlan]
+    let totalFrames: Int64
+}
+
+private struct DiarizationTimelineSegmentPlan: Sendable {
+    let index: Int
+    let gapFrames: Int64
+    let frameCount: Int64
 }
 
 private final class OfflineFluidAudioDiarizationEngine:

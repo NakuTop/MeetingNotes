@@ -41,7 +41,7 @@ final class FluidAudioSpeakerDiarizerResourceTests:
             SpeakerInterval(
                 rawSpeakerID: "past-end",
                 startTime: 0.05,
-                endTime: 0.1 + 1.0 / 16_000 + 0.000_001
+                endTime: 0.201
             ),
         ]
 
@@ -85,7 +85,7 @@ final class FluidAudioSpeakerDiarizerResourceTests:
                 SpeakerInterval(
                     rawSpeakerID: "beta",
                     startTime: 0.04,
-                    endTime: 0.1 + 1.0 / 16_000
+                    endTime: 0.09
                 ),
             ]]
         )
@@ -111,10 +111,149 @@ final class FluidAudioSpeakerDiarizerResourceTests:
                 SpeakerInterval(
                     rawSpeakerID: "beta",
                     startTime: 0.04,
-                    endTime: 0.1 + 1.0 / 16_000
+                    endTime: 0.09
                 ),
             ]
         )
+    }
+
+    func testClampsFiftyMillisecondModelFrameOvershootToTimelineEnd()
+        async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [
+                Array(repeating: 0.25, count: 4_800),
+            ],
+            segmentStartTimes: [0]
+        )
+        let engine = DiarizationAdapterImmediateEngine(
+            results: [[
+                SpeakerInterval(
+                    rawSpeakerID: "speaker",
+                    startTime: 0.05,
+                    endTime: 0.15
+                ),
+            ]]
+        )
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: engine,
+            converter: DiarizationAdapterTestConverter()
+        )
+
+        let intervals = try await diarizer.diarize(source: source)
+
+        XCTAssertEqual(
+            intervals,
+            [
+                SpeakerInterval(
+                    rawSpeakerID: "speaker",
+                    startTime: 0.05,
+                    endTime: 0.1
+                ),
+            ]
+        )
+    }
+
+    func testRejectsOneHundredOneMillisecondOvershoot()
+        async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [
+                Array(repeating: 0.25, count: 4_800),
+            ],
+            segmentStartTimes: [0]
+        )
+        let engine = DiarizationAdapterImmediateEngine(
+            results: [[
+                SpeakerInterval(
+                    rawSpeakerID: "speaker",
+                    startTime: 0.05,
+                    endTime: 0.201
+                ),
+            ]]
+        )
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: engine,
+            converter: DiarizationAdapterTestConverter()
+        )
+
+        await assertInferenceFailure {
+            try await diarizer.diarize(source: source)
+        }
+    }
+
+    func testKeepsExactTimelineEndUnchanged() async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [
+                Array(repeating: 0.25, count: 4_800),
+            ],
+            segmentStartTimes: [0]
+        )
+        let exact = SpeakerInterval(
+            rawSpeakerID: "speaker",
+            startTime: 0,
+            endTime: 0.1
+        )
+        let engine = DiarizationAdapterImmediateEngine(
+            results: [[exact]]
+        )
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: engine,
+            converter: DiarizationAdapterTestConverter()
+        )
+
+        let intervals = try await diarizer.diarize(source: source)
+
+        XCTAssertEqual(intervals, [exact])
+    }
+
+    func testRejectsRangeMadeInvalidByTimelineClamp()
+        async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [
+                Array(repeating: 0.25, count: 4_800),
+            ],
+            segmentStartTimes: [0]
+        )
+        let engine = DiarizationAdapterImmediateEngine(
+            results: [[
+                SpeakerInterval(
+                    rawSpeakerID: "speaker",
+                    startTime: 0.11,
+                    endTime: 0.15
+                ),
+            ]]
+        )
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: engine,
+            converter: DiarizationAdapterTestConverter()
+        )
+
+        await assertInferenceFailure {
+            try await diarizer.diarize(source: source)
+        }
     }
 
     func testConversionFailureDeletesRawAndTimelineTemporaryFiles()

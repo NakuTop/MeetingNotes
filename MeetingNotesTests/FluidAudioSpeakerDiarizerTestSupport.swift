@@ -72,7 +72,8 @@ class DiarizationAdapterTestCase: XCTestCase {
         root: URL,
         sourceLoader: any MeetingTrackAudioSourceLoading,
         engine: any DiarizationEngine,
-        converter: any DiarizationAudioConverting
+        converter: any DiarizationAudioConverting,
+        timelineLimits: DiarizationTimelineLimits = .production
     ) -> FluidAudioSpeakerDiarizer {
         FluidAudioSpeakerDiarizer(
             modelsDirectory: root.appendingPathComponent(
@@ -82,7 +83,8 @@ class DiarizationAdapterTestCase: XCTestCase {
             sourceLoader: sourceLoader,
             engine: engine,
             converter: converter,
-            temporaryDirectory: root
+            temporaryDirectory: root,
+            timelineLimits: timelineLimits
         )
     }
 

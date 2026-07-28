@@ -146,4 +146,141 @@ final class FluidAudioSpeakerDiarizerTimelineTests:
         XCTAssertTrue(outputURLs.isEmpty)
         XCTAssertEqual(counts.process, 0)
     }
+
+    func testRejectsInt64MaximumStartTimeBeforeConversion()
+        async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [[0.25]],
+            segmentStartTimes: [Double(Int64.max)]
+        )
+        let converter = DiarizationAdapterTestConverter()
+        let engine = DiarizationAdapterImmediateEngine(results: [[]])
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: engine,
+            converter: converter
+        )
+
+        await assertInferenceFailure {
+            try await diarizer.diarize(source: source)
+        }
+
+        let outputURLs = await converter.recordedOutputURLs()
+        let counts = await engine.counts()
+        XCTAssertTrue(outputURLs.isEmpty)
+        XCTAssertEqual(counts.process, 0)
+    }
+
+    func testRejectsFiniteGapAboveTwoHoursBeforeConversion()
+        async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [[0.25]],
+            segmentStartTimes: [
+                2 * 60 * 60 + 1.0 / 48_000,
+            ]
+        )
+        let converter = DiarizationAdapterTestConverter()
+        let engine = DiarizationAdapterImmediateEngine(results: [[]])
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: engine,
+            converter: converter
+        )
+
+        await assertInferenceFailure {
+            try await diarizer.diarize(source: source)
+        }
+
+        let outputURLs = await converter.recordedOutputURLs()
+        let counts = await engine.counts()
+        XCTAssertTrue(outputURLs.isEmpty)
+        XCTAssertEqual(counts.process, 0)
+    }
+
+    func testRejectsSegmentEndBeyondInjectedTimelineLimit()
+        async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [
+                Array(repeating: 0.25, count: 5),
+            ],
+            segmentStartTimes: [2.0 / 48_000]
+        )
+        let converter = DiarizationAdapterTestConverter()
+        let engine = DiarizationAdapterImmediateEngine(results: [[]])
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: engine,
+            converter: converter,
+            timelineLimits: DiarizationTimelineLimits(
+                maximumTimelineFrames: 6,
+                maximumSingleGapFrames: 2,
+                maximumTimelineByteCount: 24
+            )
+        )
+
+        await assertInferenceFailure {
+            try await diarizer.diarize(source: source)
+        }
+
+        let outputURLs = await converter.recordedOutputURLs()
+        let counts = await engine.counts()
+        XCTAssertTrue(outputURLs.isEmpty)
+        XCTAssertEqual(counts.process, 0)
+    }
+
+    func testAcceptsExactInjectedGapTimelineAndByteBoundaries()
+        async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [
+                Array(repeating: 0.25, count: 3),
+                Array(repeating: 0.75, count: 3),
+            ],
+            segmentStartTimes: [0, 7.0 / 48_000]
+        )
+        let converter = DiarizationAdapterTestConverter()
+        let engine = DiarizationAdapterImmediateEngine(results: [[]])
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: engine,
+            converter: converter,
+            timelineLimits: DiarizationTimelineLimits(
+                maximumTimelineFrames: 10,
+                maximumSingleGapFrames: 4,
+                maximumTimelineByteCount: 40
+            )
+        )
+
+        let intervals = try await diarizer.diarize(source: source)
+
+        let recordedInputs = await converter.recordedInputSamples()
+        let captured = try XCTUnwrap(recordedInputs.first)
+        let counts = await engine.counts()
+        XCTAssertTrue(intervals.isEmpty)
+        XCTAssertEqual(captured.count, 10)
+        XCTAssertEqual(
+            Array(captured[3..<7]),
+            Array(repeating: 0, count: 4)
+        )
+        XCTAssertEqual(counts.process, 1)
+    }
 }
