@@ -241,6 +241,197 @@ final class MeetingCoordinatorTests: XCTestCase {
         }
     }
 
+    func testStopReplacesOnlineTranscriptAfterWritersAndProvisionalPersistence()
+        async throws {
+        let replacement = [
+            AttributedTranscriptDraft(
+                transcript: TranscriptDraft(
+                    startTime: 0,
+                    endTime: 1,
+                    text: "我"
+                ),
+                speakerID: "me",
+                source: .microphone
+            ),
+            AttributedTranscriptDraft(
+                transcript: TranscriptDraft(
+                    startTime: 1,
+                    endTime: 2,
+                    text: "远端"
+                ),
+                speakerID: "remote",
+                source: .system
+            ),
+        ]
+        let fixture = makeFixture(
+            packets: [makeOnlinePacket(index: 0)],
+            transcriptionChunkSampleCount: 1,
+            transcriberEmitsDrafts: true,
+            speakerFinalizationOutcome: .replacement(
+                replacement,
+                sourceRevision: 1
+            )
+        )
+        let meetingID = try await fixture.coordinator.start(mode: .online)
+        for _ in 0..<1_000 {
+            if await fixture.repository.savedTranscripts().count == 1 {
+                break
+            }
+            await Task.yield()
+        }
+
+        try await fixture.coordinator.stop()
+
+        let events = await fixture.events.values()
+        let finalizerRequests = await fixture.speakerFinalizer
+            .recordedRequests()
+        let request = try XCTUnwrap(
+            finalizerRequests.first
+        )
+        let repositoryReplacement = await fixture.repository
+            .savedReplacement()
+        let savedReplacement = try XCTUnwrap(
+            repositoryReplacement
+        )
+        XCTAssertEqual(request.meetingID, meetingID)
+        XCTAssertEqual(request.mode, .online)
+        XCTAssertFalse(request.diarizationRequested)
+        XCTAssertEqual(request.provisional.map(\.text), ["chunk-0"])
+        XCTAssertEqual(savedReplacement.drafts, replacement)
+        XCTAssertEqual(savedReplacement.sourceRevision, 1)
+
+        let microphoneFinished = try XCTUnwrap(
+            events.firstIndex(of: "writer.microphone.finish")
+        )
+        let systemFinished = try XCTUnwrap(
+            events.firstIndex(of: "writer.system.finish")
+        )
+        let masterFinished = try XCTUnwrap(
+            events.firstIndex(of: "writer.finish")
+        )
+        let updatesFinished = try XCTUnwrap(
+            events.firstIndex(of: "transcriber.finishUpdates")
+        )
+        let provisionalPersisted = try XCTUnwrap(
+            events.firstIndex(of: "repository.transcript")
+        )
+        let speakerFinalized = try XCTUnwrap(
+            events.firstIndex(of: "speaker.finalize")
+        )
+        let replacementSaved = try XCTUnwrap(
+            events.firstIndex(of: "repository.replace")
+        )
+        let meetingFinalized = try XCTUnwrap(
+            events.firstIndex(of: "repository.finalize")
+        )
+        XCTAssertLessThan(microphoneFinished, speakerFinalized)
+        XCTAssertLessThan(systemFinished, speakerFinalized)
+        XCTAssertLessThan(masterFinished, speakerFinalized)
+        XCTAssertLessThan(updatesFinished, speakerFinalized)
+        XCTAssertLessThan(provisionalPersisted, speakerFinalized)
+        XCTAssertLessThan(speakerFinalized, replacementSaved)
+        XCTAssertLessThan(replacementSaved, meetingFinalized)
+    }
+
+    func testDegradedFinalizationWithoutReplacementKeepsMeetingReady()
+        async throws {
+        let fixture = makeFixture(
+            speakerFinalizationOutcome: .degraded(
+                replacement: nil,
+                sourceRevision: nil,
+                errorCode: "source_track_transcription_failed_system"
+            )
+        )
+        let meetingID = try await fixture.coordinator.start(mode: .online)
+
+        try await fixture.coordinator.stop()
+
+        let replacement = await fixture.repository.savedReplacement()
+        let codes = await fixture.repository.savedDegradationCodes()
+        let state = await fixture.repository.savedState(for: meetingID)
+        XCTAssertNil(replacement)
+        XCTAssertEqual(
+            codes,
+            ["source_track_transcription_failed_system"]
+        )
+        XCTAssertEqual(state, .ready)
+    }
+
+    func testDegradedCoarseReplacementUsesStartPreferenceSnapshot()
+        async throws {
+        let replacement = [
+            AttributedTranscriptDraft(
+                transcript: TranscriptDraft(
+                    startTime: 0,
+                    endTime: 1,
+                    text: "粗粒度"
+                ),
+                speakerID: "me",
+                source: .microphone
+            ),
+        ]
+        let fixture = makeFixture(
+            speakerDiarizationEnabled: true,
+            speakerFinalizationOutcome: .degraded(
+                replacement: replacement,
+                sourceRevision: 1,
+                errorCode: "speaker_diarization_unavailable"
+            )
+        )
+        let meetingID = try await fixture.coordinator.start(mode: .online)
+        fixture.speakerDiarizationPreference.isEnabled = false
+
+        try await fixture.coordinator.stop()
+
+        let finalizerRequests = await fixture.speakerFinalizer
+            .recordedRequests()
+        let request = try XCTUnwrap(
+            finalizerRequests.first
+        )
+        let repositoryReplacement = await fixture.repository
+            .savedReplacement()
+        let savedReplacement = try XCTUnwrap(
+            repositoryReplacement
+        )
+        let codes = await fixture.repository.savedDegradationCodes()
+        let state = await fixture.repository.savedState(for: meetingID)
+        XCTAssertTrue(request.diarizationRequested)
+        XCTAssertEqual(savedReplacement.drafts, replacement)
+        XCTAssertEqual(codes, ["speaker_diarization_unavailable"])
+        XCTAssertEqual(state, .ready)
+    }
+
+    func testReplacementPersistenceFailureKeepsProvisionalMeetingReady()
+        async throws {
+        let fixture = makeFixture(
+            repositoryFailsReplacement: true,
+            speakerFinalizationOutcome: .replacement(
+                [
+                    AttributedTranscriptDraft(
+                        transcript: TranscriptDraft(
+                            startTime: 0,
+                            endTime: 1,
+                            text: "替换"
+                        ),
+                        speakerID: "me",
+                        source: .microphone
+                    ),
+                ],
+                sourceRevision: 1
+            )
+        )
+        let meetingID = try await fixture.coordinator.start(mode: .online)
+
+        try await fixture.coordinator.stop()
+
+        let replacement = await fixture.repository.savedReplacement()
+        let codes = await fixture.repository.savedDegradationCodes()
+        let state = await fixture.repository.savedState(for: meetingID)
+        XCTAssertNil(replacement)
+        XCTAssertEqual(codes, ["speaker_transcript_replacement_failed"])
+        XCTAssertEqual(state, .ready)
+    }
+
     func testStartsOfflineAgainAfterSuccessfulOfflineMeeting() async throws {
         let fixture = makeFixture()
 
@@ -986,9 +1177,11 @@ final class MeetingCoordinatorTests: XCTestCase {
         writerFactoryFailsForTrack: AudioTrack? = nil,
         repositoryDegradationFailures: Int = 0,
         repositoryFailsFinalizingUpdate: Bool = false,
+        repositoryFailsReplacement: Bool = false,
         repositoryFailsFinalize: Bool = false,
         captureSuspendsPause: Bool = false,
-        speakerDiarizationEnabled: Bool = false
+        speakerDiarizationEnabled: Bool = false,
+        speakerFinalizationOutcome: SpeakerFinalizationOutcome? = nil
     ) -> CoordinatorFixture {
         let events = CoordinatorEventLog()
         let captureModes = CoordinatorModeLog()
@@ -1024,7 +1217,13 @@ final class MeetingCoordinatorTests: XCTestCase {
             events: events,
             degradationFailures: repositoryDegradationFailures,
             failsFinalizingUpdate: repositoryFailsFinalizingUpdate,
+            failsReplacement: repositoryFailsReplacement,
             failsFinalize: repositoryFailsFinalize
+        )
+        let speakerFinalizer = FakeCoordinatorSpeakerFinalizer(
+            events: events,
+            outcome: speakerFinalizationOutcome ?? .unchanged,
+            recordsEvent: speakerFinalizationOutcome != nil
         )
         let panel = FakeCoordinatorPanel(events: events)
         let clock = ManualCoordinatorClock(
@@ -1051,6 +1250,7 @@ final class MeetingCoordinatorTests: XCTestCase {
             ),
             repository: repository,
             speakerDiarizationPreference: speakerDiarizationPreference,
+            speakerFinalizer: speakerFinalizer,
             panel: panel,
             clock: clock
         )
@@ -1073,6 +1273,7 @@ final class MeetingCoordinatorTests: XCTestCase {
             transcriber: transcriber,
             repository: repository,
             speakerDiarizationPreference: speakerDiarizationPreference,
+            speakerFinalizer: speakerFinalizer,
             panel: panel,
             clock: clock
         )
@@ -1089,6 +1290,7 @@ private struct CoordinatorFixture {
     let transcriber: FakeCoordinatorTranscriber
     let repository: FakeCoordinatorRepository
     let speakerDiarizationPreference: MutableSpeakerDiarizationPreference
+    let speakerFinalizer: FakeCoordinatorSpeakerFinalizer
     let panel: FakeCoordinatorPanel
     let clock: ManualCoordinatorClock
 
@@ -1111,6 +1313,7 @@ private enum CoordinatorTestError: Error, Equatable {
     case writerAppend
     case writerFactory
     case writerFinish
+    case repositoryReplacement
     case repositoryFinalize
 }
 
@@ -1352,6 +1555,7 @@ private actor FakeCoordinatorTranscriber: MeetingTranscriptionQueueing {
     private let events: CoordinatorEventLog
     private let emitsDrafts: Bool
     private var receivedChunks: [Chunk] = []
+    private var completedDrafts: [TranscriptDraft] = []
     private var updateContinuation: AsyncStream<TranscriptDraft>.Continuation?
     private var updatesFinished = false
 
@@ -1363,13 +1567,13 @@ private actor FakeCoordinatorTranscriber: MeetingTranscriptionQueueing {
     func enqueue(samples: [Float], startingAt: TimeInterval) async {
         receivedChunks.append(Chunk(samples: samples, startingAt: startingAt))
         if emitsDrafts {
-            updateContinuation?.yield(
-                TranscriptDraft(
-                    startTime: startingAt,
-                    endTime: startingAt + Double(samples.count) / 16_000,
-                    text: "chunk-\(Int(startingAt))"
-                )
+            let draft = TranscriptDraft(
+                startTime: startingAt,
+                endTime: startingAt + Double(samples.count) / 16_000,
+                text: "chunk-\(Int(startingAt))"
             )
+            completedDrafts.append(draft)
+            updateContinuation?.yield(draft)
         }
     }
 
@@ -1378,7 +1582,7 @@ private actor FakeCoordinatorTranscriber: MeetingTranscriptionQueueing {
     }
 
     func transcripts() async -> [TranscriptDraft] {
-        []
+        completedDrafts
     }
 
     func updates() async -> AsyncStream<TranscriptDraft> {
@@ -1403,6 +1607,55 @@ private actor FakeCoordinatorTranscriber: MeetingTranscriptionQueueing {
     }
 }
 
+private actor FakeCoordinatorSpeakerFinalizer:
+    MeetingSpeakerFinalizing {
+    struct Request: Equatable, Sendable {
+        let meetingID: UUID
+        let mode: MeetingMode
+        let diarizationRequested: Bool
+        let provisional: [TranscriptDraft]
+    }
+
+    private let events: CoordinatorEventLog
+    private let outcome: SpeakerFinalizationOutcome
+    private let recordsEvent: Bool
+    private var requests: [Request] = []
+
+    init(
+        events: CoordinatorEventLog,
+        outcome: SpeakerFinalizationOutcome,
+        recordsEvent: Bool
+    ) {
+        self.events = events
+        self.outcome = outcome
+        self.recordsEvent = recordsEvent
+    }
+
+    func finalize(
+        meetingID: UUID,
+        mode: MeetingMode,
+        diarizationRequested: Bool,
+        provisional: [TranscriptDraft]
+    ) async -> SpeakerFinalizationOutcome {
+        requests.append(
+            Request(
+                meetingID: meetingID,
+                mode: mode,
+                diarizationRequested: diarizationRequested,
+                provisional: provisional
+            )
+        )
+        if recordsEvent {
+            await events.append("speaker.finalize")
+        }
+        return outcome
+    }
+
+    func recordedRequests() -> [Request] {
+        requests
+    }
+}
+
 private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
     struct SavedMeeting: Equatable, Sendable {
         let id: UUID
@@ -1417,9 +1670,15 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
         let sourceDegradationErrorCode: String?
     }
 
+    struct SavedReplacement: Equatable, Sendable {
+        let drafts: [AttributedTranscriptDraft]
+        let sourceRevision: Int
+    }
+
     private let events: CoordinatorEventLog
     private var remainingDegradationFailures: Int
     private let failsFinalizingUpdate: Bool
+    private let failsReplacement: Bool
     private let failsFinalize: Bool
     private var meetings: [SavedMeeting] = []
     private var bookmarks: [TimeInterval] = []
@@ -1428,16 +1687,19 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
     private var degradationPersistenceAttempts = 0
     private var recordedFinalizeAttemptDegradationErrorCodes: [String?] = []
     private var savedFinalization: Finalization?
+    private var replacement: SavedReplacement?
 
     init(
         events: CoordinatorEventLog,
         degradationFailures: Int,
         failsFinalizingUpdate: Bool,
+        failsReplacement: Bool,
         failsFinalize: Bool
     ) {
         self.events = events
         remainingDegradationFailures = degradationFailures
         self.failsFinalizingUpdate = failsFinalizingUpdate
+        self.failsReplacement = failsReplacement
         self.failsFinalize = failsFinalize
     }
 
@@ -1489,8 +1751,15 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
         sourceRevision: Int
     ) async throws {
         _ = meetingID
-        _ = sourceRevision
+        await events.append("repository.replace")
+        if failsReplacement {
+            throw CoordinatorTestError.repositoryReplacement
+        }
         transcripts = drafts.map(\.transcript)
+        replacement = SavedReplacement(
+            drafts: drafts,
+            sourceRevision: sourceRevision
+        )
     }
 
     func markSpeakerProcessingDegraded(
@@ -1544,6 +1813,10 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
 
     func savedTranscripts() -> [TranscriptDraft] {
         transcripts
+    }
+
+    func savedReplacement() -> SavedReplacement? {
+        replacement
     }
 
     func savedDegradationCodes() -> [String] {

@@ -40,6 +40,7 @@ actor MeetingCoordinator {
     private var stateMachine = RecordingStateMachine()
     private var meetingID: UUID?
     private var mode: MeetingMode?
+    private var speakerDiarizationRequested = false
     private var capture: (any AudioCaptureSource)?
     private var masterWriter: (any MeetingAudioWriting)?
     private var sourceWriters: [AudioTrack: any MeetingAudioWriting] = [:]
@@ -170,6 +171,8 @@ actor MeetingCoordinator {
 
             meetingID = createdID
             self.mode = mode
+            self.speakerDiarizationRequested =
+                speakerDiarizationRequested
             capture = createdCapture
             masterWriter = createdMasterWriter
             sourceWriters = newSourceWriters
@@ -309,6 +312,7 @@ actor MeetingCoordinator {
         var finalizingMachine = stateMachine
         try finalizingMachine.send(.stop)
         guard let meetingID,
+              let mode,
               let capture,
               let masterWriter,
               let transcriber,
@@ -341,6 +345,18 @@ actor MeetingCoordinator {
                 throw MeetingCoordinatorError.transcriptPersistenceFailed
             }
 
+            let provisional = await transcriber.transcripts()
+            let speakerOutcome = await dependencies.speakerFinalizer.finalize(
+                meetingID: meetingID,
+                mode: mode,
+                diarizationRequested: speakerDiarizationRequested,
+                provisional: provisional
+            )
+            let speakerDegradationCode =
+                await applySpeakerFinalizationOutcome(
+                    speakerOutcome,
+                    meetingID: meetingID
+                )
             let endedAt = await dependencies.clock.now()
             try await dependencies.repository.finalizeMeeting(
                 meetingID: meetingID,
@@ -348,6 +364,7 @@ actor MeetingCoordinator {
                 activeDuration: activeDuration,
                 sourceDegradationErrorCode:
                     pendingSourceDegradations.first?.errorCode
+                    ?? speakerDegradationCode
             )
             pendingSourceDegradations.removeAll(keepingCapacity: true)
             var readyMachine = stateMachine
@@ -524,6 +541,82 @@ actor MeetingCoordinator {
         await transcriber.enqueue(samples: chunk, startingAt: startingAt)
     }
 
+    private func applySpeakerFinalizationOutcome(
+        _ outcome: SpeakerFinalizationOutcome,
+        meetingID: UUID
+    ) async -> String? {
+        switch outcome {
+        case .unchanged:
+            return nil
+        case let .replacement(drafts, sourceRevision):
+            return await persistSpeakerReplacement(
+                drafts,
+                sourceRevision: sourceRevision,
+                degradationCode: nil,
+                meetingID: meetingID
+            )
+        case let .degraded(
+            replacement,
+            sourceRevision,
+            errorCode
+        ):
+            if let replacement, let sourceRevision {
+                return await persistSpeakerReplacement(
+                    replacement,
+                    sourceRevision: sourceRevision,
+                    degradationCode: errorCode,
+                    meetingID: meetingID
+                )
+            }
+            return await persistSpeakerDegradation(
+                errorCode,
+                meetingID: meetingID
+            )
+        }
+    }
+
+    private func persistSpeakerReplacement(
+        _ drafts: [AttributedTranscriptDraft],
+        sourceRevision: Int,
+        degradationCode: String?,
+        meetingID: UUID
+    ) async -> String? {
+        do {
+            try await dependencies.repository.replaceTranscripts(
+                meetingID: meetingID,
+                drafts: drafts,
+                sourceRevision: sourceRevision
+            )
+        } catch {
+            return await persistSpeakerDegradation(
+                "speaker_transcript_replacement_failed",
+                meetingID: meetingID
+            )
+        }
+        guard let degradationCode else {
+            return nil
+        }
+        return await persistSpeakerDegradation(
+            degradationCode,
+            meetingID: meetingID
+        )
+    }
+
+    private func persistSpeakerDegradation(
+        _ errorCode: String,
+        meetingID: UUID
+    ) async -> String? {
+        do {
+            try await dependencies.repository.markSpeakerProcessingDegraded(
+                meetingID: meetingID,
+                errorCode: errorCode
+            )
+            return nil
+        } catch {
+            return errorCode
+        }
+    }
+
     private func handleCaptureFailure() async {
         captureFailed = true
         if let capture {
@@ -542,6 +635,7 @@ actor MeetingCoordinator {
         stateMachine = RecordingStateMachine()
         meetingID = nil
         mode = nil
+        speakerDiarizationRequested = false
         capture = nil
         masterWriter = nil
         sourceWriters.removeAll(keepingCapacity: true)
@@ -578,6 +672,7 @@ actor MeetingCoordinator {
         stateMachine = RecordingStateMachine()
         meetingID = nil
         mode = nil
+        speakerDiarizationRequested = false
         releaseActiveResources()
         bookmarkCount = 0
         finalActiveDuration = 0

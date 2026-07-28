@@ -6,11 +6,42 @@ struct MeetingAudioSource: Equatable, Sendable {
     let meetingID: UUID
     let resolvedSegments: [ResolvedMeetingRecordingSegment]
     let segmentFrameCounts: [Int64]
+    let segmentStartTimes: [TimeInterval]
     let sampleRate: Double
     let channelCount: Int
     let totalFrames: Int64
     let manifestSignature: String
     let identitySignature: String
+
+    init(
+        meetingID: UUID,
+        resolvedSegments: [ResolvedMeetingRecordingSegment],
+        segmentFrameCounts: [Int64],
+        sampleRate: Double,
+        channelCount: Int,
+        totalFrames: Int64,
+        manifestSignature: String,
+        identitySignature: String,
+        segmentStartTimes: [TimeInterval]? = nil
+    ) {
+        self.meetingID = meetingID
+        self.resolvedSegments = resolvedSegments
+        self.segmentFrameCounts = segmentFrameCounts
+        self.sampleRate = sampleRate
+        self.channelCount = channelCount
+        self.totalFrames = totalFrames
+        self.manifestSignature = manifestSignature
+        self.identitySignature = identitySignature
+        if let segmentStartTimes {
+            self.segmentStartTimes = segmentStartTimes
+        } else {
+            var elapsedFrames: Int64 = 0
+            self.segmentStartTimes = segmentFrameCounts.map { frameCount in
+                defer { elapsedFrames += frameCount }
+                return Double(elapsedFrames) / sampleRate
+            }
+        }
+    }
 
     var segmentURLs: [URL] {
         resolvedSegments.map(\.url)
@@ -230,7 +261,8 @@ actor MeetingAudioSourceLoader {
             manifestSignature: Self.manifestSignature(for: manifest),
             identitySignature: Self.identitySignature(
                 for: resolvedSegments
-            )
+            ),
+            segmentStartTimes: manifest.segments.map(\.startTime)
         )
     }
 

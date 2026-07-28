@@ -70,6 +70,7 @@ final class AppContainer {
         let transcriptionService = WhisperKitTranscriptionService(
             model: Self.defaultModel,
             persistentModelFolder: Self.persistentModelFolder)
+        let sourceLoader = MeetingAudioSourceLoader(fileStore: fileStore)
         transcriptionModelViewModel = TranscriptionModelViewModel(
             preparer: modelPreparer ?? transcriptionService
         )
@@ -82,6 +83,7 @@ final class AppContainer {
             fileStore: fileStore,
             speakerDiarizationPreference: speakerDiarizationPreference,
             panel: panelPresenter,
+            sourceLoader: sourceLoader,
             transcriptionService: transcriptionService
         )
         let coordinator = MeetingCoordinator(
@@ -101,7 +103,7 @@ final class AppContainer {
         )
         self.meetingTitleUpdater = titleUpdater
         let audioPlayerController = MeetingAudioPlayerController(
-            sourceLoader: MeetingAudioSourceLoader(fileStore: fileStore),
+            sourceLoader: sourceLoader,
             waveformLoader: WaveformAnalyzer(fileStore: fileStore),
             engine: AVFoundationMeetingAudioPlaybackEngine()
         )

@@ -102,6 +102,7 @@ struct MeetingCoordinatorDependencies: Sendable {
     let repository: any MeetingLifecycleRepository
     let speakerDiarizationPreference:
         any SpeakerDiarizationPreferenceReading
+    let speakerFinalizer: any MeetingSpeakerFinalizing
     let panel: any RecordingPanelPresenting
     let clock: any MeetingClock
 
@@ -113,6 +114,8 @@ struct MeetingCoordinatorDependencies: Sendable {
         repository: any MeetingLifecycleRepository,
         speakerDiarizationPreference:
             any SpeakerDiarizationPreferenceReading,
+        speakerFinalizer: any MeetingSpeakerFinalizing =
+            UnchangedMeetingSpeakerFinalizer(),
         panel: any RecordingPanelPresenting,
         clock: any MeetingClock
     ) {
@@ -122,8 +125,25 @@ struct MeetingCoordinatorDependencies: Sendable {
         self.transcriptionFactory = transcriptionFactory
         self.repository = repository
         self.speakerDiarizationPreference = speakerDiarizationPreference
+        self.speakerFinalizer = speakerFinalizer
         self.panel = panel
         self.clock = clock
+    }
+}
+
+private struct UnchangedMeetingSpeakerFinalizer:
+    MeetingSpeakerFinalizing {
+    func finalize(
+        meetingID: UUID,
+        mode: MeetingMode,
+        diarizationRequested: Bool,
+        provisional: [TranscriptDraft]
+    ) async -> SpeakerFinalizationOutcome {
+        _ = meetingID
+        _ = mode
+        _ = diarizationRequested
+        _ = provisional
+        return .unchanged
     }
 }
 
@@ -326,11 +346,14 @@ extension MeetingCoordinatorDependencies {
             any SpeakerDiarizationPreferenceReading,
         permissionSystem: any CapturePermissionSystem = LiveCapturePermissionSystem(),
         panel: any RecordingPanelPresenting = NoopRecordingPanelPresenter(),
+        sourceLoader: MeetingAudioSourceLoader? = nil,
         transcriptionService: any TranscriptionService =
             WhisperKitTranscriptionService(
                 model: "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page")
     ) -> MeetingCoordinatorDependencies {
-        MeetingCoordinatorDependencies(
+        let sourceLoader = sourceLoader
+            ?? MeetingAudioSourceLoader(fileStore: fileStore)
+        return MeetingCoordinatorDependencies(
             permissions: CapturePermissionClient(system: permissionSystem),
             captureFactory: LiveMeetingCaptureFactory(),
             writerFactory: LiveMeetingAudioWriterFactory(fileStore: fileStore),
@@ -339,6 +362,12 @@ extension MeetingCoordinatorDependencies {
             ),
             repository: MeetingRepositoryLifecycleAdapter(repository: repository),
             speakerDiarizationPreference: speakerDiarizationPreference,
+            speakerFinalizer: SpeakerAwareTranscriptFinalizer(
+                reader: MeetingTrackAudioReader(
+                    sourceLoader: sourceLoader
+                ),
+                transcriptionService: transcriptionService
+            ),
             panel: panel,
             clock: SystemMeetingClock()
         )
