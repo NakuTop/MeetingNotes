@@ -116,6 +116,117 @@ final class MeetingDetailViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.primaryAction, .archiveToNotion)
     }
 
+    func testSpeakerProcessingStatusReflectsPersistedActiveState() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now,
+            speakerDiarizationRequested: true
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        XCTAssertEqual(
+            viewModel.speakerProcessingStatusMessage,
+            "正在准备说话人区分…"
+        )
+
+        let meeting = try repository.meeting(id: meetingID)
+        meeting.speakerProcessingState = .processing
+        try repository.updateMeetingState(id: meetingID, state: meeting.state)
+        viewModel.load()
+
+        XCTAssertEqual(
+            viewModel.speakerProcessingStatusMessage,
+            "正在区分不同说话人…"
+        )
+    }
+
+    func testSpeakerProcessingFailureCodesMapToSafeWarnings() throws {
+        let cases = [
+            (
+                "source_track_write_failed_microphone",
+                "部分分轨处理失败，已使用可用录音和转录，不影响播放、总结与归档。"
+            ),
+            (
+                "speaker_diarization_model_preparation_failed",
+                "说话人区分未完成，已保留可用转录，不影响播放、总结与归档。"
+            ),
+            (
+                "speaker_transcript_replacement_failed",
+                "说话人标记未能保存，已保留普通转录，不影响播放、总结与归档。"
+            ),
+            (
+                "private_internal_detail",
+                "说话人处理未完成，已使用普通转录，不影响播放、总结与归档。"
+            )
+        ]
+
+        for (errorCode, expectedMessage) in cases {
+            let repository = try MeetingRepository.inMemory()
+            let meetingID = try repository.createMeeting(
+                mode: .online,
+                startedAt: .now,
+                speakerDiarizationRequested: true
+            )
+            let meeting = try repository.meeting(id: meetingID)
+            meeting.speakerProcessingState = .degraded
+            meeting.speakerProcessingErrorCode = errorCode
+            try repository.updateMeetingState(
+                id: meetingID,
+                state: .ready
+            )
+            let viewModel = MeetingDetailViewModel(
+                meetingID: meetingID,
+                repository: repository,
+                settingsStore: makeSettingsStore(),
+                action: DetailActionSpy(),
+                titleUpdater: DetailTitleUpdaterSpy()
+            )
+
+            XCTAssertEqual(
+                viewModel.speakerProcessingWarningMessage,
+                expectedMessage
+            )
+            XCTAssertEqual(viewModel.primaryAction, .summarizeAndArchive)
+        }
+    }
+
+    func testSpeakerProcessingWarningCanBeDismissedWithoutBlockingActions()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .online,
+            startedAt: .now,
+            speakerDiarizationRequested: true
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        meeting.speakerProcessingState = .degraded
+        meeting.speakerProcessingErrorCode =
+            "speaker_diarization_inference_failed"
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        XCTAssertNotNil(viewModel.speakerProcessingWarningMessage)
+        XCTAssertTrue(viewModel.primaryAction.isEnabled)
+
+        viewModel.dismissSpeakerProcessingWarning()
+
+        XCTAssertNil(viewModel.speakerProcessingWarningMessage)
+        XCTAssertTrue(viewModel.primaryAction.isEnabled)
+    }
+
     func testArchiveFailureReloadsSummaryReadyAndShowsRetryMessage() async throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(

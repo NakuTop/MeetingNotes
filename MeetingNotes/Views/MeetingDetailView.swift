@@ -100,6 +100,7 @@ struct MeetingDetailView: View {
                     header(meeting)
                 }
                 audioSection(meeting)
+                speakerProcessingSection
                 summarySection(meeting)
 
                 GroupBox {
@@ -475,6 +476,42 @@ struct MeetingDetailView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private var speakerProcessingSection: some View {
+        if let statusMessage = viewModel.speakerProcessingStatusMessage {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(statusMessage)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityIdentifier("meeting.speakerProcessingStatus")
+        }
+
+        if let warningMessage = viewModel.speakerProcessingWarningMessage {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "person.2.badge.exclamationmark")
+                    .foregroundStyle(.orange)
+                Text(warningMessage)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("关闭") {
+                    viewModel.dismissSpeakerProcessingWarning()
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(
+                Color.orange.opacity(0.08),
+                in: RoundedRectangle(cornerRadius: 9)
+            )
+            .accessibilityIdentifier("meeting.speakerProcessingWarning")
         }
     }
 

@@ -59,6 +59,7 @@ final class MeetingDetailViewModel {
     private(set) var errorMessage: String?
     private(set) var isRenaming = false
     private(set) var renameErrorMessage: String?
+    private var dismissedSpeakerProcessingWarningKey: String?
 
     init(
         meetingID: UUID,
@@ -106,6 +107,40 @@ final class MeetingDetailViewModel {
 
     var isNotionArchivingEnabled: Bool {
         settingsStore.isNotionArchivingEnabled
+    }
+
+    var speakerProcessingState: SpeakerProcessingState {
+        meeting?.speakerProcessingState ?? .notRequested
+    }
+
+    var speakerProcessingStatusMessage: String? {
+        switch speakerProcessingState {
+        case .pending:
+            "正在准备说话人区分…"
+        case .processing:
+            "正在区分不同说话人…"
+        case .notRequested, .completed, .degraded:
+            nil
+        }
+    }
+
+    var speakerProcessingWarningMessage: String? {
+        guard speakerProcessingState == .degraded,
+              speakerProcessingWarningKey
+                != dismissedSpeakerProcessingWarningKey else {
+            return nil
+        }
+        let errorCode = meeting?.speakerProcessingErrorCode
+        if errorCode?.hasPrefix("source_track_") == true {
+            return "部分分轨处理失败，已使用可用录音和转录，不影响播放、总结与归档。"
+        }
+        if errorCode?.hasPrefix("speaker_diarization_") == true {
+            return "说话人区分未完成，已保留可用转录，不影响播放、总结与归档。"
+        }
+        if errorCode == "speaker_transcript_replacement_failed" {
+            return "说话人标记未能保存，已保留普通转录，不影响播放、总结与归档。"
+        }
+        return "说话人处理未完成，已使用普通转录，不影响播放、总结与归档。"
     }
 
     func load() {
@@ -186,9 +221,17 @@ final class MeetingDetailViewModel {
         renameErrorMessage = nil
     }
 
+    func dismissSpeakerProcessingWarning() {
+        dismissedSpeakerProcessingWarningKey = speakerProcessingWarningKey
+    }
+
     private var isRecordingActive: Bool {
         guard let state = meeting?.state else { return false }
         return state == .recording || state == .paused
+    }
+
+    private var speakerProcessingWarningKey: String {
+        meeting?.speakerProcessingErrorCode ?? "speaker_processing_unknown"
     }
 
     private static func message(for error: Error) -> String {
