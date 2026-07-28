@@ -220,6 +220,257 @@ final class SpeakerAwareTranscriptFinalizerTests: XCTestCase {
             )
         )
     }
+
+    func testRequestedOnlineDiarizationAssignsRemoteSpeakersAndKeepsMe()
+        async {
+        let meetingID = UUID()
+        let source = makeSpeakerFinalizationSource(meetingID: meetingID)
+        let diarizer = FakeSpeakerDiarizer(
+            result: .success([
+                SpeakerInterval(
+                    rawSpeakerID: "speaker-b",
+                    startTime: 1,
+                    endTime: 2
+                ),
+                SpeakerInterval(
+                    rawSpeakerID: "speaker-a",
+                    startTime: 2,
+                    endTime: 3
+                ),
+            ])
+        )
+        let finalizer = SpeakerAwareTranscriptFinalizer(
+            reader: FakeMeetingTrackAudioReader(
+                chunksByTrack: [
+                    .microphone: [
+                        MeetingAudioSampleChunk(
+                            samples: [1],
+                            startingAt: 0
+                        ),
+                    ],
+                    .system: [
+                        MeetingAudioSampleChunk(
+                            samples: [2],
+                            startingAt: 1
+                        ),
+                    ],
+                ]
+            ),
+            transcriptionService:
+                FakeSpeakerFinalizationTranscriptionService(
+                    responses: [
+                        1: [
+                            .init(
+                                startTime: 0,
+                                endTime: 1,
+                                text: "我"
+                            ),
+                        ],
+                        2: [
+                            .init(
+                                startTime: 1,
+                                endTime: 2,
+                                text: "远端一"
+                            ),
+                            .init(
+                                startTime: 2,
+                                endTime: 3,
+                                text: "远端二"
+                            ),
+                        ],
+                    ]
+                ),
+            sourceLoader: FakeSpeakerAudioSourceLoader(
+                sources: [.system: source]
+            ),
+            diarizer: diarizer
+        )
+
+        let outcome = await finalizer.finalize(
+            meetingID: meetingID,
+            mode: .online,
+            diarizationRequested: true,
+            provisional: []
+        )
+
+        guard case let .replacement(drafts, sourceRevision) = outcome else {
+            return XCTFail("Expected diarized replacement")
+        }
+        XCTAssertEqual(sourceRevision, 1)
+        XCTAssertEqual(
+            drafts.map(\.speakerID),
+            ["me", "remote-1", "remote-2"]
+        )
+        XCTAssertEqual(
+            drafts.map(\.source),
+            [.microphone, .system, .system]
+        )
+        let diarizedSources = await diarizer.recordedSources()
+        XCTAssertEqual(diarizedSources, [source])
+    }
+
+    func testOnlineModelFailureReturnsCoarseReplacementWithSafeCode()
+        async {
+        let meetingID = UUID()
+        let finalizer = SpeakerAwareTranscriptFinalizer(
+            reader: FakeMeetingTrackAudioReader(
+                chunksByTrack: [
+                    .microphone: [
+                        MeetingAudioSampleChunk(
+                            samples: [1],
+                            startingAt: 0
+                        ),
+                    ],
+                    .system: [
+                        MeetingAudioSampleChunk(
+                            samples: [2],
+                            startingAt: 1
+                        ),
+                    ],
+                ]
+            ),
+            transcriptionService:
+                FakeSpeakerFinalizationTranscriptionService(
+                    responses: [
+                        1: [
+                            .init(
+                                startTime: 0,
+                                endTime: 1,
+                                text: "我"
+                            ),
+                        ],
+                        2: [
+                            .init(
+                                startTime: 1,
+                                endTime: 2,
+                                text: "远端"
+                            ),
+                        ],
+                    ]
+                ),
+            sourceLoader: FakeSpeakerAudioSourceLoader(
+                sources: [
+                    .system: makeSpeakerFinalizationSource(
+                        meetingID: meetingID
+                    ),
+                ]
+            ),
+            diarizer: FakeSpeakerDiarizer(
+                result: .failure(
+                    SpeakerDiarizationError.modelPreparationFailed
+                )
+            )
+        )
+
+        let outcome = await finalizer.finalize(
+            meetingID: meetingID,
+            mode: .online,
+            diarizationRequested: true,
+            provisional: []
+        )
+
+        guard case let .degraded(
+            replacement?,
+            sourceRevision?,
+            errorCode
+        ) = outcome else {
+            return XCTFail("Expected degraded coarse replacement")
+        }
+        XCTAssertEqual(replacement.map(\.speakerID), ["me", "remote"])
+        XCTAssertEqual(sourceRevision, 1)
+        XCTAssertEqual(
+            errorCode,
+            "speaker_diarization_model_preparation_failed"
+        )
+    }
+
+    func testRequestedOfflineDiarizationAssignsRoomSpeakers() async {
+        let meetingID = UUID()
+        let source = makeSpeakerFinalizationSource(meetingID: meetingID)
+        let finalizer = SpeakerAwareTranscriptFinalizer(
+            reader: FakeMeetingTrackAudioReader(chunksByTrack: [:]),
+            transcriptionService:
+                FakeSpeakerFinalizationTranscriptionService(responses: [:]),
+            sourceLoader: FakeSpeakerAudioSourceLoader(
+                sources: [.master: source]
+            ),
+            diarizer: FakeSpeakerDiarizer(
+                result: .success([
+                    SpeakerInterval(
+                        rawSpeakerID: "first",
+                        startTime: 0,
+                        endTime: 1
+                    ),
+                    SpeakerInterval(
+                        rawSpeakerID: "second",
+                        startTime: 1,
+                        endTime: 2
+                    ),
+                ])
+            )
+        )
+        let provisional = [
+            TranscriptDraft(startTime: 0, endTime: 1, text: "第一位"),
+            TranscriptDraft(startTime: 1, endTime: 2, text: "第二位"),
+        ]
+
+        let outcome = await finalizer.finalize(
+            meetingID: meetingID,
+            mode: .offline,
+            diarizationRequested: true,
+            provisional: provisional
+        )
+
+        guard case let .replacement(drafts, sourceRevision) = outcome else {
+            return XCTFail("Expected offline diarized replacement")
+        }
+        XCTAssertEqual(sourceRevision, 1)
+        XCTAssertEqual(drafts.map(\.speakerID), ["room-1", "room-2"])
+        XCTAssertEqual(drafts.map(\.source), [.room, .room])
+    }
+
+    func testOfflineInferenceFailureKeepsProvisionalWithSafeCode() async {
+        let meetingID = UUID()
+        let finalizer = SpeakerAwareTranscriptFinalizer(
+            reader: FakeMeetingTrackAudioReader(chunksByTrack: [:]),
+            transcriptionService:
+                FakeSpeakerFinalizationTranscriptionService(responses: [:]),
+            sourceLoader: FakeSpeakerAudioSourceLoader(
+                sources: [
+                    .master: makeSpeakerFinalizationSource(
+                        meetingID: meetingID
+                    ),
+                ]
+            ),
+            diarizer: FakeSpeakerDiarizer(
+                result: .failure(
+                    SpeakerDiarizationError.inferenceFailed
+                )
+            )
+        )
+
+        let outcome = await finalizer.finalize(
+            meetingID: meetingID,
+            mode: .offline,
+            diarizationRequested: true,
+            provisional: [
+                TranscriptDraft(
+                    startTime: 0,
+                    endTime: 1,
+                    text: "保留内容"
+                ),
+            ]
+        )
+
+        XCTAssertEqual(
+            outcome,
+            .degraded(
+                replacement: nil,
+                sourceRevision: nil,
+                errorCode: "speaker_diarization_inference_failed"
+            )
+        )
+    }
 }
 
 private enum SpeakerFinalizerTestError: Error {
@@ -283,4 +534,55 @@ private actor FakeSpeakerFinalizationTranscriptionService:
     func recordedStarts() -> [TimeInterval] {
         starts
     }
+}
+
+private struct FakeSpeakerAudioSourceLoader:
+    MeetingTrackAudioSourceLoading {
+    let sources: [AudioTrack: MeetingAudioSource]
+
+    func load(
+        meetingID: UUID,
+        track: AudioTrack
+    ) async throws -> MeetingAudioSource {
+        _ = meetingID
+        guard let source = sources[track] else {
+            throw SpeakerFinalizerTestError.read
+        }
+        return source
+    }
+}
+
+private actor FakeSpeakerDiarizer: SpeakerDiarizing {
+    private let result: Result<[SpeakerInterval], Error>
+    private var sources: [MeetingAudioSource] = []
+
+    init(result: Result<[SpeakerInterval], Error>) {
+        self.result = result
+    }
+
+    func diarize(
+        source: MeetingAudioSource
+    ) async throws -> [SpeakerInterval] {
+        sources.append(source)
+        return try result.get()
+    }
+
+    func recordedSources() -> [MeetingAudioSource] {
+        sources
+    }
+}
+
+private func makeSpeakerFinalizationSource(
+    meetingID: UUID
+) -> MeetingAudioSource {
+    MeetingAudioSource(
+        meetingID: meetingID,
+        resolvedSegments: [],
+        segmentFrameCounts: [],
+        sampleRate: AudioSegmentManifest.transcriptionSampleRate,
+        channelCount: AudioSegmentManifest.transcriptionChannelCount,
+        totalFrames: 0,
+        manifestSignature: "manifest",
+        identitySignature: "identity"
+    )
 }

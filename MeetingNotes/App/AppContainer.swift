@@ -11,6 +11,18 @@ final class AppContainer {
         try? FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
         return appSupport
     }
+    private static var fluidAudioModelsFolder: URL {
+        FileManager.default
+            .urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            )
+            .first!
+            .appendingPathComponent(
+                "MeetingNotes/FluidAudioModels",
+                isDirectory: true
+            )
+    }
 
     let repository: MeetingRepository
     let fileStore: MeetingFileStore
@@ -70,6 +82,9 @@ final class AppContainer {
         let transcriptionService = WhisperKitTranscriptionService(
             model: Self.defaultModel,
             persistentModelFolder: Self.persistentModelFolder)
+        let speakerDiarizer = FluidAudioSpeakerDiarizer(
+            modelsDirectory: Self.fluidAudioModelsFolder
+        )
         let sourceLoader = MeetingAudioSourceLoader(fileStore: fileStore)
         transcriptionModelViewModel = TranscriptionModelViewModel(
             preparer: modelPreparer ?? transcriptionService
@@ -84,7 +99,8 @@ final class AppContainer {
             speakerDiarizationPreference: speakerDiarizationPreference,
             panel: panelPresenter,
             sourceLoader: sourceLoader,
-            transcriptionService: transcriptionService
+            transcriptionService: transcriptionService,
+            speakerDiarizer: speakerDiarizer
         )
         let coordinator = MeetingCoordinator(
             dependencies: dependencies

@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A10000000000000000000090 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000092 /* WhisperKit */; };
+		A10000000000000000000093 /* FluidAudio in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000095 /* FluidAudio */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -43,7 +44,7 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		A10000000000000000000050 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000090 /* WhisperKit in Frameworks */,); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000050 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000090 /* WhisperKit in Frameworks */, A10000000000000000000093 /* FluidAudio in Frameworks */,); runOnlyForDeploymentPostprocessing = 0; };
 		A10000000000000000000051 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A10000000000000000000052 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
@@ -95,7 +96,7 @@
 			dependencies = ();
 			fileSystemSynchronizedGroups = (A10000000000000000000040 /* MeetingNotes */);
 			name = MeetingNotes;
-			packageProductDependencies = (A10000000000000000000092 /* WhisperKit */,);
+			packageProductDependencies = (A10000000000000000000092 /* WhisperKit */, A10000000000000000000095 /* FluidAudio */,);
 			productName = MeetingNotes;
 			productReference = A10000000000000000000020 /* MeetingNotes.app */;
 			productType = "com.apple.product-type.application";
@@ -157,7 +158,7 @@
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000003 /* Products */;
-			packageReferences = (A10000000000000000000091 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */,);
+			packageReferences = (A10000000000000000000091 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */, A10000000000000000000094 /* XCRemoteSwiftPackageReference "FluidAudio" */,);
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (A10000000000000000000010 /* MeetingNotes */, A10000000000000000000011 /* MeetingNotesTests */, A10000000000000000000012 /* MeetingNotesUITests */);
@@ -208,6 +209,14 @@
 				minimumVersion = 1.0.0;
 			};
 		};
+		A10000000000000000000094 /* XCRemoteSwiftPackageReference "FluidAudio" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/FluidInference/FluidAudio.git";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.12.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -215,6 +224,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A10000000000000000000091 /* XCRemoteSwiftPackageReference "argmax-oss-swift" */;
 			productName = WhisperKit;
+		};
+		A10000000000000000000095 /* FluidAudio */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000094 /* XCRemoteSwiftPackageReference "FluidAudio" */;
+			productName = FluidAudio;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

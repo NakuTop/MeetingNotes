@@ -26,23 +26,41 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
     static let coarseSourceRevision = 1
     static let diarizationUnavailableCode =
         "speaker_diarization_unavailable"
+    static let diarizationModelPreparationFailedCode =
+        "speaker_diarization_model_preparation_failed"
+    static let diarizationInferenceFailedCode =
+        "speaker_diarization_inference_failed"
+    static let diarizationSourceFailedCode =
+        "speaker_diarization_source_failed"
+    static let diarizationFailedCode =
+        "speaker_diarization_failed"
 
     private let reader: any MeetingTrackAudioReading
     private let transcriptionService: any TranscriptionService
+    private let sourceLoader: (any MeetingTrackAudioSourceLoading)?
+    private let diarizer: (any SpeakerDiarizing)?
     private let merger: TranscriptMerger
     private let assembler: SpeakerTranscriptAssembler
+    private let intervalAssigner: SpeakerIntervalAssigner
 
     init(
         reader: any MeetingTrackAudioReading,
         transcriptionService: any TranscriptionService,
+        sourceLoader: (any MeetingTrackAudioSourceLoading)? = nil,
+        diarizer: (any SpeakerDiarizing)? = nil,
         merger: TranscriptMerger = TranscriptMerger(),
         assembler: SpeakerTranscriptAssembler =
-            SpeakerTranscriptAssembler()
+            SpeakerTranscriptAssembler(),
+        intervalAssigner: SpeakerIntervalAssigner =
+            SpeakerIntervalAssigner()
     ) {
         self.reader = reader
         self.transcriptionService = transcriptionService
+        self.sourceLoader = sourceLoader
+        self.diarizer = diarizer
         self.merger = merger
         self.assembler = assembler
+        self.intervalAssigner = intervalAssigner
     }
 
     func finalize(
@@ -51,18 +69,16 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
         diarizationRequested: Bool,
         provisional: [TranscriptDraft]
     ) async -> SpeakerFinalizationOutcome {
-        _ = provisional
         guard mode == .online else {
-            return diarizationRequested
-                ? .degraded(
-                    replacement: nil,
-                    sourceRevision: nil,
-                    errorCode: Self.diarizationUnavailableCode
-                )
-                : .unchanged
+            return await finalizeOffline(
+                meetingID: meetingID,
+                diarizationRequested: diarizationRequested,
+                provisional: provisional
+            )
         }
 
         var attributedTracks: [AttributedTranscriptDraft] = []
+        var mergedSystemDrafts: [TranscriptDraft] = []
         for track in [AudioTrack.microphone, .system] {
             do {
                 let sequence = try await reader.chunks(
@@ -78,9 +94,13 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
                         )
                     )
                 }
+                let mergedDrafts = merger.merge(drafts)
+                if track == .system {
+                    mergedSystemDrafts = mergedDrafts
+                }
                 let identity = Self.coarseIdentity(for: track)
                 attributedTracks.append(
-                    contentsOf: merger.merge(drafts).map {
+                    contentsOf: mergedDrafts.map {
                         AttributedTranscriptDraft(
                             transcript: $0,
                             speakerID: identity.speakerID,
@@ -98,18 +118,134 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
             }
         }
 
-        let replacement = assembler.assemble(attributedTracks)
-        if diarizationRequested {
+        let coarseReplacement = assembler.assemble(attributedTracks)
+        guard diarizationRequested else {
+            return .replacement(
+                coarseReplacement,
+                sourceRevision: Self.coarseSourceRevision
+            )
+        }
+        guard let sourceLoader, let diarizer else {
             return .degraded(
-                replacement: replacement,
+                replacement: coarseReplacement,
                 sourceRevision: Self.coarseSourceRevision,
                 errorCode: Self.diarizationUnavailableCode
             )
         }
-        return .replacement(
-            replacement,
-            sourceRevision: Self.coarseSourceRevision
-        )
+
+        let systemSource: MeetingAudioSource
+        do {
+            systemSource = try await sourceLoader.load(
+                meetingID: meetingID,
+                track: .system
+            )
+        } catch {
+            return .degraded(
+                replacement: coarseReplacement,
+                sourceRevision: Self.coarseSourceRevision,
+                errorCode: Self.diarizationSourceFailedCode
+            )
+        }
+
+        do {
+            let intervals = try await diarizer.diarize(
+                source: systemSource
+            )
+            guard !intervals.isEmpty else {
+                throw SpeakerDiarizationError.inferenceFailed
+            }
+            let microphoneDrafts = attributedTracks.filter {
+                $0.source == .microphone
+            }
+            let diarizedSystemDrafts = intervalAssigner.assign(
+                mergedSystemDrafts,
+                intervals: intervals,
+                speakerPrefix: "remote",
+                source: .system
+            )
+            return .replacement(
+                assembler.assemble(
+                    microphoneDrafts + diarizedSystemDrafts
+                ),
+                sourceRevision: Self.coarseSourceRevision
+            )
+        } catch {
+            return .degraded(
+                replacement: coarseReplacement,
+                sourceRevision: Self.coarseSourceRevision,
+                errorCode: Self.diarizationErrorCode(for: error)
+            )
+        }
+    }
+
+    private func finalizeOffline(
+        meetingID: UUID,
+        diarizationRequested: Bool,
+        provisional: [TranscriptDraft]
+    ) async -> SpeakerFinalizationOutcome {
+        guard diarizationRequested else {
+            return .unchanged
+        }
+        guard let sourceLoader, let diarizer else {
+            return .degraded(
+                replacement: nil,
+                sourceRevision: nil,
+                errorCode: Self.diarizationUnavailableCode
+            )
+        }
+
+        let masterSource: MeetingAudioSource
+        do {
+            masterSource = try await sourceLoader.load(
+                meetingID: meetingID,
+                track: .master
+            )
+        } catch {
+            return .degraded(
+                replacement: nil,
+                sourceRevision: nil,
+                errorCode: Self.diarizationSourceFailedCode
+            )
+        }
+
+        do {
+            let intervals = try await diarizer.diarize(
+                source: masterSource
+            )
+            guard !intervals.isEmpty else {
+                throw SpeakerDiarizationError.inferenceFailed
+            }
+            return .replacement(
+                assembler.assemble(
+                    intervalAssigner.assign(
+                        provisional,
+                        intervals: intervals,
+                        speakerPrefix: "room",
+                        source: .room
+                    )
+                ),
+                sourceRevision: Self.coarseSourceRevision
+            )
+        } catch {
+            return .degraded(
+                replacement: nil,
+                sourceRevision: nil,
+                errorCode: Self.diarizationErrorCode(for: error)
+            )
+        }
+    }
+
+    private static func diarizationErrorCode(
+        for error: Error
+    ) -> String {
+        switch error {
+        case SpeakerDiarizationError.modelPreparationFailed:
+            diarizationModelPreparationFailedCode
+        case SpeakerDiarizationError.inferenceFailed:
+            diarizationInferenceFailedCode
+        default:
+            diarizationFailedCode
+        }
     }
 
     private static func coarseIdentity(

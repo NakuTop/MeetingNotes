@@ -349,7 +349,8 @@ extension MeetingCoordinatorDependencies {
         sourceLoader: MeetingAudioSourceLoader? = nil,
         transcriptionService: any TranscriptionService =
             WhisperKitTranscriptionService(
-                model: "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page")
+                model: "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page"),
+        speakerDiarizer: any SpeakerDiarizing
     ) -> MeetingCoordinatorDependencies {
         let sourceLoader = sourceLoader
             ?? MeetingAudioSourceLoader(fileStore: fileStore)
@@ -366,7 +367,9 @@ extension MeetingCoordinatorDependencies {
                 reader: MeetingTrackAudioReader(
                     sourceLoader: sourceLoader
                 ),
-                transcriptionService: transcriptionService
+                transcriptionService: transcriptionService,
+                sourceLoader: sourceLoader,
+                diarizer: speakerDiarizer
             ),
             panel: panel,
             clock: SystemMeetingClock()
