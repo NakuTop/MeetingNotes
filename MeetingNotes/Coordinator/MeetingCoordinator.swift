@@ -20,6 +20,25 @@ private enum SourceDegradationReason: Equatable, Sendable {
             "source_track_finish_failed_\(track.rawValue)"
         }
     }
+
+    var precedence: (failureClass: Int, track: Int) {
+        let failureClass: Int
+        let track: AudioTrack
+        switch self {
+        case let .appendFailed(failedTrack):
+            failureClass = 0
+            track = failedTrack
+        case let .finishFailed(failedTrack):
+            failureClass = 1
+            track = failedTrack
+        }
+        let trackPrecedence = switch track {
+        case .microphone: 0
+        case .system: 1
+        case .master: 2
+        }
+        return (failureClass, trackPrecedence)
+    }
 }
 
 struct MeetingCoordinatorSnapshot: Equatable, Sendable {
@@ -48,7 +67,10 @@ actor MeetingCoordinator {
     private var timeline: ActiveRecordingTimeline?
     private var streamTask: Task<Void, Never>?
     private var transcriptPersistenceTask: Task<Bool, Never>?
-    private var pendingSourceDegradations: [SourceDegradationReason] = []
+    private var encounteredSourceDegradations:
+        [SourceDegradationReason] = []
+    private var pendingSourceDegradationPersistence:
+        [SourceDegradationReason] = []
     private var pendingTranscriptionSamples: [Float] = []
     private var nextTranscriptionSampleOffset = 0
     private var totalSampleCount = 0
@@ -363,10 +385,15 @@ actor MeetingCoordinator {
                 endedAt: endedAt,
                 activeDuration: activeDuration,
                 sourceDegradationErrorCode:
-                    pendingSourceDegradations.first?.errorCode
+                    preferredSourceDegradation()?.errorCode
                     ?? speakerDegradationCode
             )
-            pendingSourceDegradations.removeAll(keepingCapacity: true)
+            encounteredSourceDegradations.removeAll(
+                keepingCapacity: true
+            )
+            pendingSourceDegradationPersistence.removeAll(
+                keepingCapacity: true
+            )
             var readyMachine = stateMachine
             try readyMachine.send(.finalized)
             stateMachine = readyMachine
@@ -509,8 +536,11 @@ actor MeetingCoordinator {
         _ reason: SourceDegradationReason,
         meetingID: UUID
     ) async {
-        if !pendingSourceDegradations.contains(reason) {
-            pendingSourceDegradations.append(reason)
+        if !encounteredSourceDegradations.contains(reason) {
+            encounteredSourceDegradations.append(reason)
+        }
+        if !pendingSourceDegradationPersistence.contains(reason) {
+            pendingSourceDegradationPersistence.append(reason)
         }
         try? await persistPendingSourceDegradations(meetingID: meetingID)
     }
@@ -518,12 +548,24 @@ actor MeetingCoordinator {
     private func persistPendingSourceDegradations(
         meetingID: UUID
     ) async throws {
-        while let reason = pendingSourceDegradations.first {
+        while let reason = pendingSourceDegradationPersistence.first {
             try await dependencies.repository.markSpeakerProcessingDegraded(
                 meetingID: meetingID,
                 errorCode: reason.errorCode
             )
-            pendingSourceDegradations.removeFirst()
+            pendingSourceDegradationPersistence.removeFirst()
+        }
+    }
+
+    private func preferredSourceDegradation()
+        -> SourceDegradationReason? {
+        encounteredSourceDegradations.min { lhs, rhs in
+            if lhs.precedence.failureClass
+                != rhs.precedence.failureClass {
+                return lhs.precedence.failureClass
+                    < rhs.precedence.failureClass
+            }
+            return lhs.precedence.track < rhs.precedence.track
         }
     }
 
@@ -606,6 +648,9 @@ actor MeetingCoordinator {
         _ errorCode: String,
         meetingID: UUID
     ) async -> String? {
+        guard preferredSourceDegradation() == nil else {
+            return errorCode
+        }
         do {
             try await dependencies.repository.markSpeakerProcessingDegraded(
                 meetingID: meetingID,
@@ -643,7 +688,10 @@ actor MeetingCoordinator {
         timeline = nil
         streamTask = nil
         transcriptPersistenceTask = nil
-        pendingSourceDegradations.removeAll(keepingCapacity: true)
+        encounteredSourceDegradations.removeAll(keepingCapacity: true)
+        pendingSourceDegradationPersistence.removeAll(
+            keepingCapacity: true
+        )
         pendingTranscriptionSamples.removeAll(keepingCapacity: true)
         nextTranscriptionSampleOffset = 0
         totalSampleCount = 0

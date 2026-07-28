@@ -317,6 +317,134 @@ final class MeetingAudioSourceLoaderTests: XCTestCase {
         )
     }
 
+    func testRejectsNonFiniteNegativeAndReversedSegmentTimestamps()
+        async throws {
+        let fixture = try await makeSingleSegmentFixture(frameCount: 3)
+        let loader = MeetingAudioSourceLoader(fileStore: fixture.fileStore)
+        let manifest = try await fixture.fileStore.loadManifest(
+            meetingID: fixture.meetingID
+        )
+        for (startTime, endTime) in [
+            (TimeInterval.nan, 3.0 / 16_000),
+            (0, TimeInterval.infinity),
+        ] {
+            var invalidManifest = manifest
+            invalidManifest.segments[0].startTime = startTime
+            invalidManifest.segments[0].endTime = endTime
+            XCTAssertThrowsError(
+                try MeetingAudioSourceLoader.validateSegmentMetadata(
+                    invalidManifest
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? MeetingAudioSourceLoaderError,
+                    .invalidSegmentTimeline(index: 0)
+                )
+            }
+        }
+
+        let persistableInvalidTimelines: [(TimeInterval, TimeInterval)] = [
+            (-0.1, 3.0 / 16_000),
+            (1, 0),
+        ]
+
+        for (startTime, endTime) in persistableInvalidTimelines {
+            var manifest = try await fixture.fileStore.loadManifest(
+                meetingID: fixture.meetingID
+            )
+            manifest.segments[0].startTime = startTime
+            manifest.segments[0].endTime = endTime
+            try await fixture.fileStore.saveManifest(
+                manifest,
+                meetingID: fixture.meetingID
+            )
+
+            await assertLoaderError(
+                try await loader.load(meetingID: fixture.meetingID),
+                equals: .invalidSegmentTimeline(index: 0)
+            )
+        }
+    }
+
+    func testRejectsOverlappingSegmentTimeline() async throws {
+        let fixture = try await makeThreeSegmentFixture()
+        var manifest = try await fixture.fileStore.loadManifest(
+            meetingID: fixture.meetingID
+        )
+        manifest.segments[1].startTime =
+            manifest.segments[0].endTime - 0.000_001
+        manifest.segments[1].endTime =
+            manifest.segments[1].startTime + 3.0 / 16_000
+        try await fixture.fileStore.saveManifest(
+            manifest,
+            meetingID: fixture.meetingID
+        )
+
+        await assertLoaderError(
+            try await MeetingAudioSourceLoader(fileStore: fixture.fileStore)
+                .load(meetingID: fixture.meetingID),
+            equals: .overlappingSegmentTimeline(index: 1)
+        )
+    }
+
+    func testRejectsSegmentDurationInconsistentWithFrameCount()
+        async throws {
+        let fixture = try await makeSingleSegmentFixture(frameCount: 3)
+        var manifest = try await fixture.fileStore.loadManifest(
+            meetingID: fixture.meetingID
+        )
+        manifest.segments[0].endTime = 1
+        try await fixture.fileStore.saveManifest(
+            manifest,
+            meetingID: fixture.meetingID
+        )
+
+        await assertLoaderError(
+            try await MeetingAudioSourceLoader(fileStore: fixture.fileStore)
+                .load(meetingID: fixture.meetingID),
+            equals: .segmentDurationMismatch(index: 0)
+        )
+    }
+
+    func testAllowsPositiveTimelineGapsAndPreservesAbsoluteStarts()
+        async throws {
+        let fixture = try await makeThreeSegmentFixture()
+        var manifest = try await fixture.fileStore.loadManifest(
+            meetingID: fixture.meetingID
+        )
+        let starts: [TimeInterval] = [0, 1, 2]
+        for index in manifest.segments.indices {
+            manifest.segments[index].startTime = starts[index]
+            manifest.segments[index].endTime = starts[index]
+                + Double(manifest.segments[index].frameCount)
+                / manifest.sampleRate
+        }
+        try await fixture.fileStore.saveManifest(
+            manifest,
+            meetingID: fixture.meetingID
+        )
+
+        let source = try await MeetingAudioSourceLoader(
+            fileStore: fixture.fileStore
+        ).load(meetingID: fixture.meetingID)
+
+        XCTAssertEqual(source.segmentStartTimes, starts)
+    }
+
+    func testManifestSignatureIncludesSegmentTimeline() {
+        let baseline = signatureManifest()
+        var changedStart = baseline
+        changedStart.segments[0].startTime = 1
+        changedStart.segments[0].endTime =
+            1 + Double(changedStart.segments[0].frameCount)
+            / changedStart.sampleRate
+
+        XCTAssertNotEqual(
+            MeetingAudioSourceLoader.manifestSignature(for: baseline),
+            MeetingAudioSourceLoader.manifestSignature(for: changedStart)
+        )
+    }
+
     func testRejectsMissingSegmentFile() async throws {
         let fixture = try await makeThreeSegmentFixture()
         let segmentURL = try await fixture.fileStore.resolveSegmentURL(

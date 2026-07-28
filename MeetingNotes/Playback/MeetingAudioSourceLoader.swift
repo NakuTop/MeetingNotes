@@ -66,6 +66,9 @@ enum MeetingAudioSourceLoaderError: Error, Equatable, Sendable {
     case emptyManifest
     case incompleteSegment(index: Int)
     case invalidSegmentFrameCount(index: Int)
+    case invalidSegmentTimeline(index: Int)
+    case overlappingSegmentTimeline(index: Int)
+    case segmentDurationMismatch(index: Int)
     case totalFrameCountOverflow
     case invalidSegmentPath(index: Int)
     case segmentFileMissing(index: Int)
@@ -94,6 +97,10 @@ extension MeetingAudioSourceLoaderError: LocalizedError {
             "该会议的录音尚未完整保存。"
         case .invalidSegmentFrameCount, .totalFrameCountOverflow:
             "该会议的录音长度信息无效。"
+        case .invalidSegmentTimeline,
+             .overlappingSegmentTimeline,
+             .segmentDurationMismatch:
+            "该会议的录音时间信息无效。"
         case .invalidSegmentPath:
             "该会议的录音位置无效。"
         case .segmentFileMissing:
@@ -167,6 +174,7 @@ actor MeetingAudioSourceLoader {
             }
             totalFrames = addition.partialValue
         }
+        try Self.validateSegmentMetadata(manifest)
 
         var resolvedSegments: [ResolvedMeetingRecordingSegment] = []
         resolvedSegments.reserveCapacity(manifest.segments.count)
@@ -266,6 +274,21 @@ actor MeetingAudioSourceLoader {
         )
     }
 
+    func confirmSegmentIdentity(
+        in source: MeetingAudioSource,
+        segmentIndex: Int
+    ) async throws {
+        guard source.resolvedSegments.indices.contains(segmentIndex) else {
+            throw MeetingAudioSourceLoaderError.segmentIdentityChanged(
+                index: segmentIndex
+            )
+        }
+        try await confirmIdentity(
+            of: source.resolvedSegments[segmentIndex],
+            segmentIndex: segmentIndex
+        )
+    }
+
     static func identitySignature(
         for segments: [ResolvedMeetingRecordingSegment]
     ) -> String {
@@ -292,6 +315,8 @@ actor MeetingAudioSourceLoader {
         for segment in manifest.segments {
             canonical += "fileNameBytes:\(segment.fileName.utf8.count):"
             canonical += segment.fileName
+            canonical += "\nstartTimeBits:\(segment.startTime.bitPattern)"
+            canonical += "\nendTimeBits:\(segment.endTime.bitPattern)"
             canonical += "\nframeCount:\(segment.frameCount)\n"
             canonical += "complete:\(segment.isComplete ? 1 : 0)\n"
         }
@@ -319,6 +344,41 @@ actor MeetingAudioSourceLoader {
             throw MeetingAudioSourceLoaderError.invalidManifestChannelCount(
                 manifest.channelCount
             )
+        }
+    }
+
+    static func validateSegmentMetadata(
+        _ manifest: AudioSegmentManifest
+    ) throws {
+        var previousEndTime: TimeInterval?
+        for (index, segment) in manifest.segments.enumerated() {
+            guard segment.startTime.isFinite,
+                  segment.endTime.isFinite,
+                  segment.startTime >= 0,
+                  segment.endTime >= segment.startTime else {
+                throw MeetingAudioSourceLoaderError.invalidSegmentTimeline(
+                    index: index
+                )
+            }
+            if let previousEndTime,
+               segment.startTime < previousEndTime {
+                throw MeetingAudioSourceLoaderError
+                    .overlappingSegmentTimeline(index: index)
+            }
+            let declaredDuration = segment.endTime - segment.startTime
+            let decodedDuration = Double(segment.frameCount)
+                / manifest.sampleRate
+            // Timestamp rounding is accepted up to one decoded source frame.
+            let durationTolerance = max(
+                0.000_001,
+                1 / manifest.sampleRate
+            )
+            guard abs(declaredDuration - decodedDuration)
+                <= durationTolerance else {
+                throw MeetingAudioSourceLoaderError
+                    .segmentDurationMismatch(index: index)
+            }
+            previousEndTime = segment.endTime
         }
     }
 

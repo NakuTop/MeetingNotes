@@ -15,7 +15,9 @@ enum PCMAmplitudePolicy: Sendable {
     case preserveAmplitude
 }
 
-final class PCMConverter: @unchecked Sendable {
+final class PCMConverter:
+    MeetingTrackPCMStreamingConverting,
+    @unchecked Sendable {
     static let defaultOutputSampleRate: Double = 16_000
     static let playbackSampleRate: Double = 48_000
     private static let targetSpeechRMS = pow(10.0, -24.0 / 20.0)
@@ -26,6 +28,7 @@ final class PCMConverter: @unchecked Sendable {
     private let lock = NSLock()
     private var converter: AVAudioConverter?
     private var inputFormatSignature: InputFormatSignature?
+    private var segmentStreamingState: SegmentStreamingConversionState?
     private let outputSampleRate: Double
     private let amplitudePolicy: PCMAmplitudePolicy
 
@@ -41,6 +44,129 @@ final class PCMConverter: @unchecked Sendable {
         lock.withLock {
             converter = nil
             inputFormatSignature = nil
+            segmentStreamingState = nil
+        }
+    }
+
+    func begin(inputSampleRate: Double) throws {
+        try lock.withLock {
+            guard inputSampleRate.isFinite,
+                  inputSampleRate > 0,
+                  let inputFormat = AVAudioFormat(
+                      commonFormat: .pcmFormatFloat32,
+                      sampleRate: inputSampleRate,
+                      channels: 1,
+                      interleaved: false
+                  ),
+                  let outputFormat = AVAudioFormat(
+                      commonFormat: .pcmFormatFloat32,
+                      sampleRate: outputSampleRate,
+                      channels: 1,
+                      interleaved: false
+                  ) else {
+                throw PCMConverterError.invalidInputFormat
+            }
+            guard let converter = AVAudioConverter(
+                from: inputFormat,
+                to: outputFormat
+            ) else {
+                throw PCMConverterError.unableToCreateConverter
+            }
+            converter.primeMethod = .pre
+            segmentStreamingState = SegmentStreamingConversionState(
+                converter: converter,
+                inputFormat: inputFormat,
+                outputFormat: outputFormat
+            )
+        }
+    }
+
+    func append(samples: [Float]) throws {
+        try lock.withLock {
+            guard let segmentStreamingState else {
+                throw PCMConverterError.invalidInputFormat
+            }
+            try segmentStreamingState.append(samples: samples)
+        }
+    }
+
+    func finishInput() {
+        lock.withLock {
+            segmentStreamingState?.finishInput()
+        }
+    }
+
+    func pull(maximumOutputSampleCount: Int) throws
+        -> MeetingPCMConversionPull {
+        try lock.withLock {
+            guard maximumOutputSampleCount > 0,
+                  let outputFrameCapacity = AVAudioFrameCount(
+                      exactly: maximumOutputSampleCount
+                  ),
+                  let state = segmentStreamingState else {
+                throw PCMConverterError.unableToCreateOutputBuffer
+            }
+            if !state.inputProvider.hasQueuedInput,
+               !state.inputProvider.isFinished {
+                return MeetingPCMConversionPull(
+                    samples: [],
+                    inputFramesConsumed: 0,
+                    needsInput: true,
+                    isEndOfStream: false
+                )
+            }
+            guard
+                  let output = AVAudioPCMBuffer(
+                      pcmFormat: state.outputFormat,
+                      frameCapacity: outputFrameCapacity
+                  ) else {
+                throw PCMConverterError.unableToCreateOutputBuffer
+            }
+
+            let consumedBefore = state.inputProvider.consumedFrameCount
+            var conversionError: NSError?
+            let status = state.converter.convert(
+                to: output,
+                error: &conversionError
+            ) { requestedPacketCount, inputStatus in
+                state.inputProvider.next(
+                    requestedPacketCount: requestedPacketCount,
+                    status: inputStatus
+                )
+            }
+            guard conversionError == nil,
+                  status != .error,
+                  !state.inputProvider.copyFailed else {
+                throw PCMConverterError.conversionFailed
+            }
+            let consumed = state.inputProvider.consumedFrameCount
+                - consumedBefore
+            let samples: [Float]
+            if output.frameLength > 0,
+               let channel = output.floatChannelData?.pointee {
+                let rawSamples = UnsafeBufferPointer(
+                    start: channel,
+                    count: Int(output.frameLength)
+                ).map { $0.isFinite ? Double($0) : 0 }
+                switch amplitudePolicy {
+                case .speechLeveling:
+                    samples = Self.levelSpeech(rawSamples)
+                case .preserveAmplitude:
+                    samples = rawSamples.map {
+                        Float(min(1, max(-1, $0)))
+                    }
+                }
+            } else {
+                samples = []
+            }
+            return MeetingPCMConversionPull(
+                samples: samples,
+                inputFramesConsumed: consumed,
+                needsInput:
+                    status == .inputRanDry
+                    && !state.inputProvider.isFinished,
+                isEndOfStream: status == .endOfStream
+            )
         }
     }
 
@@ -289,5 +415,200 @@ private final class ConverterInputProvider: @unchecked Sendable {
         retainedSlice = slice
         status.pointee = .haveData
         return slice
+    }
+}
+
+private final class SegmentStreamingConversionState:
+    @unchecked Sendable {
+    let converter: AVAudioConverter
+    let inputFormat: AVAudioFormat
+    let outputFormat: AVAudioFormat
+    let inputProvider = SegmentStreamingInputProvider()
+    private var didAppendSourceInput = false
+    private var didFinishInput = false
+    private var lastSourceSample: Float?
+
+    init(
+        converter: AVAudioConverter,
+        inputFormat: AVAudioFormat,
+        outputFormat: AVAudioFormat
+    ) {
+        self.converter = converter
+        self.inputFormat = inputFormat
+        self.outputFormat = outputFormat
+    }
+
+    func append(samples: [Float]) throws {
+        if !didAppendSourceInput,
+           let firstSample = samples.first {
+            let leadingFrames = Int(
+                converter.primeInfo.leadingFrames
+            )
+            if leadingFrames > 0 {
+                try inputProvider.append(
+                    samples: Array(
+                        repeating: firstSample,
+                        count: leadingFrames
+                    ),
+                    format: inputFormat
+                )
+            }
+        }
+        didAppendSourceInput = true
+        lastSourceSample = samples.last
+        try inputProvider.append(
+            samples: samples,
+            format: inputFormat
+        )
+    }
+
+    func finishInput() {
+        guard !didFinishInput else {
+            return
+        }
+        didFinishInput = true
+        if let lastSourceSample {
+            let trailingFrames = Int(
+                converter.primeInfo.trailingFrames
+            )
+            if trailingFrames > 0 {
+                do {
+                    try inputProvider.append(
+                        samples: Array(
+                            repeating: lastSourceSample,
+                            count: trailingFrames
+                        ),
+                        format: inputFormat
+                    )
+                } catch {
+                    inputProvider.markCopyFailed()
+                }
+            }
+        }
+        inputProvider.finish()
+    }
+}
+
+private final class SegmentStreamingInputProvider:
+    @unchecked Sendable {
+    private let lock = NSLock()
+    private var queuedBuffers: [AVAudioPCMBuffer] = []
+    private var nextFrame: AVAudioFramePosition = 0
+    private var retainedSlice: AVAudioPCMBuffer?
+    private var finished = false
+    private var consumedFrames = 0
+    private(set) var copyFailed = false
+
+    var consumedFrameCount: Int {
+        lock.withLock { consumedFrames }
+    }
+
+    var isFinished: Bool {
+        lock.withLock { finished }
+    }
+
+    var hasQueuedInput: Bool {
+        lock.withLock { !queuedBuffers.isEmpty }
+    }
+
+    func append(samples: [Float], format: AVAudioFormat) throws {
+        guard !samples.isEmpty,
+              let frameCount = AVAudioFrameCount(
+                  exactly: samples.count
+              ),
+              let buffer = AVAudioPCMBuffer(
+                  pcmFormat: format,
+                  frameCapacity: frameCount
+              ),
+              let channel = buffer.floatChannelData?.pointee else {
+            throw PCMConverterError.invalidInputFormat
+        }
+        buffer.frameLength = frameCount
+        samples.withUnsafeBufferPointer { source in
+            guard let baseAddress = source.baseAddress else {
+                return
+            }
+            memcpy(
+                channel,
+                baseAddress,
+                samples.count * MemoryLayout<Float>.size
+            )
+        }
+        lock.withLock {
+            queuedBuffers.append(buffer)
+        }
+    }
+
+    func finish() {
+        lock.withLock {
+            finished = true
+        }
+    }
+
+    func markCopyFailed() {
+        lock.withLock {
+            copyFailed = true
+        }
+    }
+
+    func next(
+        requestedPacketCount: AVAudioPacketCount,
+        status: UnsafeMutablePointer<AVAudioConverterInputStatus>
+    ) -> AVAudioBuffer? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let input = queuedBuffers.first else {
+            status.pointee = finished ? .endOfStream : .noDataNow
+            return nil
+        }
+        let remaining = AVAudioFramePosition(input.frameLength) - nextFrame
+        guard remaining > 0 else {
+            copyFailed = true
+            status.pointee = .noDataNow
+            return nil
+        }
+
+        let requestedFrames = max(
+            1,
+            AVAudioFramePosition(requestedPacketCount)
+        )
+        let frameCount = AVAudioFrameCount(
+            min(remaining, requestedFrames)
+        )
+        let result: AVAudioPCMBuffer
+        if nextFrame == 0, frameCount == input.frameLength {
+            result = input
+        } else {
+            guard let sourceChannels = input.floatChannelData,
+                  let slice = AVAudioPCMBuffer(
+                      pcmFormat: input.format,
+                      frameCapacity: frameCount
+                  ),
+                  let destinationChannels = slice.floatChannelData else {
+                copyFailed = true
+                status.pointee = .noDataNow
+                return nil
+            }
+            slice.frameLength = frameCount
+            let sourceOffset = Int(nextFrame)
+            let byteCount = Int(frameCount)
+                * MemoryLayout<Float>.size
+            memcpy(
+                destinationChannels[0],
+                sourceChannels[0].advanced(by: sourceOffset),
+                byteCount
+            )
+            retainedSlice = slice
+            result = slice
+        }
+        nextFrame += AVAudioFramePosition(frameCount)
+        consumedFrames += Int(frameCount)
+        if nextFrame == AVAudioFramePosition(input.frameLength) {
+            queuedBuffers.removeFirst()
+            nextFrame = 0
+        }
+        status.pointee = .haveData
+        return result
     }
 }

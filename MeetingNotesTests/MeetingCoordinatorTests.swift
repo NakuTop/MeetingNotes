@@ -685,6 +685,86 @@ final class MeetingCoordinatorTests: XCTestCase {
         )
     }
 
+    func testWriterDegradationOutranksDerivedTranscriptionDegradationAtFinalization()
+        async throws {
+        let fixture = makeFixture(
+            packets: [makeOnlinePacket(index: 0)],
+            writerFailsAppendTracks: [.microphone],
+            speakerFinalizationOutcome: .degraded(
+                replacement: nil,
+                sourceRevision: nil,
+                errorCode: "source_track_transcription_failed_system"
+            )
+        )
+
+        _ = try await fixture.coordinator.start(mode: .online)
+        try await fixture.coordinator.stop()
+
+        let savedFinalization = await fixture.repository.finalization()
+        let finalization = try XCTUnwrap(savedFinalization)
+        let degradationCodes = await fixture.repository
+            .savedDegradationCodes()
+        let degradationAttempts = await fixture.repository
+            .degradationPersistenceAttemptCount()
+        XCTAssertEqual(
+            finalization.sourceDegradationErrorCode,
+            "source_track_write_failed_microphone"
+        )
+        XCTAssertEqual(
+            degradationCodes,
+            ["source_track_write_failed_microphone"]
+        )
+        XCTAssertEqual(
+            degradationAttempts,
+            1,
+            "Derived degradation must not overwrite a writer root cause"
+        )
+    }
+
+    func testWriterDegradationPrecedenceIsStableByFailureClassAndTrack()
+        async throws {
+        let cases: [(
+            append: Set<AudioTrack>,
+            finish: Set<AudioTrack>,
+            expected: String
+        )] = [
+            (
+                append: [.system],
+                finish: [.microphone],
+                expected: "source_track_write_failed_system"
+            ),
+            (
+                append: [],
+                finish: [.system, .microphone],
+                expected: "source_track_finish_failed_microphone"
+            ),
+        ]
+
+        for testCase in cases {
+            let fixture = makeFixture(
+                packets: [makeOnlinePacket(index: 0)],
+                writerFailsAppendTracks: testCase.append,
+                writerFailsFinishTracks: testCase.finish
+            )
+
+            _ = try await fixture.coordinator.start(mode: .online)
+            try await fixture.coordinator.stop()
+
+            let savedFinalization = await fixture.repository.finalization()
+            let finalization = try XCTUnwrap(savedFinalization)
+            let degradationCodes = await fixture.repository
+                .savedDegradationCodes()
+            XCTAssertEqual(
+                finalization.sourceDegradationErrorCode,
+                testCase.expected
+            )
+            XCTAssertEqual(
+                degradationCodes,
+                [testCase.expected]
+            )
+        }
+    }
+
     func testFinalTranscriptTailAndPendingDegradationPersistAtomicallyAtFinalization()
         async throws {
         let fixture = makeFixture(
@@ -1772,7 +1852,7 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
             remainingDegradationFailures -= 1
             throw CoordinatorTestError.repositoryDegradation
         }
-        degradationCodes.append(errorCode)
+        degradationCodes = [errorCode]
     }
 
     func finalizeMeeting(
@@ -1789,7 +1869,7 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
             throw CoordinatorTestError.repositoryFinalize
         }
         if let sourceDegradationErrorCode {
-            degradationCodes.append(sourceDegradationErrorCode)
+            degradationCodes = [sourceDegradationErrorCode]
         }
         savedFinalization = Finalization(
             endedAt: endedAt,

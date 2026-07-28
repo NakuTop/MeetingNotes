@@ -53,6 +53,12 @@ final class SpeakerAwareTranscriptFinalizerTests: XCTestCase {
             [1, 2, 3],
             "The shared service must finish microphone before system"
         )
+        let recordedStarts = await service.recordedStarts()
+        XCTAssertEqual(
+            recordedStarts,
+            [4, 6, 2],
+            "Each source chunk must retain its absolute timeline"
+        )
     }
 
     func testOnlineFinalizationPreservesSimultaneousEntriesFromBothTracks()
@@ -249,6 +255,7 @@ private actor FakeSpeakerFinalizationTranscriptionService:
     TranscriptionService {
     private let responses: [Float: [TranscriptDraft]]
     private var markers: [Float] = []
+    private var starts: [TimeInterval] = []
 
     init(responses: [Float: [TranscriptDraft]]) {
         self.responses = responses
@@ -260,16 +267,20 @@ private actor FakeSpeakerFinalizationTranscriptionService:
         samples: [Float],
         startingAt: TimeInterval
     ) async throws -> [TranscriptDraft] {
-        _ = startingAt
         guard let marker = samples.first,
               let response = responses[marker] else {
             throw SpeakerFinalizerTestError.transcribe
         }
         markers.append(marker)
+        starts.append(startingAt)
         return response
     }
 
     func recordedMarkers() -> [Float] {
         markers
+    }
+
+    func recordedStarts() -> [TimeInterval] {
+        starts
     }
 }
