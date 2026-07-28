@@ -425,13 +425,19 @@ final class MeetingRepository {
         _ lhs: TranscriptRecord,
         _ rhs: TranscriptRecord
     ) -> Bool {
-        if let lhsSequence = lhs.sequenceIndex,
-           let rhsSequence = rhs.sequenceIndex,
-           lhsSequence != rhsSequence {
-            return lhsSequence < rhsSequence
-        }
         if lhs.startTime != rhs.startTime {
             return lhs.startTime < rhs.startTime
+        }
+        switch (lhs.sequenceIndex, rhs.sequenceIndex) {
+        case let (lhsSequence?, rhsSequence?)
+            where lhsSequence != rhsSequence:
+            return lhsSequence < rhsSequence
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        default:
+            break
         }
         if lhs.endTime != rhs.endTime {
             return lhs.endTime < rhs.endTime

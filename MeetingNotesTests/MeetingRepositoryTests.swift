@@ -600,6 +600,139 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(reloadedRecords.map(\.sequenceIndex), [0, 1, 2])
     }
 
+    func testReplacementReadSortsOutOfOrderDraftsChronologically() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 10,
+                        endTime: 12,
+                        text: "later"
+                    ),
+                    speakerID: "remote",
+                    source: .system
+                ),
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 1,
+                        endTime: 2,
+                        text: "earlier"
+                    ),
+                    speakerID: "me",
+                    source: .microphone
+                ),
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 5,
+                        endTime: 6,
+                        text: "middle"
+                    ),
+                    speakerID: "room-1",
+                    source: .room
+                )
+            ],
+            sourceRevision: 8
+        )
+
+        let records = try repository.transcripts(meetingID: meetingID)
+
+        XCTAssertEqual(records.map(\.text), ["earlier", "middle", "later"])
+        XCTAssertEqual(records.map(\.sequenceIndex), [1, 2, 0])
+    }
+
+    func testTranscriptReadTotallyOrdersMixedSequenceRows() throws {
+        var capturedContext: ModelContext?
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                capturedContext = context
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let records = [
+            TranscriptRecord(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000006")!,
+                startTime: 1,
+                endTime: 2,
+                text: "same-legacy-long",
+                isFinal: true,
+                meeting: meeting
+            ),
+            TranscriptRecord(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+                startTime: 1,
+                endTime: 5,
+                text: "same-indexed-one",
+                isFinal: true,
+                sequenceIndex: 1,
+                meeting: meeting
+            ),
+            TranscriptRecord(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+                startTime: 2,
+                endTime: 3,
+                text: "later-indexed-zero",
+                isFinal: true,
+                sequenceIndex: 0,
+                meeting: meeting
+            ),
+            TranscriptRecord(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000004")!,
+                startTime: 1,
+                endTime: 6,
+                text: "same-indexed-zero",
+                isFinal: true,
+                sequenceIndex: 0,
+                meeting: meeting
+            ),
+            TranscriptRecord(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000005")!,
+                startTime: 0,
+                endTime: 1,
+                text: "earliest-legacy",
+                isFinal: true,
+                meeting: meeting
+            ),
+            TranscriptRecord(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!,
+                startTime: 1,
+                endTime: 1,
+                text: "same-legacy-short",
+                isFinal: true,
+                meeting: meeting
+            )
+        ]
+        let modelContext = try XCTUnwrap(capturedContext)
+        records.forEach(modelContext.insert)
+        meeting.transcripts = records
+        try modelContext.save()
+
+        let sortedRecords = try repository.transcripts(meetingID: meetingID)
+
+        XCTAssertEqual(
+            sortedRecords.map(\.text),
+            [
+                "earliest-legacy",
+                "same-indexed-zero",
+                "same-indexed-one",
+                "same-legacy-short",
+                "same-legacy-long",
+                "later-indexed-zero"
+            ]
+        )
+    }
+
     func testLegacyTranscriptsWithoutSequenceFallBackToChronology() throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(
