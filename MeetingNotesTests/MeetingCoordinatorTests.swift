@@ -765,6 +765,45 @@ final class MeetingCoordinatorTests: XCTestCase {
         }
     }
 
+    func testFinalizeFailureKeepsPreferredWriterDegradationDurable()
+        async throws {
+        let fixture = makeFixture(
+            writerFailsFinishTracks: [.microphone, .system],
+            repositoryFailsFinalize: true
+        )
+        let meetingID = try await fixture.coordinator.start(mode: .online)
+
+        do {
+            try await fixture.coordinator.stop()
+            XCTFail("Expected repository finalize failure")
+        } catch {
+            XCTAssertEqual(
+                error as? CoordinatorTestError,
+                .repositoryFinalize
+            )
+        }
+
+        let degradationCodes = await fixture.repository
+            .savedDegradationCodes()
+        let finalizeAttemptCodes = await fixture.repository
+            .finalizeAttemptDegradationErrorCodes()
+        let persistedState = await fixture.repository.savedState(
+            for: meetingID
+        )
+        XCTAssertEqual(
+            degradationCodes,
+            ["source_track_finish_failed_microphone"]
+        )
+        XCTAssertEqual(
+            finalizeAttemptCodes,
+            ["source_track_finish_failed_microphone"]
+        )
+        XCTAssertEqual(
+            persistedState,
+            .finalizing
+        )
+    }
+
     func testFinalTranscriptTailAndPendingDegradationPersistAtomicallyAtFinalization()
         async throws {
         let fixture = makeFixture(

@@ -151,6 +151,7 @@ final class MeetingTrackAudioReaderTests: XCTestCase {
             declaredFrameCount: 4_800,
             reads: [Array(repeating: 0.25, count: 4_800)]
         )
+        let exactOutput = Array(repeating: Float(0.5), count: 1_600)
         let converter = ScriptedTrackPCMConverter(
             segmentScripts: [[
                 .init(
@@ -166,7 +167,7 @@ final class MeetingTrackAudioReaderTests: XCTestCase {
                     isEndOfStream: false
                 ),
                 .init(
-                    samples: [0.5, 0.75],
+                    samples: exactOutput,
                     inputFramesConsumed: 0,
                     needsInput: false,
                     isEndOfStream: true
@@ -191,15 +192,125 @@ final class MeetingTrackAudioReaderTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(chunks, [
-            MeetingAudioSampleChunk(
-                samples: [0.5, 0.75],
-                startingAt: 0
-            ),
-        ])
+        XCTAssertEqual(chunks.flatMap(\.samples), exactOutput)
+        XCTAssertEqual(chunks.map(\.samples.count), [700, 700, 200])
+        XCTAssertEqual(chunks.map(\.startingAt), [0, 0.04375, 0.0875])
         XCTAssertEqual(converter.appendedSampleCounts(), [4_800])
         XCTAssertEqual(converter.finishInputCallCount(), 1)
         XCTAssertEqual(converter.resetCallCount(), 1)
+    }
+
+    func testStreamingConversionRejectsEarlyEndOfStreamUnderflow()
+        async throws {
+        let fixture = try await makeSingleSegmentFixture()
+        let segmentReader = FakeTrackSegmentReader(
+            format: .init(
+                sampleRate: 48_000,
+                channelCount: 1,
+                isFloat32: true
+            ),
+            declaredFrameCount: 4_800,
+            reads: [Array(repeating: 0.25, count: 4_800)]
+        )
+        let converter = ScriptedTrackPCMConverter(
+            segmentScripts: [[
+                .init(
+                    samples: [],
+                    inputFramesConsumed: 0,
+                    needsInput: true,
+                    isEndOfStream: false
+                ),
+                .init(
+                    samples: [],
+                    inputFramesConsumed: 4_800,
+                    needsInput: true,
+                    isEndOfStream: false
+                ),
+                .init(
+                    samples: Array(repeating: 0.5, count: 1_599),
+                    inputFramesConsumed: 0,
+                    needsInput: false,
+                    isEndOfStream: true
+                ),
+            ]]
+        )
+        let reader = MeetingTrackAudioReader(
+            sourceLoader: MeetingAudioSourceLoader(
+                fileStore: fixture.fileStore
+            ),
+            segmentReaderFactory: FakeTrackSegmentReaderFactory(
+                readers: [segmentReader]
+            ),
+            converter: converter
+        )
+
+        await assertReaderError(
+            try await reader.chunks(
+                meetingID: fixture.meetingID,
+                track: .microphone
+            ),
+            equals: .converterOutputUnderflow(
+                index: 0,
+                expected: 1_600,
+                actual: 1_599
+            )
+        )
+    }
+
+    func testRepeatedNeedsInputAfterFinishThrowsInsteadOfHanging()
+        async throws {
+        let fixture = try await makeSingleSegmentFixture()
+        let segmentReader = FakeTrackSegmentReader(
+            format: .init(
+                sampleRate: 48_000,
+                channelCount: 1,
+                isFloat32: true
+            ),
+            declaredFrameCount: 4_800,
+            reads: [Array(repeating: 0.25, count: 4_800)]
+        )
+        let needsInputWithoutProgress = MeetingPCMConversionPull(
+            samples: [],
+            inputFramesConsumed: 0,
+            needsInput: true,
+            isEndOfStream: false
+        )
+        let converter = ScriptedTrackPCMConverter(
+            segmentScripts: [[
+                needsInputWithoutProgress,
+                .init(
+                    samples: [],
+                    inputFramesConsumed: 4_800,
+                    needsInput: true,
+                    isEndOfStream: false
+                ),
+                needsInputWithoutProgress,
+                needsInputWithoutProgress,
+                .init(
+                    samples: Array(repeating: 0.5, count: 1_600),
+                    inputFramesConsumed: 0,
+                    needsInput: false,
+                    isEndOfStream: true
+                ),
+            ]]
+        )
+        let reader = MeetingTrackAudioReader(
+            sourceLoader: MeetingAudioSourceLoader(
+                fileStore: fixture.fileStore
+            ),
+            segmentReaderFactory: FakeTrackSegmentReaderFactory(
+                readers: [segmentReader]
+            ),
+            converter: converter
+        )
+
+        await assertReaderError(
+            try await reader.chunks(
+                meetingID: fixture.meetingID,
+                track: .microphone
+            ),
+            equals: .conversionStalled(index: 0)
+        )
     }
 
     func testStreamingConversionThrowsInsteadOfLoopingWithoutProgress()

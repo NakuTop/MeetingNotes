@@ -17,6 +17,11 @@ enum MeetingTrackAudioReaderError: Error, Equatable, Sendable {
         actual: Int64
     )
     case shortRead(index: Int, expected: Int, actual: Int)
+    case converterOutputUnderflow(
+        index: Int,
+        expected: Int,
+        actual: Int
+    )
     case conversionStalled(index: Int)
 }
 
@@ -347,7 +352,7 @@ private actor MeetingTrackAudioReadState {
                 try await openCurrentSegment()
             }
             if didReachEndOfStream {
-                advanceToNextSegment()
+                try validateOutputAndAdvance()
                 continue
             }
 
@@ -382,24 +387,22 @@ private actor MeetingTrackAudioReadState {
                 }
             }
             if pull.isEndOfStream {
-                advanceToNextSegment()
+                try validateOutputAndAdvance()
                 continue
             }
             if pull.needsInput {
-                try supplyInputOrFinish()
-                consecutiveStalledPulls = 0
+                if try supplyInputOrFinish() {
+                    consecutiveStalledPulls = 0
+                } else {
+                    try recordStalledPull()
+                }
                 continue
             }
             if madeConversionProgress {
                 continue
             }
 
-            consecutiveStalledPulls += 1
-            if consecutiveStalledPulls >= 2 {
-                throw MeetingTrackAudioReaderError.conversionStalled(
-                    index: segmentIndex
-                )
-            }
+            try recordStalledPull()
         }
     }
 
@@ -472,7 +475,7 @@ private actor MeetingTrackAudioReadState {
         nextOutputTime = source.segmentStartTimes[segmentIndex]
     }
 
-    private func supplyInputOrFinish() throws {
+    private func supplyInputOrFinish() throws -> Bool {
         let expectedFrameCount = source.segmentFrameCounts[segmentIndex]
         let remainingFrames =
             expectedFrameCount - decodedFramesInSegment
@@ -499,9 +502,21 @@ private actor MeetingTrackAudioReadState {
             }
             decodedFramesInSegment += Int64(samples.count)
             try converter.append(samples: samples)
+            return true
         } else if !didFinishInput {
             converter.finishInput()
             didFinishInput = true
+            return true
+        }
+        return false
+    }
+
+    private func recordStalledPull() throws {
+        consecutiveStalledPulls += 1
+        if consecutiveStalledPulls >= 2 {
+            throw MeetingTrackAudioReaderError.conversionStalled(
+                index: segmentIndex
+            )
         }
     }
 
@@ -541,6 +556,18 @@ private actor MeetingTrackAudioReadState {
     private func advanceToNextSegment() {
         closeCurrentSegment()
         segmentIndex += 1
+    }
+
+    private func validateOutputAndAdvance() throws {
+        let expected = expectedOutputFrameCount()
+        guard outputFramesInSegment == expected else {
+            throw MeetingTrackAudioReaderError.converterOutputUnderflow(
+                index: segmentIndex,
+                expected: expected,
+                actual: outputFramesInSegment
+            )
+        }
+        advanceToNextSegment()
     }
 
     private func closeCurrentSegment() {

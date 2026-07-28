@@ -67,10 +67,11 @@ actor MeetingCoordinator {
     private var timeline: ActiveRecordingTimeline?
     private var streamTask: Task<Void, Never>?
     private var transcriptPersistenceTask: Task<Bool, Never>?
-    private var encounteredSourceDegradations:
-        [SourceDegradationReason] = []
+    private var preferredEncounteredSourceDegradation:
+        SourceDegradationReason?
     private var pendingSourceDegradationPersistence:
-        [SourceDegradationReason] = []
+        SourceDegradationReason?
+    private var sourceDegradationPersistenceInProgress = false
     private var pendingTranscriptionSamples: [Float] = []
     private var nextTranscriptionSampleOffset = 0
     private var totalSampleCount = 0
@@ -388,12 +389,8 @@ actor MeetingCoordinator {
                     preferredSourceDegradation()?.errorCode
                     ?? speakerDegradationCode
             )
-            encounteredSourceDegradations.removeAll(
-                keepingCapacity: true
-            )
-            pendingSourceDegradationPersistence.removeAll(
-                keepingCapacity: true
-            )
+            preferredEncounteredSourceDegradation = nil
+            pendingSourceDegradationPersistence = nil
             var readyMachine = stateMachine
             try readyMachine.send(.finalized)
             stateMachine = readyMachine
@@ -536,37 +533,61 @@ actor MeetingCoordinator {
         _ reason: SourceDegradationReason,
         meetingID: UUID
     ) async {
-        if !encounteredSourceDegradations.contains(reason) {
-            encounteredSourceDegradations.append(reason)
+        if let preferredEncounteredSourceDegradation,
+           !reasonOutranks(
+               reason,
+               preferredEncounteredSourceDegradation
+           ) {
+            return
         }
-        if !pendingSourceDegradationPersistence.contains(reason) {
-            pendingSourceDegradationPersistence.append(reason)
-        }
+        preferredEncounteredSourceDegradation = reason
+        pendingSourceDegradationPersistence = reason
         try? await persistPendingSourceDegradations(meetingID: meetingID)
     }
 
     private func persistPendingSourceDegradations(
         meetingID: UUID
     ) async throws {
-        while let reason = pendingSourceDegradationPersistence.first {
-            try await dependencies.repository.markSpeakerProcessingDegraded(
-                meetingID: meetingID,
-                errorCode: reason.errorCode
-            )
-            pendingSourceDegradationPersistence.removeFirst()
+        guard !sourceDegradationPersistenceInProgress else {
+            return
+        }
+        sourceDegradationPersistenceInProgress = true
+        defer { sourceDegradationPersistenceInProgress = false }
+
+        while let reason = pendingSourceDegradationPersistence {
+            do {
+                try await dependencies.repository
+                    .markSpeakerProcessingDegraded(
+                        meetingID: meetingID,
+                        errorCode: reason.errorCode
+                    )
+            } catch {
+                if pendingSourceDegradationPersistence != reason {
+                    continue
+                }
+                throw error
+            }
+            if pendingSourceDegradationPersistence == reason {
+                pendingSourceDegradationPersistence = nil
+            }
         }
     }
 
     private func preferredSourceDegradation()
         -> SourceDegradationReason? {
-        encounteredSourceDegradations.min { lhs, rhs in
-            if lhs.precedence.failureClass
-                != rhs.precedence.failureClass {
-                return lhs.precedence.failureClass
-                    < rhs.precedence.failureClass
-            }
-            return lhs.precedence.track < rhs.precedence.track
+        preferredEncounteredSourceDegradation
+    }
+
+    private func reasonOutranks(
+        _ lhs: SourceDegradationReason,
+        _ rhs: SourceDegradationReason
+    ) -> Bool {
+        if lhs.precedence.failureClass
+            != rhs.precedence.failureClass {
+            return lhs.precedence.failureClass
+                < rhs.precedence.failureClass
         }
+        return lhs.precedence.track < rhs.precedence.track
     }
 
     private func enqueueRemainingTranscriptionSamples(
@@ -688,10 +709,9 @@ actor MeetingCoordinator {
         timeline = nil
         streamTask = nil
         transcriptPersistenceTask = nil
-        encounteredSourceDegradations.removeAll(keepingCapacity: true)
-        pendingSourceDegradationPersistence.removeAll(
-            keepingCapacity: true
-        )
+        preferredEncounteredSourceDegradation = nil
+        pendingSourceDegradationPersistence = nil
+        sourceDegradationPersistenceInProgress = false
         pendingTranscriptionSamples.removeAll(keepingCapacity: true)
         nextTranscriptionSampleOffset = 0
         totalSampleCount = 0
