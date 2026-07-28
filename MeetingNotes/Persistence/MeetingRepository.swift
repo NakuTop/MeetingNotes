@@ -313,6 +313,30 @@ final class MeetingRepository {
         try saveContext()
     }
 
+    func markSpeakerProcessingStarted(meetingID: UUID) throws {
+        let meeting = try meeting(id: meetingID)
+        guard meeting.speakerDiarizationRequested,
+              meeting.speakerProcessingState == .pending else {
+            return
+        }
+        let previousStateRawValue =
+            meeting.speakerProcessingStateRawValue
+        let previousErrorCode = meeting.speakerProcessingErrorCode
+        let previousUpdatedAt = meeting.updatedAt
+        meeting.speakerProcessingState = .processing
+        meeting.speakerProcessingErrorCode = nil
+        meeting.updatedAt = .now
+        do {
+            try saveContext()
+        } catch {
+            meeting.speakerProcessingStateRawValue =
+                previousStateRawValue
+            meeting.speakerProcessingErrorCode = previousErrorCode
+            meeting.updatedAt = previousUpdatedAt
+            throw error
+        }
+    }
+
     func finalizeMeeting(
         id: UUID,
         endedAt: Date,
@@ -336,6 +360,10 @@ final class MeetingRepository {
             meeting.speakerProcessingState = .degraded
             meeting.speakerProcessingErrorCode =
                 sourceDegradationErrorCode
+        } else if meeting.speakerProcessingState != .degraded,
+                  meeting.speakerDiarizationRequested {
+            meeting.speakerProcessingState = .completed
+            meeting.speakerProcessingErrorCode = nil
         }
         do {
             try saveContext()

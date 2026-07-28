@@ -71,6 +71,7 @@ protocol MeetingLifecycleRepository: Sendable {
         drafts: [AttributedTranscriptDraft],
         sourceRevision: Int
     ) async throws
+    func markSpeakerProcessingStarted(meetingID: UUID) async throws
     func markSpeakerProcessingDegraded(
         meetingID: UUID,
         errorCode: String
@@ -276,6 +277,10 @@ final class MeetingRepositoryLifecycleAdapter: MeetingLifecycleRepository {
             drafts: drafts,
             sourceRevision: sourceRevision
         )
+    }
+
+    func markSpeakerProcessingStarted(meetingID: UUID) async throws {
+        try repository.markSpeakerProcessingStarted(meetingID: meetingID)
     }
 
     func markSpeakerProcessingDegraded(

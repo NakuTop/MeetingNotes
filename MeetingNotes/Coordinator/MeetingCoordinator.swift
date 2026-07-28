@@ -369,6 +369,10 @@ actor MeetingCoordinator {
             }
 
             let provisional = await transcriber.transcripts()
+            if speakerDiarizationRequested {
+                try? await dependencies.repository
+                    .markSpeakerProcessingStarted(meetingID: meetingID)
+            }
             let speakerOutcome = await dependencies.speakerFinalizer.finalize(
                 meetingID: meetingID,
                 mode: mode,

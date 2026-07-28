@@ -73,6 +73,56 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertNil(meeting.speakerProcessingErrorCode)
     }
 
+    func testMarkSpeakerProcessingStartedTransitionsRequestedMeeting()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let id = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            speakerDiarizationRequested: true
+        )
+
+        try repository.markSpeakerProcessingStarted(meetingID: id)
+
+        let meeting = try repository.meeting(id: id)
+        XCTAssertEqual(meeting.speakerProcessingState, .processing)
+        XCTAssertNil(meeting.speakerProcessingErrorCode)
+    }
+
+    func testMarkSpeakerProcessingStartedLeavesUnrequestedAndDegradedStates()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let unrequestedID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let degradedID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 1_001),
+            speakerDiarizationRequested: true
+        )
+        let degraded = try repository.meeting(id: degradedID)
+        degraded.speakerProcessingState = .degraded
+        degraded.speakerProcessingErrorCode =
+            "source_track_write_failed_microphone"
+        try repository.updateMeetingState(
+            id: degradedID,
+            state: degraded.state
+        )
+
+        try repository.markSpeakerProcessingStarted(meetingID: unrequestedID)
+        try repository.markSpeakerProcessingStarted(meetingID: degradedID)
+
+        let unrequested = try repository.meeting(id: unrequestedID)
+        XCTAssertEqual(unrequested.speakerProcessingState, .notRequested)
+        XCTAssertNil(unrequested.speakerProcessingErrorCode)
+        XCTAssertEqual(degraded.speakerProcessingState, .degraded)
+        XCTAssertEqual(
+            degraded.speakerProcessingErrorCode,
+            "source_track_write_failed_microphone"
+        )
+    }
+
     func testCreateAppendAndReloadCompleteMeeting() throws {
         let repository = try MeetingRepository.inMemory()
         let startedAt = Date(timeIntervalSince1970: 1_000)
@@ -362,6 +412,99 @@ final class MeetingRepositoryTests: XCTestCase {
             meeting.speakerProcessingErrorCode,
             "source_track_write_failed_microphone"
         )
+    }
+
+    func testFinalizingRequestedMeetingCompletesSpeakerProcessingAndClearsError()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let id = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 100),
+            speakerDiarizationRequested: true
+        )
+        try repository.markSpeakerProcessingStarted(meetingID: id)
+        let meeting = try repository.meeting(id: id)
+        meeting.speakerProcessingErrorCode = "stale_progress_error"
+
+        try repository.finalizeMeeting(
+            id: id,
+            endedAt: Date(timeIntervalSince1970: 145),
+            activeDuration: 31
+        )
+
+        XCTAssertEqual(meeting.speakerProcessingState, .completed)
+        XCTAssertNil(meeting.speakerProcessingErrorCode)
+    }
+
+    func testFinalizingPreservesExistingSpeakerDegradationWithoutNewCode()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let id = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 100),
+            speakerDiarizationRequested: true
+        )
+        let meeting = try repository.meeting(id: id)
+        meeting.speakerProcessingState = .degraded
+        meeting.speakerProcessingErrorCode =
+            "source_track_write_failed_microphone"
+        try repository.updateMeetingState(id: id, state: .finalizing)
+
+        try repository.finalizeMeeting(
+            id: id,
+            endedAt: Date(timeIntervalSince1970: 145),
+            activeDuration: 31
+        )
+
+        XCTAssertEqual(meeting.speakerProcessingState, .degraded)
+        XCTAssertEqual(
+            meeting.speakerProcessingErrorCode,
+            "source_track_write_failed_microphone"
+        )
+    }
+
+    func testCompletedSpeakerFieldsRollBackWhenFinalMeetingSaveFails()
+        throws {
+        var saveAttempts = 0
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                saveAttempts += 1
+                if saveAttempts == 3 {
+                    throw InjectedRepositorySaveError.forced
+                }
+                try context.save()
+            }
+        )
+        let id = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 100),
+            speakerDiarizationRequested: true
+        )
+        try repository.markSpeakerProcessingStarted(meetingID: id)
+        let meeting = try repository.meeting(id: id)
+        meeting.speakerProcessingErrorCode = "prior_safe_error"
+
+        XCTAssertThrowsError(
+            try repository.finalizeMeeting(
+                id: id,
+                endedAt: Date(timeIntervalSince1970: 145),
+                activeDuration: 31
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? InjectedRepositorySaveError,
+                .forced
+            )
+        }
+
+        XCTAssertEqual(meeting.state, .preparing)
+        XCTAssertNil(meeting.endedAt)
+        XCTAssertEqual(meeting.speakerProcessingState, .processing)
+        XCTAssertEqual(
+            meeting.speakerProcessingErrorCode,
+            "prior_safe_error"
+        )
+        XCTAssertEqual(saveAttempts, 3)
     }
 
     func testAtomicFinalizationRestoresEveryFieldWhenSaveFails() throws {

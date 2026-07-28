@@ -17,6 +17,114 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertTrue(savedMeeting.speakerDiarizationRequested)
     }
 
+    func testSpeakerProgressWriteFailureDoesNotBlockFinalization()
+        async throws {
+        let fixture = makeFixture(
+            repositoryFailsSpeakerProcessingStart: true,
+            speakerDiarizationEnabled: true
+        )
+
+        let meetingID = try await fixture.coordinator.start(mode: .offline)
+        try await fixture.coordinator.stop()
+        let startAttempts = await fixture.repository
+            .speakerProcessingStartAttemptCount()
+        let savedState = await fixture.repository.savedState(
+            for: meetingID
+        )
+        let finalization = await fixture.repository.finalization()
+
+        XCTAssertEqual(startAttempts, 1)
+        XCTAssertEqual(savedState, .ready)
+        XCTAssertNotNil(finalization)
+    }
+
+    func testDisabledPreferenceDoesNotAttemptSpeakerProgressWrite()
+        async throws {
+        let fixture = makeFixture(speakerDiarizationEnabled: false)
+
+        _ = try await fixture.coordinator.start(mode: .offline)
+        try await fixture.coordinator.stop()
+        let startAttempts = await fixture.repository
+            .speakerProcessingStartAttemptCount()
+
+        XCTAssertEqual(startAttempts, 0)
+    }
+
+    @MainActor
+    func testRequestedSpeakerProcessingUsesRealRepositoryLifecycle()
+        async throws {
+        let fixture = try makeRealRepositoryFixture(
+            speakerDiarizationEnabled: true,
+            speakerFinalizationOutcome: .unchanged
+        )
+
+        let meetingID = try await fixture.coordinator.start(mode: .online)
+        XCTAssertEqual(
+            try fixture.repository.meeting(id: meetingID)
+                .speakerProcessingState,
+            .pending
+        )
+
+        try await fixture.coordinator.stop()
+
+        XCTAssertEqual(
+            fixture.speakerFinalizer.observedStates,
+            [.processing]
+        )
+        let finalized = try fixture.repository.meeting(id: meetingID)
+        XCTAssertEqual(finalized.speakerProcessingState, .completed)
+        XCTAssertNil(finalized.speakerProcessingErrorCode)
+    }
+
+    @MainActor
+    func testDisabledSpeakerPreferenceNeverEntersProcessing()
+        async throws {
+        let fixture = try makeRealRepositoryFixture(
+            speakerDiarizationEnabled: false,
+            speakerFinalizationOutcome: .unchanged
+        )
+
+        let meetingID = try await fixture.coordinator.start(mode: .online)
+        try await fixture.coordinator.stop()
+
+        XCTAssertEqual(
+            fixture.speakerFinalizer.observedStates,
+            [.notRequested]
+        )
+        XCTAssertEqual(
+            try fixture.repository.meeting(id: meetingID)
+                .speakerProcessingState,
+            .notRequested
+        )
+    }
+
+    @MainActor
+    func testRequestedDegradedOutcomeRemainsDegradedInRealRepository()
+        async throws {
+        let fixture = try makeRealRepositoryFixture(
+            speakerDiarizationEnabled: true,
+            speakerFinalizationOutcome: .degraded(
+                replacement: nil,
+                sourceRevision: nil,
+                errorCode: "speaker_diarization_inference_failed"
+            )
+        )
+
+        let meetingID = try await fixture.coordinator.start(mode: .offline)
+        try await fixture.coordinator.stop()
+
+        XCTAssertEqual(
+            fixture.speakerFinalizer.observedStates,
+            [.processing]
+        )
+        let finalized = try fixture.repository.meeting(id: meetingID)
+        XCTAssertEqual(finalized.speakerProcessingState, .degraded)
+        XCTAssertEqual(
+            finalized.speakerProcessingErrorCode,
+            "speaker_diarization_inference_failed"
+        )
+    }
+
     func testOnlineMeetingCreatesOneWriterPerTrackAtPlaybackSampleRate() async throws {
         let fixture = makeFixture()
 
@@ -1295,6 +1403,7 @@ final class MeetingCoordinatorTests: XCTestCase {
         writerFailsFinishTracks: Set<AudioTrack> = [],
         writerFactoryFailsForTrack: AudioTrack? = nil,
         repositoryDegradationFailures: Int = 0,
+        repositoryFailsSpeakerProcessingStart: Bool = false,
         repositoryFailsFinalizingUpdate: Bool = false,
         repositoryFailsReplacement: Bool = false,
         repositoryFailsFinalize: Bool = false,
@@ -1335,6 +1444,8 @@ final class MeetingCoordinatorTests: XCTestCase {
         let repository = FakeCoordinatorRepository(
             events: events,
             degradationFailures: repositoryDegradationFailures,
+            failsSpeakerProcessingStart:
+                repositoryFailsSpeakerProcessingStart,
             failsFinalizingUpdate: repositoryFailsFinalizingUpdate,
             failsReplacement: repositoryFailsReplacement,
             failsFinalize: repositoryFailsFinalize
@@ -1397,6 +1508,80 @@ final class MeetingCoordinatorTests: XCTestCase {
             clock: clock
         )
     }
+
+    @MainActor
+    private func makeRealRepositoryFixture(
+        speakerDiarizationEnabled: Bool,
+        speakerFinalizationOutcome: SpeakerFinalizationOutcome
+    ) throws -> RealRepositoryCoordinatorFixture {
+        let events = CoordinatorEventLog()
+        let capture = FakeCoordinatorCapture(
+            events: events,
+            failsToStart: false,
+            packets: [],
+            suspendsPause: false
+        )
+        let writers = Dictionary(
+            uniqueKeysWithValues: AudioTrack.allCases.map { track in
+                (
+                    track,
+                    FakeCoordinatorWriter(
+                        track: track,
+                        events: events,
+                        failsAppend: false,
+                        failsFinish: false
+                    )
+                )
+            }
+        )
+        let repository = try MeetingRepository.inMemory()
+        let speakerFinalizer =
+            RepositoryInspectingCoordinatorSpeakerFinalizer(
+                repository: repository,
+                outcome: speakerFinalizationOutcome
+            )
+        let dependencies = MeetingCoordinatorDependencies(
+            permissions: FakeCoordinatorPermissions(
+                statuses: [
+                    .microphone: .authorized,
+                    .screenRecording: .authorized
+                ]
+            ),
+            captureFactory: FakeCoordinatorCaptureFactory(
+                capture: capture,
+                modes: CoordinatorModeLog()
+            ),
+            writerFactory: FakeCoordinatorWriterFactory(
+                writers: writers,
+                requests: CoordinatorWriterRequestLog(),
+                failsForTrack: nil
+            ),
+            transcriptionFactory: FakeCoordinatorTranscriptionFactory(
+                transcriber: FakeCoordinatorTranscriber(
+                    events: events,
+                    emitsDrafts: false
+                )
+            ),
+            repository: MeetingRepositoryLifecycleAdapter(
+                repository: repository
+            ),
+            speakerDiarizationPreference:
+                MutableSpeakerDiarizationPreference(
+                    isEnabled: speakerDiarizationEnabled
+                ),
+            speakerFinalizer: speakerFinalizer,
+            panel: FakeCoordinatorPanel(events: events),
+            clock: ManualCoordinatorClock(
+                date: Date(timeIntervalSince1970: 1_000),
+                monotonic: 100
+            )
+        )
+        return RealRepositoryCoordinatorFixture(
+            coordinator: MeetingCoordinator(dependencies: dependencies),
+            repository: repository,
+            speakerFinalizer: speakerFinalizer
+        )
+    }
 }
 
 private struct CoordinatorFixture {
@@ -1425,10 +1610,18 @@ private struct CoordinatorFixture {
     }
 }
 
+@MainActor
+private struct RealRepositoryCoordinatorFixture {
+    let coordinator: MeetingCoordinator
+    let repository: MeetingRepository
+    let speakerFinalizer: RepositoryInspectingCoordinatorSpeakerFinalizer
+}
+
 private enum CoordinatorTestError: Error, Equatable {
     case captureStart
     case repositoryUpdate
     case repositoryDegradation
+    case repositorySpeakerProcessing
     case writerAppend
     case writerFactory
     case writerFinish
@@ -1775,6 +1968,37 @@ private actor FakeCoordinatorSpeakerFinalizer:
     }
 }
 
+@MainActor
+private final class RepositoryInspectingCoordinatorSpeakerFinalizer:
+    MeetingSpeakerFinalizing {
+    private let repository: MeetingRepository
+    private let outcome: SpeakerFinalizationOutcome
+    private(set) var observedStates: [SpeakerProcessingState] = []
+
+    init(
+        repository: MeetingRepository,
+        outcome: SpeakerFinalizationOutcome
+    ) {
+        self.repository = repository
+        self.outcome = outcome
+    }
+
+    func finalize(
+        meetingID: UUID,
+        mode: MeetingMode,
+        diarizationRequested: Bool,
+        provisional: [TranscriptDraft]
+    ) async -> SpeakerFinalizationOutcome {
+        _ = mode
+        _ = diarizationRequested
+        _ = provisional
+        if let meeting = try? repository.meeting(id: meetingID) {
+            observedStates.append(meeting.speakerProcessingState)
+        }
+        return outcome
+    }
+}
+
 private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
     struct SavedMeeting: Equatable, Sendable {
         let id: UUID
@@ -1796,6 +2020,7 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
 
     private let events: CoordinatorEventLog
     private var remainingDegradationFailures: Int
+    private let failsSpeakerProcessingStart: Bool
     private let failsFinalizingUpdate: Bool
     private let failsReplacement: Bool
     private let failsFinalize: Bool
@@ -1804,6 +2029,7 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
     private var transcripts: [TranscriptDraft] = []
     private var degradationCodes: [String] = []
     private var degradationPersistenceAttempts = 0
+    private var speakerProcessingStartAttempts = 0
     private var recordedFinalizeAttemptDegradationErrorCodes: [String?] = []
     private var savedFinalization: Finalization?
     private var replacement: SavedReplacement?
@@ -1811,12 +2037,14 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
     init(
         events: CoordinatorEventLog,
         degradationFailures: Int,
+        failsSpeakerProcessingStart: Bool,
         failsFinalizingUpdate: Bool,
         failsReplacement: Bool,
         failsFinalize: Bool
     ) {
         self.events = events
         remainingDegradationFailures = degradationFailures
+        self.failsSpeakerProcessingStart = failsSpeakerProcessingStart
         self.failsFinalizingUpdate = failsFinalizingUpdate
         self.failsReplacement = failsReplacement
         self.failsFinalize = failsFinalize
@@ -1894,6 +2122,14 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
         degradationCodes = [errorCode]
     }
 
+    func markSpeakerProcessingStarted(meetingID: UUID) async throws {
+        _ = meetingID
+        speakerProcessingStartAttempts += 1
+        if failsSpeakerProcessingStart {
+            throw CoordinatorTestError.repositorySpeakerProcessing
+        }
+    }
+
     func finalizeMeeting(
         meetingID: UUID,
         endedAt: Date,
@@ -1944,6 +2180,10 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
 
     func degradationPersistenceAttemptCount() -> Int {
         degradationPersistenceAttempts
+    }
+
+    func speakerProcessingStartAttemptCount() -> Int {
+        speakerProcessingStartAttempts
     }
 
     func finalizeAttemptDegradationErrorCodes() -> [String?] {
