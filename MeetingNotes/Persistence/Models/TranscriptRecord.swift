@@ -11,6 +11,7 @@ final class TranscriptRecord {
     var speakerID: String?
     var sourceRawValue: String?
     var sourceRevision: Int
+    var sequenceIndex: Int?
     var meeting: MeetingRecord?
 
     var source: TranscriptAudioSource {
@@ -32,6 +33,7 @@ final class TranscriptRecord {
         speakerID: String? = nil,
         sourceRawValue: String? = nil,
         sourceRevision: Int = 0,
+        sequenceIndex: Int? = nil,
         meeting: MeetingRecord? = nil
     ) {
         self.id = id
@@ -42,6 +44,7 @@ final class TranscriptRecord {
         self.speakerID = speakerID
         self.sourceRawValue = sourceRawValue
         self.sourceRevision = sourceRevision
+        self.sequenceIndex = sequenceIndex
         self.meeting = meeting
     }
 }

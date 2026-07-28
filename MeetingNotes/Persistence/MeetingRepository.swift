@@ -94,12 +94,25 @@ final class MeetingRepository {
     }
 
     func meeting(id: UUID) throws -> MeetingRecord {
+        try meeting(id: id, in: context)
+    }
+
+    func transcripts(meetingID: UUID) throws -> [TranscriptRecord] {
+        try meeting(id: meetingID).transcripts.sorted(
+            by: Self.transcriptComesBefore
+        )
+    }
+
+    private func meeting(
+        id: UUID,
+        in modelContext: ModelContext
+    ) throws -> MeetingRecord {
         var descriptor = FetchDescriptor<MeetingRecord>(
             predicate: #Predicate { $0.id == id }
         )
         descriptor.fetchLimit = 1
 
-        guard let meeting = try context.fetch(descriptor).first else {
+        guard let meeting = try modelContext.fetch(descriptor).first else {
             throw MeetingRepositoryError.meetingNotFound(id)
         }
         return meeting
@@ -156,11 +169,14 @@ final class MeetingRepository {
         drafts: [AttributedTranscriptDraft],
         sourceRevision: Int
     ) throws {
-        let meeting = try meeting(id: meetingID)
+        let replacementContext = ModelContext(container)
+        replacementContext.autosaveEnabled = false
+        let meeting = try meeting(
+            id: meetingID,
+            in: replacementContext
+        )
         let previousTranscripts = meeting.transcripts
-        let previousUpdatedAt = meeting.updatedAt
-
-        let replacements = drafts.map { draft in
+        let replacements = drafts.enumerated().map { sequenceIndex, draft in
             TranscriptRecord(
                 startTime: draft.transcript.startTime,
                 endTime: draft.transcript.endTime,
@@ -168,24 +184,16 @@ final class MeetingRepository {
                 isFinal: true,
                 speakerID: draft.speakerID,
                 sourceRawValue: draft.source.rawValue,
-                sourceRevision: sourceRevision
+                sourceRevision: sourceRevision,
+                sequenceIndex: sequenceIndex
             )
         }
 
-        replacements.forEach(context.insert)
+        replacements.forEach(replacementContext.insert)
         meeting.transcripts = replacements
         meeting.updatedAt = .now
-        previousTranscripts.forEach(context.delete)
-
-        do {
-            try saveContext()
-        } catch {
-            context.rollback()
-            previousTranscripts.forEach { $0.meeting = meeting }
-            meeting.transcripts = previousTranscripts
-            meeting.updatedAt = previousUpdatedAt
-            throw error
-        }
+        previousTranscripts.forEach(replacementContext.delete)
+        try contextSaver(replacementContext)
     }
 
     func appendBookmark(
@@ -409,6 +417,24 @@ final class MeetingRepository {
         }
         if lhs.createdAt != rhs.createdAt {
             return lhs.createdAt > rhs.createdAt
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private static func transcriptComesBefore(
+        _ lhs: TranscriptRecord,
+        _ rhs: TranscriptRecord
+    ) -> Bool {
+        if let lhsSequence = lhs.sequenceIndex,
+           let rhsSequence = rhs.sequenceIndex,
+           lhsSequence != rhsSequence {
+            return lhsSequence < rhsSequence
+        }
+        if lhs.startTime != rhs.startTime {
+            return lhs.startTime < rhs.startTime
+        }
+        if lhs.endTime != rhs.endTime {
+            return lhs.endTime < rhs.endTime
         }
         return lhs.id.uuidString < rhs.id.uuidString
     }

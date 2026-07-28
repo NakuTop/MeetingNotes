@@ -1,4 +1,5 @@
 import XCTest
+import SwiftData
 @testable import MeetingNotes
 
 @MainActor
@@ -526,6 +527,104 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(try repository.count(TranscriptRecord.self), 2)
     }
 
+    func testReplacementPersistsAssemblySequenceAcrossRepositoryReload() throws {
+        var capturedContainer: ModelContainer?
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                capturedContainer = context.container
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+        let assembled = SpeakerTranscriptAssembler().assemble([
+            AttributedTranscriptDraft(
+                transcript: TranscriptDraft(
+                    startTime: 1,
+                    endTime: 5,
+                    text: "first"
+                ),
+                speakerID: "remote",
+                source: .system
+            ),
+            AttributedTranscriptDraft(
+                transcript: TranscriptDraft(
+                    startTime: 1,
+                    endTime: 3,
+                    text: "second"
+                ),
+                speakerID: "me",
+                source: .microphone
+            ),
+            AttributedTranscriptDraft(
+                transcript: TranscriptDraft(
+                    startTime: 1,
+                    endTime: 4,
+                    text: "third"
+                ),
+                speakerID: "room-1",
+                source: .room
+            )
+        ])
+
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: assembled,
+            sourceRevision: 8
+        )
+
+        let sameRepositoryRecords = try repository.transcripts(
+            meetingID: meetingID
+        )
+        XCTAssertEqual(
+            sameRepositoryRecords.map(\.text),
+            ["first", "second", "third"]
+        )
+        XCTAssertEqual(
+            sameRepositoryRecords.map(\.sequenceIndex),
+            [0, 1, 2]
+        )
+
+        let reloadedRepository = MeetingRepository(
+            container: try XCTUnwrap(capturedContainer)
+        )
+        let reloadedRecords = try reloadedRepository.transcripts(
+            meetingID: meetingID
+        )
+        XCTAssertEqual(
+            reloadedRecords.map(\.text),
+            ["first", "second", "third"]
+        )
+        XCTAssertEqual(reloadedRecords.map(\.sequenceIndex), [0, 1, 2])
+    }
+
+    func testLegacyTranscriptsWithoutSequenceFallBackToChronology() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 5,
+            end: 6,
+            text: "later"
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 1,
+            end: 2,
+            text: "earlier"
+        )
+
+        let records = try repository.transcripts(meetingID: meetingID)
+
+        XCTAssertEqual(records.map(\.text), ["earlier", "later"])
+        XCTAssertTrue(records.allSatisfy { $0.sequenceIndex == nil })
+    }
+
     func testReplaceTranscriptsRestoresExactPreviousStateWhenSaveFails() throws {
         var saveAttempts = 0
         let repository = try MeetingRepository.inMemory(
@@ -605,6 +704,92 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(saveAttempts, 4)
     }
 
+    func testReplaceTranscriptsFailurePreservesUnrelatedPendingInsertion() throws {
+        var saveAttempts = 0
+        var capturedContext: ModelContext?
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                capturedContext = context
+                saveAttempts += 1
+                if saveAttempts == 3 {
+                    throw InjectedRepositorySaveError.forced
+                }
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 100),
+            title: "目标会议"
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 2,
+            text: "旧转录",
+            speakerID: "legacy",
+            sourceRevision: 2
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let oldTranscript = try XCTUnwrap(meeting.transcripts.first)
+        let pendingMeetingID = UUID()
+        let pendingMeeting = MeetingRecord(
+            id: pendingMeetingID,
+            title: "不相关的待保存会议",
+            mode: .offline,
+            state: .preparing,
+            startedAt: Date(timeIntervalSince1970: 200)
+        )
+        try XCTUnwrap(capturedContext).insert(pendingMeeting)
+
+        XCTAssertThrowsError(
+            try repository.replaceTranscripts(
+                meetingID: meetingID,
+                drafts: [
+                    AttributedTranscriptDraft(
+                        transcript: TranscriptDraft(
+                            startTime: 10,
+                            endTime: 12,
+                            text: "失败的新转录"
+                        ),
+                        speakerID: "remote",
+                        source: .system
+                    )
+                ],
+                sourceRevision: 9
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? InjectedRepositorySaveError,
+                .forced
+            )
+        }
+
+        try repository.appendBookmark(
+            meetingID: meetingID,
+            timestamp: 1
+        )
+
+        let reloaded = try XCTUnwrap(
+            repository.meetings().first { $0.id == meetingID }
+        )
+        XCTAssertNotNil(
+            try repository.meetings().first {
+                $0.id == pendingMeetingID
+            }
+        )
+        XCTAssertEqual(reloaded.transcripts.count, 1)
+        let restoredTranscript = try XCTUnwrap(
+            reloaded.transcripts.first
+        )
+        XCTAssertTrue(restoredTranscript === oldTranscript)
+        XCTAssertEqual(restoredTranscript.text, "旧转录")
+        XCTAssertTrue(restoredTranscript.meeting === reloaded)
+        XCTAssertEqual(try repository.count(MeetingRecord.self), 2)
+        XCTAssertEqual(try repository.count(TranscriptRecord.self), 1)
+        XCTAssertEqual(saveAttempts, 4)
+    }
+
     func testDeletingMeetingCascadesToAllRelatedRecords() throws {
         let repository = try MeetingRepository.inMemory()
         let id = try repository.createMeeting(mode: .online, startedAt: .now)
@@ -674,6 +859,7 @@ private struct TranscriptMetadata: Equatable {
     let speakerID: String?
     let sourceRevision: Int
     let sourceRawValue: String?
+    let sequenceIndex: Int?
 
     init(_ transcript: TranscriptRecord) {
         id = transcript.id
@@ -684,5 +870,6 @@ private struct TranscriptMetadata: Equatable {
         speakerID = transcript.speakerID
         sourceRevision = transcript.sourceRevision
         sourceRawValue = transcript.sourceRawValue
+        sequenceIndex = transcript.sequenceIndex
     }
 }
