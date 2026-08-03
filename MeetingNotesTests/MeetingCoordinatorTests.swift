@@ -2,6 +2,25 @@ import XCTest
 @testable import MeetingNotes
 
 final class MeetingCoordinatorTests: XCTestCase {
+    func testFinalizationReusesServiceCapturedByQueue() async throws {
+        let fixedService = FixedCoordinatorTranscriptionService(
+            marker: "balanced-fixed-service"
+        )
+        let fixture = makeFixture(
+            packets: [makeOnlinePacket(index: 0)],
+            transcriptionChunkSampleCount: 1,
+            fixedTranscriptionService: fixedService,
+            speakerFinalizationOutcome: .unchanged
+        )
+
+        _ = try await fixture.coordinator.start(mode: .online)
+        try await fixture.coordinator.stop()
+
+        let markers = await fixture.speakerFinalizer
+            .recordedFixedServiceMarkers()
+        XCTAssertEqual(markers, ["balanced-fixed-service"])
+    }
+
     func testStartSnapshotsSpeakerDiarizationPreferenceForCreatedMeeting() async throws {
         let fixture = makeFixture(speakerDiarizationEnabled: true)
 
@@ -184,6 +203,31 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertTrue(events.isEmpty)
     }
 
+    func testUnavailablePermissionPreventsRecordingFromStarting() async throws {
+        let fixture = makeFixture(
+            permissions: [
+                .microphone: .authorized,
+                .screenRecording: .unavailable
+            ]
+        )
+
+        do {
+            try await fixture.coordinator.start(mode: .online)
+            XCTFail("Expected unavailable screen permission")
+        } catch {
+            XCTAssertEqual(
+                error as? MeetingCoordinatorError,
+                .permissionDenied([.screenRecording])
+            )
+        }
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let events = await fixture.events.values()
+        XCTAssertEqual(snapshot.state, .idle)
+        XCTAssertNil(snapshot.meetingID)
+        XCTAssertTrue(events.isEmpty)
+    }
+
     func testStartFailureRollsBackAndClosesStartedResources() async throws {
         let fixture = makeFixture(captureFailsToStart: true)
 
@@ -196,7 +240,9 @@ final class MeetingCoordinatorTests: XCTestCase {
 
         let snapshot = await fixture.coordinator.snapshot()
         let events = await fixture.events.values()
+        let presentationEvents = await fixture.recordingPresentation.events()
         XCTAssertEqual(snapshot.state, .idle)
+        XCTAssertTrue(presentationEvents.isEmpty)
         XCTAssertEqual(
             events,
             [
@@ -288,9 +334,54 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertEqual(panelCalls, ["show"])
     }
 
-    func testStopUsesSafeOrderAndRejectsDuplicateLifecycleCommands() async throws {
-        let fixture = makeFixture()
+    func testRecordingPresentationTracksExactPauseResumeAndStopTimeline() async throws {
+        let frame = CapturedAudioFrame(
+            timestamp: 0,
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: [0.2],
+            transcriptionSamples: [0.2],
+            transcriptionSampleRate:
+                AudioSegmentManifest.transcriptionSampleRate
+        )
+        let fixture = makeFixture(frames: [frame])
         let meetingID = try await fixture.coordinator.start(mode: .offline)
+        await waitForMasterFrames(1, fixture: fixture)
+
+        await fixture.clock.setMonotonic(105)
+        try await fixture.coordinator.pauseOrResume()
+        await fixture.clock.setMonotonic(205)
+        try await fixture.coordinator.pauseOrResume()
+        await fixture.clock.setMonotonic(208)
+        try await fixture.coordinator.stop()
+
+        let events = await fixture.recordingPresentation.events()
+        XCTAssertEqual(
+            events,
+            [
+                .start(meetingID: meetingID, monotonicTime: 100),
+                .pause(meetingID: meetingID, activeDuration: 5),
+                .resume(
+                    meetingID: meetingID,
+                    activeDuration: 5,
+                    monotonicTime: 205
+                ),
+                .finish(meetingID: meetingID, activeDuration: 8)
+            ]
+        )
+    }
+
+    func testStopUsesSafeOrderAndRejectsDuplicateLifecycleCommands() async throws {
+        let frame = CapturedAudioFrame(
+            timestamp: 0,
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: [0.2],
+            transcriptionSamples: [0.2],
+            transcriptionSampleRate:
+                AudioSegmentManifest.transcriptionSampleRate
+        )
+        let fixture = makeFixture(frames: [frame])
+        let meetingID = try await fixture.coordinator.start(mode: .offline)
+        await waitForMasterFrames(1, fixture: fixture)
 
         do {
             try await fixture.coordinator.start(mode: .online)
@@ -793,6 +884,162 @@ final class MeetingCoordinatorTests: XCTestCase {
         )
     }
 
+    func testNoMasterFramesAfterStartupDeadlineFailsInsteadOfFinalizingEmptyMeeting()
+        async throws {
+        let fixture = makeFixture()
+        _ = try await fixture.coordinator.start(mode: .offline)
+        await fixture.clock.setMonotonic(105)
+
+        fixture.healthScheduler.runNextCheck()
+        for _ in 0..<100 {
+            if await fixture.coordinator.snapshot().captureFailed {
+                break
+            }
+            await Task.yield()
+        }
+
+        do {
+            try await fixture.coordinator.stop()
+            XCTFail("Expected empty capture to fail finalization")
+        } catch {
+            XCTAssertEqual(
+                error as? MeetingCoordinatorError,
+                .capturePipelineFailed
+            )
+        }
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let finalization = await fixture.repository.finalization()
+        XCTAssertTrue(snapshot.captureFailed)
+        XCTAssertEqual(snapshot.captureHealthCode, .masterNoFrames)
+        XCTAssertEqual(snapshot.state, .finalizing)
+        XCTAssertNil(finalization)
+    }
+
+    func testOnlineMicrophoneSilenceDegradesWithoutDiscardingHealthySystemTrack()
+        async throws {
+        let packet = makeHealthPacket(
+            microphoneSamples: [0, 0],
+            systemSamples: [0.3, -0.2]
+        )
+        let fixture = makeFixture(packets: [packet])
+        _ = try await fixture.coordinator.start(mode: .online)
+        await waitForMasterFrames(1, fixture: fixture)
+        await fixture.clock.setMonotonic(106)
+
+        fixture.healthScheduler.runNextCheck()
+        await waitForHealthCode(
+            .microphoneSustainedSilence,
+            fixture: fixture
+        )
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let systemFrames = await fixture.writer(for: .system).writtenFrames()
+        XCTAssertFalse(snapshot.captureFailed)
+        XCTAssertEqual(systemFrames.map(\.samples), [[0.3, -0.2]])
+
+        try await fixture.coordinator.stop()
+        let savedFinalization = await fixture.repository.finalization()
+        let finalization = try XCTUnwrap(savedFinalization)
+        XCTAssertEqual(
+            finalization.sourceDegradationErrorCode,
+            "source_track_sustained_silence_microphone"
+        )
+    }
+
+    func testOnlineSystemSilenceDegradesWithoutDiscardingHealthyMicrophoneTrack()
+        async throws {
+        let packet = makeHealthPacket(
+            microphoneSamples: [0.25, -0.15],
+            systemSamples: [0, 0]
+        )
+        let fixture = makeFixture(packets: [packet])
+        _ = try await fixture.coordinator.start(mode: .online)
+        await waitForMasterFrames(1, fixture: fixture)
+        await fixture.clock.setMonotonic(106)
+
+        fixture.healthScheduler.runNextCheck()
+        await waitForHealthCode(.systemSustainedSilence, fixture: fixture)
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let microphoneFrames = await fixture.writer(for: .microphone)
+            .writtenFrames()
+        XCTAssertFalse(snapshot.captureFailed)
+        XCTAssertEqual(microphoneFrames.map(\.samples), [[0.25, -0.15]])
+
+        try await fixture.coordinator.stop()
+        let savedFinalization = await fixture.repository.finalization()
+        let finalization = try XCTUnwrap(savedFinalization)
+        XCTAssertEqual(
+            finalization.sourceDegradationErrorCode,
+            "source_track_sustained_silence_system"
+        )
+    }
+
+    func testBothSilentOnlineSourcesFailCapturePipeline() async throws {
+        let packet = makeHealthPacket(
+            microphoneSamples: [0, 0],
+            systemSamples: [0, 0]
+        )
+        let fixture = makeFixture(packets: [packet])
+        _ = try await fixture.coordinator.start(mode: .online)
+        await waitForMasterFrames(1, fixture: fixture)
+        await fixture.clock.setMonotonic(106)
+
+        fixture.healthScheduler.runNextCheck()
+        await waitForHealthCode(.bothSourcesDegraded, fixture: fixture)
+
+        let snapshot = await fixture.coordinator.snapshot()
+        XCTAssertTrue(snapshot.captureFailed)
+        XCTAssertEqual(snapshot.captureHealthCode, .bothSourcesDegraded)
+    }
+
+    func testPausedWallClockTimeDoesNotConsumeFirstFrameDeadline()
+        async throws {
+        let fixture = makeFixture()
+        _ = try await fixture.coordinator.start(mode: .offline)
+        await fixture.clock.setMonotonic(104)
+        try await fixture.coordinator.pauseOrResume()
+        await fixture.clock.setMonotonic(1_000)
+
+        fixture.healthScheduler.runNextCheck()
+        for _ in 0..<100 {
+            await Task.yield()
+        }
+
+        let snapshot = await fixture.coordinator.snapshot()
+        XCTAssertFalse(snapshot.captureFailed)
+        XCTAssertNil(snapshot.captureHealthCode)
+        XCTAssertEqual(snapshot.activeTime, 4, accuracy: 0.001)
+    }
+
+    func testOfflineSustainedSilenceIsWarningRatherThanPipelineFailure()
+        async throws {
+        let silentFrame = CapturedAudioFrame(
+            timestamp: 0,
+            sampleRate: PCMConverter.playbackSampleRate,
+            samples: [0, 0],
+            transcriptionSamples: [0, 0],
+            transcriptionSampleRate:
+                AudioSegmentManifest.transcriptionSampleRate
+        )
+        let fixture = makeFixture(frames: [silentFrame])
+        _ = try await fixture.coordinator.start(mode: .offline)
+        await waitForMasterFrames(1, fixture: fixture)
+        await fixture.clock.setMonotonic(106)
+
+        fixture.healthScheduler.runNextCheck()
+        await waitForHealthCode(.masterSustainedSilence, fixture: fixture)
+
+        let snapshot = await fixture.coordinator.snapshot()
+        XCTAssertFalse(snapshot.captureFailed)
+        XCTAssertEqual(
+            snapshot.captureHealthCode,
+            .masterSustainedSilence
+        )
+        try await fixture.coordinator.stop()
+    }
+
     func testWriterDegradationOutranksDerivedTranscriptionDegradationAtFinalization()
         async throws {
         let fixture = makeFixture(
@@ -1018,7 +1265,6 @@ final class MeetingCoordinatorTests: XCTestCase {
         let finalization = await fixture.repository.finalization()
         let finalizeAttemptCodes = await fixture.repository
             .finalizeAttemptDegradationErrorCodes()
-        let canDelete = await fixture.coordinator.canDeleteMeeting(id: meetingID)
         let masterFinishCount = await fixture.writer(for: .master)
             .finishCallCount()
         let microphoneFinishCount = await fixture.writer(for: .microphone)
@@ -1053,7 +1299,6 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertEqual(snapshot.meetingID, meetingID)
         XCTAssertFalse(snapshot.captureFailed)
         XCTAssertEqual(persistedState, .finalizing)
-        XCTAssertTrue(canDelete)
         XCTAssertEqual(masterFinishCount, 1)
         XCTAssertEqual(microphoneFinishCount, 1)
         XCTAssertEqual(systemFinishCount, 1)
@@ -1111,24 +1356,102 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertEqual(systemFinishCount, 1)
     }
 
-    func testDeletionSafetyAllowsOnlyReleasedOrUnrelatedSessions() async throws {
-        let fixture = makeFixture(repositoryFailsFinalize: true)
+    func testPrepareForDeletionDiscardsRecordingWithoutFinalization() async throws {
+        let fixture = makeFixture(
+            speakerDiarizationEnabled: true,
+            speakerFinalizationOutcome: .unchanged
+        )
         let meetingID = try await fixture.coordinator.start(mode: .offline)
+        await fixture.events.removeAll()
 
-        let canDeleteActive = await fixture.coordinator.canDeleteMeeting(id: meetingID)
-        let canDeleteUnrelated = await fixture.coordinator.canDeleteMeeting(id: UUID())
-        XCTAssertFalse(canDeleteActive)
-        XCTAssertTrue(canDeleteUnrelated)
+        try await fixture.coordinator.prepareForDeletion(id: meetingID)
 
-        do {
-            try await fixture.coordinator.stop()
-            XCTFail("Expected repository finalize failure")
-        } catch {
-            XCTAssertEqual(error as? CoordinatorTestError, .repositoryFinalize)
+        let snapshot = await fixture.coordinator.snapshot()
+        let events = await fixture.events.values()
+        let cancelCount = await fixture.transcriber.cancelCount()
+        let savedState = await fixture.repository.savedState(for: meetingID)
+        let speakerRequests = await fixture.speakerFinalizer.recordedRequests()
+        let panelCalls = await fixture.panel.calls()
+        let presentationEvents = await fixture.recordingPresentation.events()
+        XCTAssertEqual(snapshot.state, .idle)
+        XCTAssertNil(snapshot.meetingID)
+        XCTAssertEqual(cancelCount, 1)
+        XCTAssertEqual(savedState, .recording)
+        XCTAssertTrue(speakerRequests.isEmpty)
+        XCTAssertFalse(events.contains("repository.finalize.attempt"))
+        XCTAssertFalse(events.contains("repository.finalize"))
+        XCTAssertFalse(events.contains("repository.delete"))
+        XCTAssertTrue(events.contains("capture.stop"))
+        XCTAssertTrue(events.contains("writer.finish"))
+        XCTAssertEqual(panelCalls, ["show", "hide"])
+        XCTAssertEqual(presentationEvents.last, .clear(meetingID: meetingID))
+    }
+
+    func testPrepareForDeletionDiscardsPausedMeeting() async throws {
+        let fixture = makeFixture()
+        let meetingID = try await fixture.coordinator.start(mode: .online)
+        try await fixture.coordinator.pauseOrResume()
+
+        try await fixture.coordinator.prepareForDeletion(id: meetingID)
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let persistedState = await fixture.repository.savedState(for: meetingID)
+        let sourceFinishCounts = await [
+            fixture.writer(for: .microphone).finishCallCount(),
+            fixture.writer(for: .system).finishCallCount()
+        ]
+        XCTAssertEqual(snapshot.state, .idle)
+        XCTAssertNil(snapshot.meetingID)
+        XCTAssertEqual(persistedState, .paused)
+        XCTAssertEqual(sourceFinishCounts, [1, 1])
+    }
+
+    func testPrepareForDeletionDuringStartPreventsLateRecordingRevival()
+        async throws {
+        let fixture = makeFixture(captureSuspendsStart: true)
+        let createdMeeting = MeetingCreationProbe()
+        let start = Task {
+            try await fixture.coordinator.start(
+                mode: .offline,
+                onMeetingCreated: { meetingID in
+                    await createdMeeting.record(meetingID)
+                }
+            )
+        }
+        let meetingID = await createdMeeting.waitForMeetingID()
+        for _ in 0..<1_000 where !(await fixture.capture.isStartSuspended()) {
+            await Task.yield()
         }
 
-        let canDeleteReleased = await fixture.coordinator.canDeleteMeeting(id: meetingID)
-        XCTAssertTrue(canDeleteReleased)
+        let deletion = Task {
+            try await fixture.coordinator.prepareForDeletion(id: meetingID)
+        }
+        for _ in 0..<1_000 {
+            if await fixture.events.values().contains("capture.stop") {
+                break
+            }
+            await Task.yield()
+        }
+        await fixture.capture.resumeSuspendedStart()
+
+        do {
+            _ = try await start.value
+            XCTFail("Expected intentionally discarded startup to cancel")
+        } catch is CancellationError {
+            // Expected: deletion owns persistent cleanup after startup unwinds.
+        }
+        try await deletion.value
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let savedState = await fixture.repository.savedState(for: meetingID)
+        let events = await fixture.events.values()
+        let panelCalls = await fixture.panel.calls()
+        XCTAssertEqual(snapshot.state, .idle)
+        XCTAssertNil(snapshot.meetingID)
+        XCTAssertEqual(savedState, .preparing)
+        XCTAssertFalse(events.contains("repository.delete"))
+        XCTAssertFalse(events.contains("repository.finalize"))
+        XCTAssertFalse(panelCalls.contains("show"))
     }
 
     func testProductionTranscriptionEnqueuesAtTenSecondsWhileRecording() async throws {
@@ -1181,11 +1504,11 @@ final class MeetingCoordinatorTests: XCTestCase {
         )
 
         try await fixture.coordinator.start(mode: .offline)
-        for _ in 0..<100 {
+        for _ in 0..<1_000 {
             if await fixture.repository.savedTranscripts().count == 1 {
                 break
             }
-            await Task.yield()
+            try await Task.sleep(for: .milliseconds(1))
         }
 
         let snapshot = await fixture.coordinator.snapshot()
@@ -1240,8 +1563,17 @@ final class MeetingCoordinatorTests: XCTestCase {
     }
 
     func testRepositoryFinalizeFailurePreservesFailedSessionDiagnostics() async throws {
-        let fixture = makeFixture(repositoryFailsFinalize: true)
+        let fixture = makeFixture(
+            packets: [
+                makeHealthPacket(
+                    microphoneSamples: [0.2],
+                    systemSamples: [0.3]
+                )
+            ],
+            repositoryFailsFinalize: true
+        )
         let meetingID = try await fixture.coordinator.start(mode: .online)
+        await waitForMasterFrames(1, fixture: fixture)
         await fixture.clock.setMonotonic(125)
 
         do {
@@ -1387,16 +1719,76 @@ final class MeetingCoordinatorTests: XCTestCase {
         )
     }
 
+    private func makeHealthPacket(
+        microphoneSamples: [Float],
+        systemSamples: [Float]
+    ) -> CapturedAudioPacket {
+        let masterSamples = zip(
+            microphoneSamples,
+            systemSamples
+        ).map(+)
+        return CapturedAudioPacket(
+            master: CapturedAudioFrame(
+                timestamp: 0,
+                sampleRate: PCMConverter.playbackSampleRate,
+                samples: masterSamples,
+                transcriptionSamples: masterSamples,
+                transcriptionSampleRate:
+                    AudioSegmentManifest.transcriptionSampleRate
+            ),
+            sourceFrames: [
+                .microphone: CapturedAudioFrame(
+                    timestamp: 0,
+                    sampleRate: PCMConverter.playbackSampleRate,
+                    samples: microphoneSamples
+                ),
+                .system: CapturedAudioFrame(
+                    timestamp: 0,
+                    sampleRate: PCMConverter.playbackSampleRate,
+                    samples: systemSamples
+                )
+            ]
+        )
+    }
+
+    private func waitForMasterFrames(
+        _ count: Int,
+        fixture: CoordinatorFixture
+    ) async {
+        for _ in 0..<1_000 {
+            if await fixture.writer.writtenFrames().count == count {
+                return
+            }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for master frames")
+    }
+
+    private func waitForHealthCode(
+        _ code: MeetingCaptureHealthCode,
+        fixture: CoordinatorFixture
+    ) async {
+        for _ in 0..<1_000 {
+            if await fixture.coordinator.snapshot().captureHealthCode == code {
+                return
+            }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for capture health update")
+    }
+
     private func makeFixture(
         permissions: [CapturePermission: CapturePermissionStatus] = [
             .microphone: .authorized,
             .screenRecording: .authorized
         ],
         captureFailsToStart: Bool = false,
+        captureSuspendsStart: Bool = false,
         frames: [CapturedAudioFrame] = [],
         packets: [CapturedAudioPacket]? = nil,
         transcriptionChunkSampleCount: Int? = nil,
         transcriberEmitsDrafts: Bool = false,
+        fixedTranscriptionService: (any TranscriptionService)? = nil,
         writerFailsAppend: Bool = false,
         writerFailsFinish: Bool = false,
         writerFailsAppendTracks: Set<AudioTrack> = [],
@@ -1420,6 +1812,7 @@ final class MeetingCoordinatorTests: XCTestCase {
             packets: packets ?? frames.map {
                 CapturedAudioPacket(master: $0, sourceFrames: [:])
             },
+            suspendsStart: captureSuspendsStart,
             suspendsPause: captureSuspendsPause
         )
         let writers = Dictionary(
@@ -1439,7 +1832,8 @@ final class MeetingCoordinatorTests: XCTestCase {
         )
         let transcriber = FakeCoordinatorTranscriber(
             events: events,
-            emitsDrafts: transcriberEmitsDrafts
+            emitsDrafts: transcriberEmitsDrafts,
+            fixedTranscriptionService: fixedTranscriptionService
         )
         let repository = FakeCoordinatorRepository(
             events: events,
@@ -1460,6 +1854,8 @@ final class MeetingCoordinatorTests: XCTestCase {
             date: Date(timeIntervalSince1970: 1_000),
             monotonic: 100
         )
+        let healthScheduler = ManualCaptureHealthScheduler()
+        let recordingPresentation = RecordingPresentationSpy()
         let speakerDiarizationPreference =
             MutableSpeakerDiarizationPreference(
                 isEnabled: speakerDiarizationEnabled
@@ -1482,7 +1878,9 @@ final class MeetingCoordinatorTests: XCTestCase {
             speakerDiarizationPreference: speakerDiarizationPreference,
             speakerFinalizer: speakerFinalizer,
             panel: panel,
-            clock: clock
+            clock: clock,
+            captureHealthScheduler: healthScheduler,
+            recordingPresentation: recordingPresentation
         )
         let coordinator: MeetingCoordinator
         if let transcriptionChunkSampleCount {
@@ -1505,7 +1903,9 @@ final class MeetingCoordinatorTests: XCTestCase {
             speakerDiarizationPreference: speakerDiarizationPreference,
             speakerFinalizer: speakerFinalizer,
             panel: panel,
-            clock: clock
+            clock: clock,
+            healthScheduler: healthScheduler,
+            recordingPresentation: recordingPresentation
         )
     }
 
@@ -1519,6 +1919,7 @@ final class MeetingCoordinatorTests: XCTestCase {
             events: events,
             failsToStart: false,
             packets: [],
+            suspendsStart: false,
             suspendsPause: false
         )
         let writers = Dictionary(
@@ -1559,7 +1960,8 @@ final class MeetingCoordinatorTests: XCTestCase {
             transcriptionFactory: FakeCoordinatorTranscriptionFactory(
                 transcriber: FakeCoordinatorTranscriber(
                     events: events,
-                    emitsDrafts: false
+                    emitsDrafts: false,
+                    fixedTranscriptionService: nil
                 )
             ),
             repository: MeetingRepositoryLifecycleAdapter(
@@ -1597,6 +1999,8 @@ private struct CoordinatorFixture {
     let speakerFinalizer: FakeCoordinatorSpeakerFinalizer
     let panel: FakeCoordinatorPanel
     let clock: ManualCoordinatorClock
+    let healthScheduler: ManualCaptureHealthScheduler
+    let recordingPresentation: RecordingPresentationSpy
 
     var writer: FakeCoordinatorWriter {
         writer(for: .master)
@@ -1607,6 +2011,30 @@ private struct CoordinatorFixture {
             preconditionFailure("Missing fake writer for \(track)")
         }
         return writer
+    }
+}
+
+private final class ManualCaptureHealthScheduler:
+    CaptureHealthCheckScheduling,
+    @unchecked Sendable {
+    private let lock = NSLock()
+    private let stream: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+
+    init() {
+        let pair = AsyncStream<Void>.makeStream()
+        stream = pair.stream
+        continuation = pair.continuation
+    }
+
+    func checks() -> AsyncStream<Void> {
+        stream
+    }
+
+    func runNextCheck() {
+        lock.withLock {
+            continuation.yield(())
+        }
     }
 }
 
@@ -1642,6 +2070,25 @@ private actor CoordinatorEventLog {
 
     func removeAll() {
         entries.removeAll()
+    }
+}
+
+private actor MeetingCreationProbe {
+    private var meetingID: UUID?
+    private var waiters: [CheckedContinuation<UUID, Never>] = []
+
+    func record(_ meetingID: UUID) {
+        self.meetingID = meetingID
+        let waiters = waiters
+        self.waiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume(returning: meetingID) }
+    }
+
+    func waitForMeetingID() async -> UUID {
+        if let meetingID { return meetingID }
+        return await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
     }
 }
 
@@ -1703,19 +2150,23 @@ private actor FakeCoordinatorCapture: AudioCaptureSource {
     private let events: CoordinatorEventLog
     private let failsToStart: Bool
     private let packets: [CapturedAudioPacket]
+    private let suspendsStart: Bool
     private let suspendsPause: Bool
     private var continuation: AsyncThrowingStream<CapturedAudioPacket, Error>.Continuation?
+    private var startContinuation: CheckedContinuation<Void, Never>?
     private var pauseContinuation: CheckedContinuation<Void, Never>?
 
     init(
         events: CoordinatorEventLog,
         failsToStart: Bool,
         packets: [CapturedAudioPacket],
+        suspendsStart: Bool,
         suspendsPause: Bool
     ) {
         self.events = events
         self.failsToStart = failsToStart
         self.packets = packets
+        self.suspendsStart = suspendsStart
         self.suspendsPause = suspendsPause
     }
 
@@ -1726,6 +2177,9 @@ private actor FakeCoordinatorCapture: AudioCaptureSource {
         }
         let pair = AsyncThrowingStream<CapturedAudioPacket, Error>.makeStream()
         continuation = pair.continuation
+        if suspendsStart {
+            await withCheckedContinuation { startContinuation = $0 }
+        }
         for packet in packets {
             continuation?.yield(packet)
         }
@@ -1751,6 +2205,15 @@ private actor FakeCoordinatorCapture: AudioCaptureSource {
 
     func isPauseSuspended() -> Bool {
         pauseContinuation != nil
+    }
+
+    func isStartSuspended() -> Bool {
+        startContinuation != nil
+    }
+
+    func resumeSuspendedStart() {
+        startContinuation?.resume()
+        startContinuation = nil
     }
 
     func resumeSuspendedPause() {
@@ -1866,14 +2329,22 @@ private actor FakeCoordinatorTranscriber: MeetingTranscriptionQueueing {
 
     private let events: CoordinatorEventLog
     private let emitsDrafts: Bool
+    private let fixedService: (any TranscriptionService)?
     private var receivedChunks: [Chunk] = []
     private var completedDrafts: [TranscriptDraft] = []
     private var updateContinuation: AsyncStream<TranscriptDraft>.Continuation?
     private var updatesFinished = false
+    private var cancellationCount = 0
+    private var isCancelled = false
 
-    init(events: CoordinatorEventLog, emitsDrafts: Bool) {
+    init(
+        events: CoordinatorEventLog,
+        emitsDrafts: Bool,
+        fixedTranscriptionService: (any TranscriptionService)? = nil
+    ) {
         self.events = events
         self.emitsDrafts = emitsDrafts
+        fixedService = fixedTranscriptionService
     }
 
     func enqueue(samples: [Float], startingAt: TimeInterval) async {
@@ -1887,6 +2358,17 @@ private actor FakeCoordinatorTranscriber: MeetingTranscriptionQueueing {
             completedDrafts.append(draft)
             updateContinuation?.yield(draft)
         }
+    }
+
+    func cancel() async {
+        guard !isCancelled else { return }
+        isCancelled = true
+        await events.append("transcriber.cancel")
+        cancellationCount += 1
+        receivedChunks.removeAll(keepingCapacity: false)
+        completedDrafts.removeAll(keepingCapacity: false)
+        updateContinuation?.finish()
+        updateContinuation = nil
     }
 
     func drain() async {
@@ -1910,12 +2392,20 @@ private actor FakeCoordinatorTranscriber: MeetingTranscriptionQueueing {
         updatesFinished = true
     }
 
+    func fixedTranscriptionService() -> (any TranscriptionService)? {
+        fixedService
+    }
+
     func chunks() -> [Chunk] {
         receivedChunks
     }
 
     func didFinishUpdates() -> Bool {
         updatesFinished
+    }
+
+    func cancelCount() -> Int {
+        cancellationCount
     }
 }
 
@@ -1932,6 +2422,7 @@ private actor FakeCoordinatorSpeakerFinalizer:
     private let outcome: SpeakerFinalizationOutcome
     private let recordsEvent: Bool
     private var requests: [Request] = []
+    private var fixedServiceMarkers: [String] = []
 
     init(
         events: CoordinatorEventLog,
@@ -1963,8 +2454,57 @@ private actor FakeCoordinatorSpeakerFinalizer:
         return outcome
     }
 
+    func finalize(
+        meetingID: UUID,
+        mode: MeetingMode,
+        diarizationRequested: Bool,
+        provisional: [TranscriptDraft],
+        transcriptionService: any TranscriptionService
+    ) async -> SpeakerFinalizationOutcome {
+        if let marker = try? await transcriptionService.transcribe(
+            samples: [1],
+            startingAt: 0
+        ).first?.text {
+            fixedServiceMarkers.append(marker)
+        }
+        return await finalize(
+            meetingID: meetingID,
+            mode: mode,
+            diarizationRequested: diarizationRequested,
+            provisional: provisional
+        )
+    }
+
     func recordedRequests() -> [Request] {
         requests
+    }
+
+    func recordedFixedServiceMarkers() -> [String] {
+        fixedServiceMarkers
+    }
+}
+
+private actor FixedCoordinatorTranscriptionService: TranscriptionService {
+    private let marker: String
+
+    init(marker: String) {
+        self.marker = marker
+    }
+
+    func prepare() async throws {}
+
+    func transcribe(
+        samples: [Float],
+        startingAt: TimeInterval
+    ) async throws -> [TranscriptDraft] {
+        _ = samples
+        return [
+            TranscriptDraft(
+                startTime: startingAt,
+                endTime: startingAt + 1,
+                text: marker
+            )
+        ]
     }
 }
 
@@ -2276,5 +2816,62 @@ private actor ManualCoordinatorClock: MeetingClock {
 
     func setMonotonic(_ value: TimeInterval) {
         currentMonotonic = value
+    }
+}
+
+private enum RecordingPresentationEvent: Equatable {
+    case start(meetingID: UUID, monotonicTime: TimeInterval)
+    case pause(meetingID: UUID, activeDuration: TimeInterval)
+    case resume(
+        meetingID: UUID,
+        activeDuration: TimeInterval,
+        monotonicTime: TimeInterval
+    )
+    case finish(meetingID: UUID, activeDuration: TimeInterval)
+    case clear(meetingID: UUID)
+}
+
+private actor RecordingPresentationSpy:
+    RecordingSessionPresentationUpdating {
+    private var recordedEvents: [RecordingPresentationEvent] = []
+
+    func start(meetingID: UUID, monotonicTime: TimeInterval) async {
+        recordedEvents.append(
+            .start(meetingID: meetingID, monotonicTime: monotonicTime)
+        )
+    }
+
+    func pause(meetingID: UUID, activeDuration: TimeInterval) async {
+        recordedEvents.append(
+            .pause(meetingID: meetingID, activeDuration: activeDuration)
+        )
+    }
+
+    func resume(
+        meetingID: UUID,
+        activeDuration: TimeInterval,
+        monotonicTime: TimeInterval
+    ) async {
+        recordedEvents.append(
+            .resume(
+                meetingID: meetingID,
+                activeDuration: activeDuration,
+                monotonicTime: monotonicTime
+            )
+        )
+    }
+
+    func finish(meetingID: UUID, activeDuration: TimeInterval) async {
+        recordedEvents.append(
+            .finish(meetingID: meetingID, activeDuration: activeDuration)
+        )
+    }
+
+    func clear(meetingID: UUID) async {
+        recordedEvents.append(.clear(meetingID: meetingID))
+    }
+
+    func events() -> [RecordingPresentationEvent] {
+        recordedEvents
     }
 }

@@ -2,14 +2,21 @@ import Foundation
 
 @MainActor
 final class AppContainer {
-   private static let defaultModel = "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page"
-    private static var persistentModelFolder: URL {
-        let appSupport = FileManager.default
+    private static var transcriptionModelStorage: TranscriptionModelStorage {
+        let meetingNotesFolder = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!
-            .appendingPathComponent("MeetingNotes/WhisperModels")
-        try? FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
-        return appSupport
+            .appendingPathComponent("MeetingNotes", isDirectory: true)
+        return TranscriptionModelStorage(
+            modelsRoot: meetingNotesFolder.appendingPathComponent(
+                "WhisperModels-v2",
+                isDirectory: true
+            ),
+            legacyModelFolder: meetingNotesFolder.appendingPathComponent(
+                "WhisperModels",
+                isDirectory: true
+            )
+        )
     }
     private static var fluidAudioModelsFolder: URL {
         FileManager.default
@@ -29,15 +36,20 @@ final class AppContainer {
     let coordinator: MeetingCoordinator
     let panelController: FloatingPanelController
     let audioPlayerController: MeetingAudioPlayerController
+    let audioOutputTester: any AudioOutputTesting
     let libraryViewModel: MeetingLibraryViewModel
     let settingsViewModel: SettingsViewModel
     let onboardingState: OnboardingState
     let transcriptionModelViewModel: TranscriptionModelViewModel
+    let recordingPresentationStore: RecordingSessionPresentationStore
 
     private let controlRouter: MeetingControlRouter
     private let settingsStore: AppSettingsStore
     private let summarizeAndArchiveUseCase: SummarizeAndArchiveUseCase
+    let meetingDocumentsUseCase: MeetingDocumentsUseCase
     private let meetingTitleUpdater: any MeetingTitleUpdating
+    private let speakerDiarizationRetryer:
+        any MeetingSpeakerDiarizationRetrying
     private let operationGate: MeetingOperationGate
     private var detailViewModels: [UUID: MeetingDetailViewModel] = [:]
 
@@ -47,7 +59,8 @@ final class AppContainer {
         recordingsURL: URL,
         coordinatorDependencies: ((
             any RecordingPanelPresenting,
-            any SpeakerDiarizationPreferenceReading
+            any SpeakerDiarizationPreferenceReading,
+            RecordingSessionPresentationStore
         ) -> MeetingCoordinatorDependencies)? = nil,
         modelPreparer: (any TranscriptionModelPreparing)? = nil,
         credentialStore: (any CredentialStore)? = nil,
@@ -55,52 +68,101 @@ final class AppContainer {
         deepSeekTester: (any DeepSeekConnectionTesting)? = nil,
         notionTester: (any NotionConnectionTesting)? = nil,
         summaryGenerator: (any MeetingSummaryGenerating)? = nil,
+        detailedMinutesGenerator:
+            (any MeetingDetailedMinutesGenerating)? = nil,
         notionArchiver: (any MeetingNotionArchiving)? = nil,
+        documentArchiver: (any MeetingDocumentArchiving)? = nil,
         notionTitleUpdater: (any MeetingNotionTitleUpdating)? = nil,
         onboardingState: OnboardingState? = nil,
-        systemRequirements: (any SystemRequirementChecking)? = nil
+        systemRequirements: (any SystemRequirementChecking)? = nil,
+        audioDeviceCatalog: (any AudioDeviceDiscovering)? = nil,
+        audioInputTester: (any AudioDiagnosticSignalTesting)? = nil,
+        audioOutputTester: (any AudioOutputTesting)? = nil,
+        audioDiagnosticCoordinatorFactory:
+            (any AudioDiagnosticCoordinatorCreating)? = nil,
+        audioDiagnosticExplainer:
+            (any AudioDiagnosticExplanationRequesting)? = nil
     ) {
         self.repository = repository
         self.fileStore = fileStore
         let settingsStore = settingsStore ?? AppSettingsStore()
         self.settingsStore = settingsStore
+        let audioDeviceCatalog = audioDeviceCatalog ?? AudioDeviceCatalog()
+        let permissionSystem = LiveCapturePermissionSystem()
         let speakerDiarizationPreference =
             MainActorSpeakerDiarizationPreferenceAdapter(
                 settingsStore: settingsStore
             )
+        let transcriptionQualityPreference =
+            MainActorTranscriptionQualityPreferenceAdapter(
+                settingsStore: settingsStore
+            )
+        let audioInputDevicePreference =
+            MainActorAudioInputDevicePreferenceAdapter(
+                settingsStore: settingsStore,
+                deviceCatalog: audioDeviceCatalog
+            )
+        let audioOutputDevicePreference =
+            MainActorAudioOutputDevicePreferenceAdapter(
+                settingsStore: settingsStore,
+                deviceCatalog: audioDeviceCatalog
+            )
+        let audioOutputTester = audioOutputTester ?? LiveAudioOutputTester(
+            preference: audioOutputDevicePreference
+        )
+        self.audioOutputTester = audioOutputTester
 
         let controlRouter = MeetingControlRouter()
         self.controlRouter = controlRouter
+        let recordingPresentationStore =
+            RecordingSessionPresentationStore()
+        self.recordingPresentationStore = recordingPresentationStore
 
-        let panelController = FloatingPanelController { [weak controlRouter] control in
+        let panelController = FloatingPanelController(
+            recordingPresentationStore: recordingPresentationStore
+        ) { [weak controlRouter] control in
             controlRouter?.handle(control)
         }
         self.panelController = panelController
         let panelPresenter = FloatingPanelPresenter(
             controller: panelController
         )
-        let transcriptionService = WhisperKitTranscriptionService(
-            model: Self.defaultModel,
-            persistentModelFolder: Self.persistentModelFolder)
+        let transcriptionModelController = TranscriptionModelController(
+            storage: Self.transcriptionModelStorage
+        )
         let sourceLoader = MeetingAudioSourceLoader(fileStore: fileStore)
         let speakerDiarizer = FluidAudioSpeakerDiarizer(
             modelsDirectory: Self.fluidAudioModelsFolder,
             sourceLoader: sourceLoader
         )
-        transcriptionModelViewModel = TranscriptionModelViewModel(
-            preparer: modelPreparer ?? transcriptionService
-        )
+        if let modelPreparer {
+            transcriptionModelViewModel = TranscriptionModelViewModel(
+                preparer: modelPreparer,
+                selectedMode: settingsStore.transcriptionQualityMode
+            )
+        } else {
+            transcriptionModelViewModel = TranscriptionModelViewModel(
+                controller: transcriptionModelController,
+                selectedMode: settingsStore.transcriptionQualityMode
+            )
+        }
         self.onboardingState = onboardingState ?? OnboardingState()
         let dependencies = coordinatorDependencies?(
             panelPresenter,
-            speakerDiarizationPreference
+            speakerDiarizationPreference,
+            recordingPresentationStore
         ) ?? .live(
             repository: repository,
             fileStore: fileStore,
             speakerDiarizationPreference: speakerDiarizationPreference,
+            audioInputDevicePreference: audioInputDevicePreference,
+            permissionSystem: permissionSystem,
             panel: panelPresenter,
+            recordingPresentation: recordingPresentationStore,
             sourceLoader: sourceLoader,
-            transcriptionService: transcriptionService,
+            transcriptionModelController: transcriptionModelController,
+            transcriptionQualityPreference:
+                transcriptionQualityPreference,
             speakerDiarizer: speakerDiarizer
         )
         let coordinator = MeetingCoordinator(
@@ -111,6 +173,13 @@ final class AppContainer {
         let credentialStore = credentialStore ?? KeychainCredentialStore()
         let operationGate = MeetingOperationGate()
         self.operationGate = operationGate
+        let speakerDiarizationRetryer = SpeakerDiarizationRetryUseCase(
+            repository: repository,
+            sourceLoader: sourceLoader,
+            diarizer: speakerDiarizer,
+            operationGate: operationGate
+        )
+        self.speakerDiarizationRetryer = speakerDiarizationRetryer
         let titleUpdater = MeetingTitleUpdateUseCase(
             repository: repository,
             credentialStore: credentialStore,
@@ -122,7 +191,9 @@ final class AppContainer {
         let audioPlayerController = MeetingAudioPlayerController(
             sourceLoader: sourceLoader,
             waveformLoader: WaveformAnalyzer(fileStore: fileStore),
-            engine: AVFoundationMeetingAudioPlaybackEngine()
+            engine: AVFoundationMeetingAudioPlaybackEngine(
+                outputDevicePreference: audioOutputDevicePreference
+            )
         )
         self.audioPlayerController = audioPlayerController
         let libraryViewModel = MeetingLibraryViewModel(
@@ -132,23 +203,41 @@ final class AppContainer {
             titleUpdater: titleUpdater,
             operationGate: operationGate,
             playbackStopper: audioPlayerController,
-            deletionGuard: coordinator,
+            deletionPreparer: coordinator,
             systemRequirements: systemRequirements ?? SystemRequirements(),
             recordingsURL: recordingsURL
         )
         self.libraryViewModel = libraryViewModel
+        let summaryGenerator = summaryGenerator
+            ?? LiveMeetingSummaryGenerator(httpClient: httpClient)
+        let notionArchiver = notionArchiver
+            ?? LiveMeetingNotionArchiver(
+                repository: repository,
+                httpClient: httpClient
+            )
+        let meetingDocumentsUseCase = MeetingDocumentsUseCase(
+            repository: repository,
+            credentialStore: credentialStore,
+            settingsStore: settingsStore,
+            summaryGenerator: summaryGenerator,
+            detailedMinutesGenerator: detailedMinutesGenerator
+                ?? LiveMeetingDetailedMinutesGenerator(httpClient: httpClient),
+            archiver: documentArchiver
+                ?? LegacyMeetingDocumentNotionArchiver(
+                    repository: repository,
+                    archiver: notionArchiver
+                ),
+            operationGate: operationGate
+        )
+        self.meetingDocumentsUseCase = meetingDocumentsUseCase
         let summarizeAndArchiveUseCase = SummarizeAndArchiveUseCase(
             repository: repository,
             credentialStore: credentialStore,
             settingsStore: settingsStore,
-            summaryGenerator: summaryGenerator ?? LiveMeetingSummaryGenerator(
-                httpClient: httpClient
-            ),
-            notionArchiver: notionArchiver ?? LiveMeetingNotionArchiver(
-                repository: repository,
-                httpClient: httpClient
-            ),
-            operationGate: operationGate
+            summaryGenerator: summaryGenerator,
+            notionArchiver: notionArchiver,
+            operationGate: operationGate,
+            documentsUseCase: meetingDocumentsUseCase
         )
         self.summarizeAndArchiveUseCase = summarizeAndArchiveUseCase
         settingsViewModel = SettingsViewModel(
@@ -159,7 +248,38 @@ final class AppContainer {
             ),
             notionTester: notionTester ?? LiveNotionConnectionTester(
                 httpClient: httpClient
-            )
+            ),
+            audioDeviceCatalog: audioDeviceCatalog,
+            recordingActivity:
+                MeetingCoordinatorAudioDiagnosticRecordingChecker(
+                    coordinator: coordinator
+                ),
+            audioInputTester: audioInputTester
+                ?? LiveMicrophoneAudioDiagnosticSignalTester(
+                    provider: AVCaptureMicrophoneSampleProvider(),
+                    inputPreference: audioInputDevicePreference
+                ),
+            audioOutputTester: audioOutputTester,
+            diagnosticCoordinatorFactory: audioDiagnosticCoordinatorFactory
+                ?? LiveAudioDiagnosticCoordinatorFactory(
+                    recordingActivity:
+                        MeetingCoordinatorAudioDiagnosticRecordingChecker(
+                            coordinator: coordinator
+                        ),
+                    permissions: LiveAudioDiagnosticPermissionChecker(
+                        system: permissionSystem
+                    ),
+                    inputDevice: LiveAudioDiagnosticInputDeviceChecker(
+                        catalog: audioDeviceCatalog,
+                        preference: audioInputDevicePreference
+                    ),
+                    outputTester: audioOutputTester,
+                    inputPreference: audioInputDevicePreference
+                ),
+            diagnosticExplainer: audioDiagnosticExplainer
+                ?? LiveAudioDiagnosticExplanationRequester(
+                    httpClient: httpClient
+                )
         )
         controlRouter.connect(
             coordinator: coordinator,
@@ -216,7 +336,10 @@ final class AppContainer {
             repository: repository,
             settingsStore: settingsStore,
             action: summarizeAndArchiveUseCase,
-            titleUpdater: meetingTitleUpdater
+            documentManager: meetingDocumentsUseCase,
+            titleUpdater: meetingTitleUpdater,
+            speakerDiarizationRetryer: speakerDiarizationRetryer,
+            recordingPresentationStore: recordingPresentationStore
         )
         detailViewModels[meetingID] = viewModel
         return viewModel

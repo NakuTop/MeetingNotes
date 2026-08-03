@@ -1,10 +1,36 @@
+import AVFoundation
+import CoreMedia
 import ScreenCaptureKit
 import XCTest
 @testable import MeetingNotes
 
 final class ScreenAudioCaptureConfigurationTests: XCTestCase {
+    func testSelectedMicrophoneDeviceIDIsAppliedExactly() {
+        let configuration =
+            ScreenAudioCaptureConfiguration.makeStreamConfiguration(
+                microphoneDeviceID: "external-microphone-id"
+            )
+
+        XCTAssertEqual(
+            configuration.microphoneCaptureDeviceID,
+            "external-microphone-id"
+        )
+    }
+
+    func testNilMicrophoneDeviceIDUsesSystemDefault() {
+        let configuration =
+            ScreenAudioCaptureConfiguration.makeStreamConfiguration(
+                microphoneDeviceID: nil
+            )
+
+        XCTAssertNil(configuration.microphoneCaptureDeviceID)
+    }
+
     func testCapturesOnlySystemAndMicrophoneAudio() {
-        let configuration = ScreenAudioCaptureConfiguration.makeStreamConfiguration()
+        let configuration =
+            ScreenAudioCaptureConfiguration.makeStreamConfiguration(
+                microphoneDeviceID: nil
+            )
 
         XCTAssertTrue(configuration.capturesAudio)
         XCTAssertTrue(configuration.captureMicrophone)
@@ -332,6 +358,29 @@ final class ScreenAudioCaptureConfigurationTests: XCTestCase {
         )
     }
 
+    func testScreenDecoderUsesSharedOwnedSampleDecoder() throws {
+        let buffer = try makeScreenDecoderBuffer(samples: [0.2, -0.3])
+        let sharedDecoder = StubAudioSampleBufferDecoder(
+            decoded: DecodedAudioSampleBuffer(
+                buffer: buffer,
+                sampleTime: 12_000,
+                sampleRate: 48_000,
+                timestamp: 0.25
+            )
+        )
+        let decoder = ScreenAudioSampleDecoder(
+            audioSampleBufferDecoder: sharedDecoder
+        )
+        let token = try makeScreenDecoderToken()
+
+        let frame = try decoder.decode(token, source: .system)
+
+        XCTAssertEqual(sharedDecoder.decodeCount(), 1)
+        XCTAssertEqual(frame.timestamp, 0.25)
+        XCTAssertEqual(frame.sampleRate, 48_000)
+        XCTAssertFalse(frame.samples.isEmpty)
+    }
+
     func testBuilds16kTranscriptionPayloadWithoutChanging48kStorage() throws {
         let builder = ScreenAudioTranscriptionFrameBuilder()
         let master = CapturedAudioFrame(
@@ -496,6 +545,81 @@ final class ScreenAudioCaptureConfigurationTests: XCTestCase {
                 ),
             ]
         )
+    }
+
+    private func makeScreenDecoderBuffer(
+        samples: [Float]
+    ) throws -> AVAudioPCMBuffer {
+        let format = try XCTUnwrap(
+            AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: 48_000,
+                channels: 1,
+                interleaved: false
+            )
+        )
+        let buffer = try XCTUnwrap(
+            AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: AVAudioFrameCount(samples.count)
+            )
+        )
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        let channel = try XCTUnwrap(buffer.floatChannelData?.pointee)
+        samples.withUnsafeBytes { bytes in
+            if let baseAddress = bytes.baseAddress {
+                memcpy(channel, baseAddress, bytes.count)
+            }
+        }
+        return buffer
+    }
+
+    private func makeScreenDecoderToken() throws -> CMSampleBuffer {
+        var sampleBuffer: CMSampleBuffer?
+        XCTAssertEqual(
+            CMSampleBufferCreate(
+                allocator: kCFAllocatorDefault,
+                dataBuffer: nil,
+                dataReady: true,
+                makeDataReadyCallback: nil,
+                refcon: nil,
+                formatDescription: nil,
+                sampleCount: 0,
+                sampleTimingEntryCount: 0,
+                sampleTimingArray: nil,
+                sampleSizeEntryCount: 0,
+                sampleSizeArray: nil,
+                sampleBufferOut: &sampleBuffer
+            ),
+            noErr
+        )
+        return try XCTUnwrap(sampleBuffer)
+    }
+}
+
+private final class StubAudioSampleBufferDecoder:
+    AudioSampleBufferDecoding,
+    @unchecked Sendable {
+    private let lock = NSLock()
+    private let decoded: DecodedAudioSampleBuffer
+    private var count = 0
+
+    init(decoded: DecodedAudioSampleBuffer) {
+        self.decoded = decoded
+    }
+
+    func decode(
+        _ sampleBuffer: CMSampleBuffer
+    ) throws -> DecodedAudioSampleBuffer {
+        _ = sampleBuffer
+        lock.withLock {
+            count += 1
+        }
+        return decoded
+    }
+
+    func decodeCount() -> Int {
+        lock.withLock { count }
     }
 }
 

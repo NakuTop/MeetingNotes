@@ -47,6 +47,7 @@ actor TranscriptionQueue {
     private var completed: [TranscriptDraft] = []
     private var isPrepared = false
     private var isProcessing = false
+    private var isCancelled = false
     private var workerTask: Task<Void, Never>?
     private var updateContinuation: AsyncStream<TranscriptDraft>.Continuation?
 
@@ -63,6 +64,9 @@ actor TranscriptionQueue {
     }
 
     func enqueue(samples: [Float], startingAt: TimeInterval) {
+        guard !isCancelled else {
+            return
+        }
         guard !samples.isEmpty else {
             return
         }
@@ -75,6 +79,9 @@ actor TranscriptionQueue {
     }
 
     func retryFailed() {
+        guard !isCancelled else {
+            return
+        }
         guard !failed.isEmpty else {
             return
         }
@@ -105,8 +112,26 @@ actor TranscriptionQueue {
     func updates() -> AsyncStream<TranscriptDraft> {
         updateContinuation?.finish()
         let pair = AsyncStream<TranscriptDraft>.makeStream()
+        guard !isCancelled else {
+            pair.continuation.finish()
+            return pair.stream
+        }
         updateContinuation = pair.continuation
         return pair.stream
+    }
+
+    func cancel() {
+        guard !isCancelled else { return }
+        isCancelled = true
+        workerTask?.cancel()
+        workerTask = nil
+        waiting.removeAll(keepingCapacity: false)
+        failed.removeAll(keepingCapacity: false)
+        deferred.removeAll(keepingCapacity: false)
+        completed.removeAll(keepingCapacity: false)
+        isProcessing = false
+        updateContinuation?.finish()
+        updateContinuation = nil
     }
 
     func finishUpdates() async {
@@ -129,7 +154,7 @@ actor TranscriptionQueue {
     }
 
     private func startWorkerIfNeeded() {
-        guard workerTask == nil else {
+        guard !isCancelled, workerTask == nil else {
             return
         }
         workerTask = Task { await consumeWaitingChunks() }
@@ -138,11 +163,23 @@ actor TranscriptionQueue {
     private func consumeWaitingChunks() async {
         if !isPrepared {
             for _ in 0..<maximumAutomaticAttempts {
+                guard shouldContinueProcessing else {
+                    finishCancelledWorker()
+                    return
+                }
                 do {
                     try await service.prepare()
+                    guard shouldContinueProcessing else {
+                        finishCancelledWorker()
+                        return
+                    }
                     isPrepared = true
                     break
                 } catch {
+                    guard shouldContinueProcessing else {
+                        finishCancelledWorker()
+                        return
+                    }
                     continue
                 }
             }
@@ -157,15 +194,27 @@ actor TranscriptionQueue {
         }
 
         while !waiting.isEmpty {
+            guard shouldContinueProcessing else {
+                finishCancelledWorker()
+                return
+            }
             let chunk = waiting.removeFirst()
             isProcessing = true
             var succeeded = false
             for _ in 0..<maximumAutomaticAttempts {
+                guard shouldContinueProcessing else {
+                    finishCancelledWorker()
+                    return
+                }
                 do {
                     let drafts = try await service.transcribe(
                         samples: chunk.samples,
                         startingAt: chunk.startingAt
                     )
+                    guard shouldContinueProcessing else {
+                        finishCancelledWorker()
+                        return
+                    }
                     completed.append(contentsOf: drafts)
                     for draft in drafts {
                         updateContinuation?.yield(draft)
@@ -173,6 +222,10 @@ actor TranscriptionQueue {
                     succeeded = true
                     break
                 } catch {
+                    guard shouldContinueProcessing else {
+                        finishCancelledWorker()
+                        return
+                    }
                     continue
                 }
             }
@@ -181,6 +234,15 @@ actor TranscriptionQueue {
             }
             isProcessing = false
         }
+        workerTask = nil
+    }
+
+    private var shouldContinueProcessing: Bool {
+        !isCancelled && !Task.isCancelled
+    }
+
+    private func finishCancelledWorker() {
+        isProcessing = false
         workerTask = nil
     }
 

@@ -35,6 +35,19 @@ final class MeetingFlowUITests: XCTestCase {
             app.buttons["floating.pause"].waitForExistence(timeout: 5)
         )
         assertExactlyFourFloatingControls(in: app)
+        let elapsed = app.descendants(matching: .any)[
+            "floating.elapsed"
+        ].firstMatch
+        XCTAssertTrue(elapsed.waitForExistence(timeout: 3))
+        let initialElapsed = accessibleText(of: elapsed)
+        XCTAssertTrue(
+            waitForAccessibleTextToChange(
+                from: initialElapsed,
+                on: elapsed,
+                timeout: 2.5
+            ),
+            "悬浮录音时间应在录音期间持续更新"
+        )
         let liveTranscript = app.descendants(matching: .any).matching(
             NSPredicate(
                 format: "label CONTAINS %@",
@@ -70,7 +83,7 @@ final class MeetingFlowUITests: XCTestCase {
         stop.click()
         XCTAssertTrue(stop.waitForNonExistence(timeout: 3))
         XCTAssertTrue(
-            app.buttons["meeting.summarizeArchive"]
+            app.buttons["meeting.documents.generate"]
                 .waitForExistence(timeout: 5)
         )
         XCTAssertTrue(app.staticTexts["meeting.bookmark"].firstMatch.exists)
@@ -122,7 +135,139 @@ final class MeetingFlowUITests: XCTestCase {
         keepScreenshot(named: "05-settings", of: app)
     }
 
-    func testSummarizeAndArchiveShowsBothStagesThenNotionLink() {
+    func testPartialArchiveSpeakerRenameAndFrequentNameSettings() {
+        let app = launchApp(
+            environment: ["MEETING_NOTES_UI_SPEAKER_ARCHIVE": "1"]
+        )
+        let partialHistoryRow = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier == %@ AND label CONTAINS %@",
+                "meeting.historyRow",
+                "部分归档会议"
+            )
+        ).firstMatch
+        XCTAssertTrue(partialHistoryRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            waitForLabelContaining(
+                "部分内容已归档到 Notion",
+                on: partialHistoryRow
+            )
+        )
+        let speakerHistoryRow = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier == %@ AND label CONTAINS %@",
+                "meeting.historyRow",
+                "说话人标签会议"
+            )
+        ).firstMatch
+        XCTAssertTrue(speakerHistoryRow.waitForExistence(timeout: 5))
+        speakerHistoryRow.click()
+
+        let detailScroll = app.scrollViews["meeting.detail"]
+        let roomTwoSelector = app.buttons[
+            "meeting.transcripts.speaker.room-2"
+        ]
+        scrollUntilHittable(roomTwoSelector, in: detailScroll)
+        XCTAssertTrue(roomTwoSelector.waitForExistence(timeout: 3))
+        let selectorButtons = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "meeting.transcripts.speaker."
+            )
+        )
+        XCTAssertEqual(selectorButtons.count, 2)
+        roomTwoSelector.click()
+        let historicalName = app.buttons["张三"]
+        XCTAssertTrue(historicalName.waitForExistence(timeout: 3))
+        historicalName.click()
+        app.buttons["speaker.editor.save"].click()
+
+        XCTAssertTrue(waitForLabel("张三", on: roomTwoSelector))
+        let firstRoomTwoTurn = app.descendants(matching: .any)[
+            "meeting.transcripts.turn.5000"
+        ].firstMatch
+        XCTAssertTrue(firstRoomTwoTurn.waitForExistence(timeout: 3))
+        XCTAssertTrue(waitForLabelContaining("张三", on: firstRoomTwoTurn))
+        let laterRoomTwoTurn = app.descendants(matching: .any)[
+            "meeting.transcripts.turn.20000"
+        ].firstMatch
+        scrollUntilHittable(laterRoomTwoTurn, in: detailScroll)
+        XCTAssertTrue(laterRoomTwoTurn.waitForExistence(timeout: 3))
+        XCTAssertTrue(waitForLabelContaining("张三", on: laterRoomTwoTurn))
+
+        openSettings(in: app)
+        let settingsScroll = app.scrollViews["settings.scroll"]
+        let newName = app.textFields["settings.speakers.newName"]
+        scrollUntilHittable(newName, in: settingsScroll)
+        XCTAssertTrue(newName.isHittable)
+        replaceText(in: newName, with: "王老师")
+        app.buttons["settings.speakers.add"].click()
+        let remove = app.buttons["删除 王老师"]
+        scrollUntilHittable(remove, in: settingsScroll)
+        XCTAssertTrue(remove.waitForExistence(timeout: 3))
+        remove.click()
+        XCTAssertTrue(remove.waitForNonExistence(timeout: 3))
+    }
+
+    func testSettingsAudioDiagnosticsExposeAccessibleWorkflow() {
+        let app = launchApp()
+        XCTAssertTrue(
+            app.buttons["meeting.start.offline"]
+                .waitForExistence(timeout: 5)
+        )
+        openSettings(in: app)
+
+        let inputPicker = app.descendants(matching: .any)[
+            "settings.audio.inputPicker"
+        ].firstMatch
+        let inputTest = app.buttons["settings.audio.inputTest"]
+        let outputPicker = app.descendants(matching: .any)[
+            "settings.audio.outputPicker"
+        ].firstMatch
+        let outputTest = app.buttons["settings.audio.outputTest"]
+        let smartDiagnostic = app.buttons["settings.audio.smartDiagnostic"]
+
+        XCTAssertTrue(inputPicker.waitForExistence(timeout: 5))
+        XCTAssertTrue(inputTest.exists)
+        XCTAssertTrue(outputPicker.exists)
+        XCTAssertTrue(outputTest.exists)
+        XCTAssertTrue(smartDiagnostic.exists)
+
+        inputTest.click()
+        XCTAssertTrue(
+            app.descendants(matching: .any)["settings.audio.inputLevel"]
+                .firstMatch
+                .waitForExistence(timeout: 3)
+        )
+        let cancel = app.buttons["settings.audio.cancel"]
+        XCTAssertTrue(cancel.exists)
+        cancel.click()
+
+        smartDiagnostic.click()
+        let heardYes = app.buttons["settings.audio.outputHeardYes"]
+        let heardNo = app.buttons["settings.audio.outputHeardNo"]
+        XCTAssertTrue(heardYes.waitForExistence(timeout: 3))
+        XCTAssertTrue(heardNo.exists)
+        XCTAssertTrue(cancel.exists)
+
+        heardYes.click()
+        let preview = app.descendants(matching: .any)[
+            "settings.audio.preview"
+        ].firstMatch
+        XCTAssertTrue(preview.waitForExistence(timeout: 5))
+        let send = app.buttons["settings.audio.sendToDeepSeek"]
+        XCTAssertTrue(send.exists)
+        XCTAssertFalse(send.isEnabled)
+
+        let previewConsent = app.checkBoxes[
+            "settings.audio.previewConsent"
+        ]
+        XCTAssertTrue(previewConsent.exists)
+        previewConsent.click()
+        XCTAssertTrue(send.isEnabled)
+    }
+
+    func testGenerateSummaryShowsArchiveStageThenNotionLink() {
         let app = launchApp()
         let start = app.buttons["meeting.start.offline"]
         XCTAssertTrue(start.waitForExistence(timeout: 5))
@@ -132,29 +277,22 @@ final class MeetingFlowUITests: XCTestCase {
         )
         app.buttons["floating.stop"].click()
 
-        let action = app.buttons["meeting.summarizeArchive"]
+        let action = app.buttons["meeting.documents.generate"]
         XCTAssertTrue(action.waitForExistence(timeout: 5))
+        XCTAssertEqual(action.label, "生成重点总结")
         action.click()
 
         XCTAssertTrue(
-            waitForButton(
-                identifier: "meeting.summarizeArchive",
-                label: "正在总结",
-                in: app,
-                timeout: 5
-            )
-        )
-        XCTAssertTrue(
-            waitForButton(
-                identifier: "meeting.summarizeArchive",
+            waitForStaticText(
+                identifier: "meeting.documents.archiveStatus",
                 label: "正在归档",
                 in: app,
                 timeout: 8
             )
         )
         XCTAssertTrue(
-            waitForButton(
-                identifier: "meeting.summarizeArchive",
+            waitForStaticText(
+                identifier: "meeting.documents.archiveStatus",
                 label: "已归档",
                 in: app,
                 timeout: 8
@@ -221,7 +359,7 @@ final class MeetingFlowUITests: XCTestCase {
 
         let detailRename = app.buttons["meeting.detail.rename"]
         XCTAssertTrue(detailRename.waitForExistence(timeout: 3))
-        let summaryAction = app.buttons["meeting.summarizeArchive"]
+        let summaryAction = app.buttons["meeting.documents.generate"]
         XCTAssertTrue(summaryAction.isEnabled)
         detailRename.click()
         let detailRenameField = app.textFields["meeting.detail.renameField"]
@@ -442,6 +580,7 @@ final class MeetingFlowUITests: XCTestCase {
         temporaryArtifacts: [URL] = []
     ) -> XCUIApplication {
         continueAfterFailure = false
+        installDocumentsPermissionDenialMonitor()
         let app = XCUIApplication()
         app.launchArguments = ["-uiTesting"]
         app.launchEnvironment = environment
@@ -469,6 +608,12 @@ final class MeetingFlowUITests: XCTestCase {
             }
         }
         return app
+    }
+
+    private func openSettings(in app: XCUIApplication) {
+        app.activate()
+        app.menuBars.menuBarItems["MeetingNotes"].click()
+        app.menuItems["Settings…"].click()
     }
 
     private func recordingsRoot(for processID: pid_t) -> URL {
@@ -581,7 +726,7 @@ final class MeetingFlowUITests: XCTestCase {
         stop.click()
         XCTAssertTrue(stop.waitForNonExistence(timeout: 3))
         XCTAssertTrue(
-            app.buttons["meeting.summarizeArchive"]
+            app.buttons["meeting.documents.generate"]
                 .waitForExistence(timeout: 5)
         )
     }
@@ -713,22 +858,47 @@ final class MeetingFlowUITests: XCTestCase {
         )
     }
 
-    private func waitForButton(
+    private func waitForStaticText(
         identifier: String,
-        label: String,
+        label expectedText: String,
         in app: XCUIApplication,
         timeout: TimeInterval
     ) -> Bool {
-        app.buttons
+        app.staticTexts
             .matching(
                 NSPredicate(
-                    format: "identifier == %@ AND label == %@",
+                    format: "identifier == %@ AND (label == %@ OR value == %@)",
                     identifier,
-                    label
+                    expectedText,
+                    expectedText
                 )
             )
             .firstMatch
             .waitForExistence(timeout: timeout)
+    }
+
+    private func waitForAccessibleTextToChange(
+        from initialText: String,
+        on element: XCUIElement,
+        timeout: TimeInterval
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if accessibleText(of: element) != initialText {
+                return true
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        } while Date() < deadline
+        return false
+    }
+
+    private func scrollUntilHittable(
+        _ element: XCUIElement,
+        in scrollView: XCUIElement
+    ) {
+        for _ in 0..<14 where !element.isHittable {
+            scrollView.scroll(byDeltaX: 0, deltaY: -90)
+        }
     }
 
     private func waitForTime(
@@ -784,5 +954,26 @@ final class MeetingFlowUITests: XCTestCase {
             return value
         }
         return element.label
+    }
+}
+
+@MainActor
+extension XCTestCase {
+    func installDocumentsPermissionDenialMonitor() {
+        addUIInterruptionMonitor(
+            withDescription: "拒绝 UI 测试 Runner 访问文稿"
+        ) { alert in
+            let text = alert.descendants(matching: .any).matching(
+                NSPredicate(
+                    format: "label CONTAINS %@ AND label CONTAINS %@",
+                    "MeetingNotesUITests-Runner",
+                    "文稿"
+                )
+            ).firstMatch
+            let deny = alert.buttons["不允许"]
+            guard text.exists, deny.exists else { return false }
+            deny.click()
+            return true
+        }
     }
 }

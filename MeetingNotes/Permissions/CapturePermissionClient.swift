@@ -12,6 +12,7 @@ enum CapturePermissionStatus: Equatable, Sendable {
     case authorized
     case denied
     case notDetermined
+    case unavailable
 
     init(_ status: AVAuthorizationStatus) {
         switch status {
@@ -152,8 +153,10 @@ final class LiveCapturePermissionSystem: CapturePermissionSystem, Sendable {
             return CapturePermissionStatus(microphoneStatus())
         case .screenRecording:
             switch await screenProbe() {
-            case .authorized, .unavailable:
+            case .authorized:
                 return .authorized
+            case .unavailable:
+                return .unavailable
             case .denied:
                 return screenPreflight() ? .authorized : .notDetermined
             }
@@ -169,8 +172,10 @@ final class LiveCapturePermissionSystem: CapturePermissionSystem, Sendable {
             return granted ? .authorized : .denied
         case .screenRecording:
             switch await screenProbe() {
-            case .authorized, .unavailable:
+            case .authorized:
                 return .authorized
+            case .unavailable:
+                return .unavailable
             case .denied:
                 break
             }
@@ -179,8 +184,10 @@ final class LiveCapturePermissionSystem: CapturePermissionSystem, Sendable {
                 return .authorized
             }
             switch await screenProbe() {
-            case .authorized, .unavailable:
+            case .authorized:
                 return .authorized
+            case .unavailable:
+                return .unavailable
             case .denied:
                 return .denied
             }

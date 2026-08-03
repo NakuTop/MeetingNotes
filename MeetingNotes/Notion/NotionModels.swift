@@ -24,6 +24,33 @@ struct NotionConnectionResult: Equatable, Sendable {
     }
 }
 
+enum NotionArchiveRunPhase: String, Codable, Equatable, Sendable {
+    case appending
+    case cleaningUp
+}
+
+struct NotionDocumentArchiveRun: Codable, Equatable, Sendable {
+    let contentRevision: Int
+    var newBlockIDs: [String]
+    var oldBlockIDs: [String]
+    var nextBatchIndex: Int
+    var phase: NotionArchiveRunPhase
+
+    init(
+        contentRevision: Int,
+        newBlockIDs: [String] = [],
+        oldBlockIDs: [String] = [],
+        nextBatchIndex: Int = 0,
+        phase: NotionArchiveRunPhase = .appending
+    ) {
+        self.contentRevision = contentRevision
+        self.newBlockIDs = newBlockIDs
+        self.oldBlockIDs = oldBlockIDs
+        self.nextBatchIndex = nextBatchIndex
+        self.phase = phase
+    }
+}
+
 protocol NotionAPIClient: Sendable {
     func testConnection(
         parentPageID: UUID
@@ -37,7 +64,9 @@ protocol NotionAPIClient: Sendable {
     func append(
         blocks: [NotionBlockDraft],
         to pageID: String
-    ) async throws
+    ) async throws -> [String]
+
+    func archiveBlock(id: String) async throws
 
     func updatePageTitle(pageID: String, title: String) async throws
 }

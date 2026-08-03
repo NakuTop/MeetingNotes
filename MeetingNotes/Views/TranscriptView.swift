@@ -9,6 +9,20 @@ struct TranscriptDisplayEntry: Identifiable, Equatable {
     let source: TranscriptAudioSource
 }
 
+struct TranscriptDisplayTurn: Identifiable, Equatable {
+    let transcriptIDs: [UUID]
+    let startTime: TimeInterval
+    let endTime: TimeInterval
+    let text: String
+    let speakerID: String?
+    let source: TranscriptAudioSource
+    let isHighlighted: Bool
+
+    var id: UUID {
+        transcriptIDs[0]
+    }
+}
+
 struct TranscriptSpeakerBadge: Equatable, Sendable {
     let label: String
     let paletteIndex: Int
@@ -20,60 +34,32 @@ enum TranscriptSpeakerDisplayPolicy {
 
     static func badge(
         speakerID: String?,
-        source: TranscriptAudioSource
+        source: TranscriptAudioSource,
+        customNames: [String: String] = [:]
     ) -> TranscriptSpeakerBadge? {
-        guard let speakerID else { return nil }
-
-        switch (speakerID, source) {
-        case ("me", .microphone):
-            return TranscriptSpeakerBadge(
-                label: "我",
-                paletteIndex: 0,
-                isLocalUser: true
-            )
-        case ("remote", .system):
-            return TranscriptSpeakerBadge(
-                label: "远端",
-                paletteIndex: 0,
-                isLocalUser: false
-            )
-        case (_, .system):
-            return numberedBadge(
-                speakerID: speakerID,
-                prefix: "remote",
-                labelPrefix: "远端"
-            )
-        case (_, .room):
-            return numberedBadge(
-                speakerID: speakerID,
-                prefix: "room",
-                labelPrefix: "说话人"
-            )
-        case (_, .microphone), (_, .mixed):
-            return nil
-        }
+        guard let label = TranscriptSpeakerLabelPolicy.label(
+            speakerID: speakerID,
+            source: source,
+            customNames: customNames
+        ) else { return nil }
+        return TranscriptSpeakerBadge(
+            label: label,
+            paletteIndex: paletteIndex(speakerID: speakerID),
+            isLocalUser: source == .microphone
+        )
     }
 
-    private static func numberedBadge(
-        speakerID: String,
-        prefix: String,
-        labelPrefix: String
-    ) -> TranscriptSpeakerBadge? {
-        let expectedPrefix = "\(prefix)-"
-        guard speakerID.hasPrefix(expectedPrefix),
-              let number = Int(speakerID.dropFirst(expectedPrefix.count)),
-              number > 0 else {
-            return nil
-        }
-        return TranscriptSpeakerBadge(
-            label: "\(labelPrefix) \(number)",
-            paletteIndex: (number - 1) % paletteCount,
-            isLocalUser: false
-        )
+    private static func paletteIndex(speakerID: String?) -> Int {
+        guard let numberText = speakerID?.split(separator: "-").last,
+              let number = Int(numberText),
+              number > 0 else { return 0 }
+        return (number - 1) % paletteCount
     }
 }
 
 enum TranscriptDisplayPolicy {
+    private static let maximumTurnGap: TimeInterval = 5
+
     static func entries(
         from transcripts: [TranscriptRecord]
     ) -> [TranscriptDisplayEntry] {
@@ -100,65 +86,236 @@ enum TranscriptDisplayPolicy {
                 )
             }
     }
+
+    static func turns(
+        from transcripts: [TranscriptRecord],
+        bookmarks: [BookmarkRecord]
+    ) -> [TranscriptDisplayTurn] {
+        entries(from: transcripts).reduce(into: []) { turns, entry in
+            let highlighted = isHighlighted(entry, bookmarks: bookmarks)
+            if let previous = turns.last,
+               shouldGroup(
+                previous,
+                with: entry,
+                highlighted: highlighted
+               ) {
+                turns[turns.count - 1] = TranscriptDisplayTurn(
+                    transcriptIDs: previous.transcriptIDs + [entry.id],
+                    startTime: previous.startTime,
+                    endTime: max(previous.endTime, entry.endTime),
+                    text: [previous.text, entry.text].joined(separator: " "),
+                    speakerID: previous.speakerID,
+                    source: previous.source,
+                    isHighlighted: previous.isHighlighted
+                )
+            } else {
+                turns.append(
+                    TranscriptDisplayTurn(
+                        transcriptIDs: [entry.id],
+                        startTime: entry.startTime,
+                        endTime: entry.endTime,
+                        text: entry.text,
+                        speakerID: entry.speakerID,
+                        source: entry.source,
+                        isHighlighted: highlighted
+                    )
+                )
+            }
+        }
+    }
+
+    private static func shouldGroup(
+        _ turn: TranscriptDisplayTurn,
+        with entry: TranscriptDisplayEntry,
+        highlighted: Bool
+    ) -> Bool {
+        guard let speakerID = turn.speakerID,
+              speakerID == entry.speakerID else {
+            return false
+        }
+        return turn.source == entry.source
+            && entry.startTime <= turn.endTime + maximumTurnGap
+            && turn.isHighlighted == highlighted
+    }
+
+    private static func isHighlighted(
+        _ entry: TranscriptDisplayEntry,
+        bookmarks: [BookmarkRecord]
+    ) -> Bool {
+        bookmarks.contains {
+            BookmarkWindow(bookmarkTime: $0.timestamp).intersects(
+                transcriptStart: entry.startTime,
+                transcriptEnd: entry.endTime
+            )
+        }
+    }
 }
 
 struct TranscriptView: View {
     let transcripts: [TranscriptRecord]
     let bookmarks: [BookmarkRecord]
+    var customSpeakerNames: [String: String] = [:]
+    var frequentSpeakerNames: [String] = []
+    var speakerNameErrorMessage: String?
+    var onBeginSpeakerEditing: (() -> Void)?
+    var onRenameSpeaker: ((String, String) -> Bool)?
+    var onClearSpeakerName: ((String) -> Bool)?
 
-    private var visibleTranscripts: [TranscriptDisplayEntry] {
-        TranscriptDisplayPolicy.entries(from: transcripts)
+    @State private var editingSpeaker: TranscriptSpeakerEditingTarget?
+
+    private var visibleTurns: [TranscriptDisplayTurn] {
+        TranscriptDisplayPolicy.turns(
+            from: transcripts,
+            bookmarks: bookmarks
+        )
+    }
+
+    private var speakerOptions: [TranscriptSpeakerOption] {
+        var seen: Set<String> = []
+        return visibleTurns.compactMap { turn in
+            guard let speakerID = turn.speakerID,
+                  seen.insert(speakerID).inserted,
+                  let badge = TranscriptSpeakerDisplayPolicy.badge(
+                    speakerID: speakerID,
+                    source: turn.source,
+                    customNames: customSpeakerNames
+                  ) else {
+                return nil
+            }
+            return TranscriptSpeakerOption(
+                speakerID: speakerID,
+                badge: badge
+            )
+        }
     }
 
     var body: some View {
-        if visibleTranscripts.isEmpty {
+        if visibleTurns.isEmpty {
             Label("暂无转录", systemImage: "text.bubble")
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             LazyVStack(alignment: .leading, spacing: 8) {
-                ForEach(visibleTranscripts) { transcript in
-                    let highlighted = isHighlighted(transcript)
+                if !speakerOptions.isEmpty {
+                    speakerSelector
+                        .padding(.bottom, 4)
+                }
+
+                ForEach(visibleTurns) { turn in
                     let speakerBadge = TranscriptSpeakerDisplayPolicy.badge(
-                        speakerID: transcript.speakerID,
-                        source: transcript.source
+                        speakerID: turn.speakerID,
+                        source: turn.source,
+                        customNames: customSpeakerNames
                     )
 
                     HStack(alignment: .firstTextBaseline, spacing: 12) {
-                        Text(MeetingDisplayFormat.timecode(transcript.startTime))
+                        Text(MeetingDisplayFormat.timecode(turn.startTime))
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .frame(width: 52, alignment: .leading)
-                        if let speakerBadge {
-                            speakerBadgeView(speakerBadge)
+                        if let speakerBadge,
+                           let speakerID = turn.speakerID {
+                            speakerButton(
+                                speakerID: speakerID,
+                                badge: speakerBadge,
+                                accessibilityIdentifier:
+                                    "meeting.transcripts.turnSpeaker.\(speakerID)"
+                            )
                         }
-                        Text(transcript.text)
+                        Text(turn.text)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(9)
                     .background(
-                        highlighted
+                        turn.isHighlighted
                             ? Color.accentColor.opacity(0.14)
                             : Color.clear,
                         in: RoundedRectangle(cornerRadius: 8)
                     )
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel(
-                        "\(MeetingDisplayFormat.timecode(transcript.startTime))\(speakerBadge.map { "，\($0.label)" } ?? "")，\(transcript.text)\(highlighted ? "，书签附近" : "")"
+                    .accessibilityIdentifier(
+                        "meeting.transcripts.turn.\(Int((turn.startTime * 1_000).rounded()))"
                     )
+                    .accessibilityLabel(
+                        "\(MeetingDisplayFormat.timecode(turn.startTime))\(speakerBadge.map { "，\($0.label)" } ?? "")，\(turn.text)\(turn.isHighlighted ? "，书签附近" : "")"
+                    )
+                }
+            }
+            .popover(item: $editingSpeaker, arrowEdge: .top) { target in
+                SpeakerNameEditor(
+                    currentName: target.currentName,
+                    frequentNames: frequentSpeakerNames,
+                    canRestoreDefault: target.hasCustomName,
+                    errorMessage: speakerNameErrorMessage,
+                    onSave: { newName in
+                        if onRenameSpeaker?(target.speakerID, newName) == true {
+                            editingSpeaker = nil
+                        }
+                    },
+                    onRestoreDefault: {
+                        if onClearSpeakerName?(target.speakerID) == true {
+                            editingSpeaker = nil
+                        }
+                    },
+                    onCancel: {
+                        editingSpeaker = nil
+                    }
+                )
+            }
+        }
+    }
+
+    private var speakerSelector: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("说话人")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 7) {
+                    ForEach(speakerOptions) { option in
+                        speakerButton(
+                            speakerID: option.speakerID,
+                            badge: option.badge,
+                            accessibilityIdentifier:
+                                "meeting.transcripts.speaker.\(option.speakerID)"
+                        )
+                    }
                 }
             }
         }
     }
 
-    private func isHighlighted(_ transcript: TranscriptDisplayEntry) -> Bool {
-        bookmarks.contains {
-            BookmarkWindow(bookmarkTime: $0.timestamp).intersects(
-                transcriptStart: transcript.startTime,
-                transcriptEnd: transcript.endTime
+    private func speakerButton(
+        speakerID: String,
+        badge: TranscriptSpeakerBadge,
+        accessibilityIdentifier: String
+    ) -> some View {
+        Button {
+            beginEditing(
+                speakerID: speakerID,
+                badge: badge
             )
+        } label: {
+            speakerBadgeView(badge)
         }
+        .buttonStyle(.plain)
+        .disabled(onRenameSpeaker == nil)
+        .help("修改“\(badge.label)”的名称")
+        .accessibilityIdentifier(accessibilityIdentifier)
+    }
+
+    private func beginEditing(
+        speakerID: String,
+        badge: TranscriptSpeakerBadge
+    ) {
+        guard onRenameSpeaker != nil else { return }
+        onBeginSpeakerEditing?()
+        editingSpeaker = TranscriptSpeakerEditingTarget(
+            speakerID: speakerID,
+            currentName: customSpeakerNames[speakerID] ?? badge.label,
+            hasCustomName: customSpeakerNames[speakerID] != nil
+        )
     }
 
     private func speakerBadgeView(_ badge: TranscriptSpeakerBadge) -> some View {
@@ -177,4 +334,19 @@ struct TranscriptView: View {
     private var speakerPalette: [Color] {
         [.purple, .teal, .indigo, .pink, .orange, .mint]
     }
+}
+
+private struct TranscriptSpeakerOption: Identifiable {
+    let speakerID: String
+    let badge: TranscriptSpeakerBadge
+
+    var id: String { speakerID }
+}
+
+private struct TranscriptSpeakerEditingTarget: Identifiable {
+    let speakerID: String
+    let currentName: String
+    let hasCustomName: Bool
+
+    var id: String { speakerID }
 }

@@ -205,18 +205,6 @@ final class MeetingLibraryViewModelTests: XCTestCase {
 
     func testDeleteAndRenameAvailabilityReflectMeetingState() {
         let viewModel = makeViewModel()
-        let deleteExpectations: [RecordingState: Bool] = [
-            .idle: true,
-            .preparing: false,
-            .recording: false,
-            .paused: false,
-            .finalizing: true,
-            .ready: true,
-            .summarizing: true,
-            .summaryReady: true,
-            .archiving: true,
-            .archived: true
-        ]
         let renameExpectations: [RecordingState: Bool] = [
             .idle: true,
             .preparing: true,
@@ -232,10 +220,9 @@ final class MeetingLibraryViewModelTests: XCTestCase {
 
         for state in RecordingState.allCases {
             let meeting = makeMeeting(seconds: 1, state: state)
-            XCTAssertEqual(
+            XCTAssertTrue(
                 viewModel.canDelete(meeting),
-                deleteExpectations[state],
-                "Unexpected delete availability for \(state)"
+                "Expected delete availability for \(state)"
             )
             XCTAssertEqual(
                 viewModel.canRename(meeting),
@@ -245,19 +232,25 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         }
     }
 
-    func testDeleteBusyRecordingDoesNotTouchFilesOrRepository() async {
+    func testDeleteRecordingPreparesThenRemovesFilesAndRepository() async {
         let meeting = makeMeeting(seconds: 100, state: .recording)
         let repository = LibraryRepositorySpy(meetings: [meeting])
         let files = FileDeletionSpy()
-        let viewModel = makeViewModel(repository: repository, files: files)
+        let preparer = DeletionPreparerSpy()
+        let viewModel = makeViewModel(
+            repository: repository,
+            files: files,
+            deletionPreparer: preparer
+        )
         viewModel.load()
 
         await viewModel.deleteMeeting(id: meeting.id)
 
-        XCTAssertEqual(viewModel.errorMessage, "会议正在进行关键操作，请稍后重试。")
+        let preparedIDs = await preparer.requestedIDs()
         let deletedFileIDs = await files.deletedMeetingIDs()
-        XCTAssertTrue(deletedFileIDs.isEmpty)
-        XCTAssertTrue(repository.deletedIDs.isEmpty)
+        XCTAssertEqual(preparedIDs, [meeting.id])
+        XCTAssertEqual(deletedFileIDs, [meeting.id])
+        XCTAssertEqual(repository.deletedIDs, [meeting.id])
     }
 
     func testDeleteStrandedFinalizingMeetingSucceeds() async {
@@ -274,27 +267,59 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         XCTAssertEqual(repository.deletedIDs, [meeting.id])
     }
 
-    func testDeleteFinalizingMeetingIsRejectedWhileCoordinatorOwnsResources() async {
-        let meeting = makeMeeting(seconds: 100, state: .finalizing)
+    func testDeleteStrandedPreparingMeetingRemovesDirectoryAndRepository()
+        async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "MeetingDeletePreparingTests-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fileStore = MeetingFileStore(rootURL: root)
+        let meeting = makeMeeting(seconds: 100, state: .preparing)
+        let meetingDirectory = try await fileStore.prepareMeetingDirectory(
+            for: meeting.id
+        )
+        try Data([0x01]).write(
+            to: meetingDirectory.appendingPathComponent("partial-recording.tmp")
+        )
         let repository = LibraryRepositorySpy(meetings: [meeting])
-        let files = FileDeletionSpy()
-        let guardSpy = DeletionGuardSpy(allowed: false)
         let viewModel = makeViewModel(
             repository: repository,
-            files: files,
-            deletionGuard: guardSpy
+            files: fileStore
         )
         viewModel.load()
 
         await viewModel.deleteMeeting(id: meeting.id)
 
-        let requestedIDs = await guardSpy.requestedIDs()
+        XCTAssertEqual(repository.deletedIDs, [meeting.id])
+        XCTAssertTrue(viewModel.meetings.isEmpty)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: meetingDirectory.path)
+        )
+    }
+
+    func testDeletePreparationFailurePreservesFilesAndRepository() async {
+        let meeting = makeMeeting(seconds: 100, state: .finalizing)
+        let repository = LibraryRepositorySpy(meetings: [meeting])
+        let files = FileDeletionSpy()
+        let preparer = DeletionPreparerSpy(error: TestFailure.expected)
+        let viewModel = makeViewModel(
+            repository: repository,
+            files: files,
+            deletionPreparer: preparer
+        )
+        viewModel.load()
+
+        await viewModel.deleteMeeting(id: meeting.id)
+
+        let requestedIDs = await preparer.requestedIDs()
         let deletedFileIDs = await files.deletedMeetingIDs()
         XCTAssertEqual(requestedIDs, [meeting.id])
         XCTAssertTrue(deletedFileIDs.isEmpty)
         XCTAssertTrue(repository.deletedIDs.isEmpty)
+        XCTAssertEqual(viewModel.errorMessage, "无法完整删除会议，请重试。")
     }
-    func testActiveRenameOrSummaryGateBlocksDeleteWithoutSideEffects() async {
+    func testDeleteWaitsForActiveOperationThenContinues() async {
         for operation in [
             MeetingOperationKind.rename,
             .summarizeArchive
@@ -313,13 +338,21 @@ final class MeetingLibraryViewModelTests: XCTestCase {
             viewModel.load()
             XCTAssertTrue(gate.acquire(operation, for: meeting.id))
 
-            await viewModel.deleteMeeting(id: meeting.id)
+            let deletion = Task {
+                await viewModel.deleteMeeting(id: meeting.id)
+            }
+            await Task.yield()
 
             let deletedFileIDs = await files.deletedMeetingIDs()
             XCTAssertTrue(deletedFileIDs.isEmpty)
             XCTAssertTrue(repository.deletedIDs.isEmpty)
             XCTAssertTrue(playback.stoppedMeetingIDs.isEmpty)
             gate.release(operation, for: meeting.id)
+            await deletion.value
+
+            let completedFileIDs = await files.deletedMeetingIDs()
+            XCTAssertEqual(completedFileIDs, [meeting.id])
+            XCTAssertEqual(repository.deletedIDs, [meeting.id])
         }
     }
 
@@ -375,6 +408,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         )
         let files = OrderedFileDeletionSpy(events: events)
         let playback = PlaybackStopperSpy(events: events)
+        let preparer = DeletionPreparerSpy(events: events)
         let viewModel = MeetingLibraryViewModel(
             repository: repository,
             fileDeleter: files,
@@ -382,6 +416,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
             titleUpdater: TitleUpdaterSpy(),
             operationGate: MeetingOperationGate(),
             playbackStopper: playback,
+            deletionPreparer: preparer,
             systemRequirements: SystemRequirementsStub.supported
         )
         viewModel.load()
@@ -390,6 +425,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
 
         XCTAssertEqual(playback.stoppedMeetingIDs, [meeting.id])
         XCTAssertEqual(events.values, [
+            .prepare(meeting.id),
             .stop(meeting.id),
             .deleteFiles(meeting.id),
             .deleteRepository(meeting.id)
@@ -404,6 +440,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
             events: events
         )
         let playback = PlaybackStopperSpy(events: events)
+        let preparer = DeletionPreparerSpy(events: events)
         let viewModel = MeetingLibraryViewModel(
             repository: repository,
             fileDeleter: OrderedFileDeletionSpy(
@@ -414,6 +451,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
             titleUpdater: TitleUpdaterSpy(),
             operationGate: MeetingOperationGate(),
             playbackStopper: playback,
+            deletionPreparer: preparer,
             systemRequirements: SystemRequirementsStub.supported
         )
         viewModel.load()
@@ -421,6 +459,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         await viewModel.deleteMeeting(id: meeting.id)
 
         XCTAssertEqual(events.values, [
+            .prepare(meeting.id),
             .stop(meeting.id),
             .deleteFiles(meeting.id)
         ])
@@ -428,12 +467,13 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.errorMessage, "无法完整删除会议，请重试。")
     }
 
-    func testRejectedDeleteDoesNotStopUnrelatedPlayback() async {
-        let meeting = makeMeeting(seconds: 100, state: .recording)
+    func testPreparationFailureDoesNotStopUnrelatedPlayback() async {
+        let meeting = makeMeeting(seconds: 100, state: .finalizing)
         let playback = PlaybackStopperSpy()
         let viewModel = makeViewModel(
             repository: LibraryRepositorySpy(meetings: [meeting]),
-            playbackStopper: playback
+            playbackStopper: playback,
+            deletionPreparer: DeletionPreparerSpy(error: TestFailure.expected)
         )
         viewModel.load()
 
@@ -550,6 +590,34 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         await viewModel.startMeeting(mode: .offline)
 
         XCTAssertEqual(viewModel.selectedMeetingID, created.id)
+    }
+
+    func testStartSelectsCreatedMeetingBeforeStarterFinishes() async {
+        let pinned = makeMeeting(seconds: 100, title: "旧置顶会议")
+        pinned.pinnedAt = Date(timeIntervalSince1970: 500)
+        let created = makeMeeting(
+            seconds: 600,
+            title: "未命名会议",
+            state: .preparing
+        )
+        let repository = LibraryRepositorySpy(meetings: [pinned, created])
+        let starter = ProgressiveMeetingStarterSpy(meetingID: created.id)
+        let viewModel = makeViewModel(
+            repository: repository,
+            starter: starter
+        )
+
+        let start = Task {
+            await viewModel.startMeeting(mode: .offline)
+        }
+        await starter.waitUntilCreationNotified()
+
+        XCTAssertEqual(viewModel.selectedMeetingID, created.id)
+        XCTAssertEqual(viewModel.selectedMeeting?.state, .preparing)
+        XCTAssertTrue(viewModel.isStarting)
+
+        await starter.finish()
+        await start.value
     }
 
     func testInsufficientDiskSpaceBlocksMeetingBeforeCoordinatorStarts() async {
@@ -754,6 +822,19 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         XCTAssertEqual(startedModes, [.online])
     }
 
+    func testCapturePipelineFailureRecommendsSmartDiagnosis() {
+        let viewModel = makeViewModel()
+
+        viewModel.reportControlFailure(
+            MeetingCoordinatorError.capturePipelineFailed
+        )
+
+        XCTAssertEqual(
+            viewModel.errorMessage,
+            "未检测到有效录音。请打开设置并运行“智能诊断”。"
+        )
+    }
+
     func testSummaryActionIsDisabledBeforeReady() {
         let viewModel = makeViewModel()
 
@@ -800,7 +881,8 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         titleUpdater: any MeetingTitleUpdating = TitleUpdaterSpy(),
         operationGate: MeetingOperationGate = MeetingOperationGate(),
         playbackStopper: any MeetingPlaybackStopping = PlaybackStopperSpy(),
-        deletionGuard: any MeetingDeletionGuarding = AllowMeetingDeletionGuard(),
+        deletionPreparer: any MeetingDeletionPreparing =
+            NoopMeetingDeletionPreparer(),
         systemRequirements: any SystemRequirementChecking =
             SystemRequirementsStub.supported
     ) -> MeetingLibraryViewModel {
@@ -811,7 +893,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
             titleUpdater: titleUpdater,
             operationGate: operationGate,
             playbackStopper: playbackStopper,
-            deletionGuard: deletionGuard,
+            deletionPreparer: deletionPreparer,
             systemRequirements: systemRequirements,
             recordingsURL: FileManager.default.temporaryDirectory
         )
@@ -887,17 +969,23 @@ final class MeetingLibraryViewModelTests: XCTestCase {
     }
 }
 
-private actor DeletionGuardSpy: MeetingDeletionGuarding {
-    private let allowed: Bool
+private actor DeletionPreparerSpy: MeetingDeletionPreparing {
+    private let error: Error?
+    private let events: DeletionEventRecorder?
     private var ids: [UUID] = []
 
-    init(allowed: Bool) {
-        self.allowed = allowed
+    init(
+        error: Error? = nil,
+        events: DeletionEventRecorder? = nil
+    ) {
+        self.error = error
+        self.events = events
     }
 
-    func canDeleteMeeting(id: UUID) -> Bool {
+    func prepareForDeletion(id: UUID) throws {
         ids.append(id)
-        return allowed
+        events?.append(.prepare(id))
+        if let error { throw error }
     }
 
     func requestedIDs() -> [UUID] {
@@ -1007,6 +1095,7 @@ private enum TestFailure: Error {
 
 private enum DeletionEvent: Equatable {
     case cacheWrite(UUID)
+    case prepare(UUID)
     case stop(UUID)
     case deleteFiles(UUID)
     case deleteRepository(UUID)
@@ -1241,14 +1330,56 @@ private actor MeetingStarterSpy: MeetingStarting {
         self.meetingID = meetingID
     }
 
-    func start(mode: MeetingMode) async throws -> UUID {
+    func start(
+        mode: MeetingMode,
+        onMeetingCreated: @Sendable @escaping (UUID) async -> Void
+    ) async throws -> UUID {
         if let error { throw error }
         startedModes.append(mode)
+        await onMeetingCreated(meetingID)
         return meetingID
     }
 
     func modes() -> [MeetingMode] {
         startedModes
+    }
+}
+
+private actor ProgressiveMeetingStarterSpy: MeetingStarting {
+    private let meetingID: UUID
+    private var creationNotified = false
+    private var creationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var finishContinuation: CheckedContinuation<Void, Never>?
+
+    init(meetingID: UUID) {
+        self.meetingID = meetingID
+    }
+
+    func start(
+        mode: MeetingMode,
+        onMeetingCreated: @Sendable @escaping (UUID) async -> Void
+    ) async throws -> UUID {
+        _ = mode
+        await onMeetingCreated(meetingID)
+        creationNotified = true
+        creationWaiters.forEach { $0.resume() }
+        creationWaiters.removeAll()
+        await withCheckedContinuation { continuation in
+            finishContinuation = continuation
+        }
+        return meetingID
+    }
+
+    func waitUntilCreationNotified() async {
+        if creationNotified { return }
+        await withCheckedContinuation { continuation in
+            creationWaiters.append(continuation)
+        }
+    }
+
+    func finish() {
+        finishContinuation?.resume()
+        finishContinuation = nil
     }
 }
 
@@ -1260,13 +1391,17 @@ private actor SequencedMeetingStarterSpy: MeetingStarting {
         self.outcomes = outcomes
     }
 
-    func start(mode: MeetingMode) async throws -> UUID {
+    func start(
+        mode: MeetingMode,
+        onMeetingCreated: @Sendable @escaping (UUID) async -> Void
+    ) async throws -> UUID {
         startedModes.append(mode)
         guard !outcomes.isEmpty else {
             throw MeetingCoordinatorError.sessionUnavailable
         }
         switch outcomes.removeFirst() {
         case let .success(meetingID):
+            await onMeetingCreated(meetingID)
             return meetingID
         case let .failure(error):
             throw error
@@ -1285,7 +1420,10 @@ private actor BlockingRetryMeetingStarterSpy: MeetingStarting {
     private var retryStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var retryFinishContinuation: CheckedContinuation<Void, Never>?
 
-    func start(mode: MeetingMode) async throws -> UUID {
+    func start(
+        mode: MeetingMode,
+        onMeetingCreated: @Sendable @escaping (UUID) async -> Void
+    ) async throws -> UUID {
         startedModes.append(mode)
         if startedModes.count == 1 {
             throw MeetingCoordinatorError.permissionDenied([.screenRecording])
@@ -1296,6 +1434,7 @@ private actor BlockingRetryMeetingStarterSpy: MeetingStarting {
         await withCheckedContinuation { continuation in
             retryFinishContinuation = continuation
         }
+        await onMeetingCreated(meetingID)
         return meetingID
     }
 

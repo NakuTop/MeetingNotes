@@ -24,10 +24,13 @@ enum ScreenAudioCaptureConfiguration {
         .microphone
     ]
 
-    static func makeStreamConfiguration() -> SCStreamConfiguration {
+    static func makeStreamConfiguration(
+        microphoneDeviceID: String?
+    ) -> SCStreamConfiguration {
         let configuration = SCStreamConfiguration()
         configuration.capturesAudio = true
         configuration.captureMicrophone = true
+        configuration.microphoneCaptureDeviceID = microphoneDeviceID
         configuration.excludesCurrentProcessAudio = true
         configuration.sampleRate = Int(PCMConverter.playbackSampleRate)
         configuration.channelCount = 1
@@ -445,6 +448,7 @@ struct ScreenAudioPacketTimestampNormalizer {
 }
 
 actor ScreenAudioCaptureSource: AudioCaptureSource {
+    private let microphoneDeviceID: String?
     private let mixer: RealtimeAudioMixer
     private let decoder: ScreenAudioSampleDecoder
     private let transcriptionFrameBuilder: ScreenAudioTranscriptionFrameBuilder
@@ -464,11 +468,13 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
     private var isTerminating = false
 
     init(
+        microphoneDeviceID: String? = nil,
         mixer: RealtimeAudioMixer = RealtimeAudioMixer(),
         decoder: ScreenAudioSampleDecoder = ScreenAudioSampleDecoder(),
         transcriptionFrameBuilder: ScreenAudioTranscriptionFrameBuilder =
             ScreenAudioTranscriptionFrameBuilder()
     ) {
+        self.microphoneDeviceID = microphoneDeviceID
         self.mixer = mixer
         self.decoder = decoder
         self.transcriptionFrameBuilder = transcriptionFrameBuilder
@@ -503,7 +509,10 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             excludingApplications: excludedApplications,
             exceptingWindows: []
         )
-        let configuration = ScreenAudioCaptureConfiguration.makeStreamConfiguration()
+        let configuration =
+            ScreenAudioCaptureConfiguration.makeStreamConfiguration(
+                microphoneDeviceID: microphoneDeviceID
+            )
         let streamPair = AsyncThrowingStream<
             CapturedAudioPacket,
             Error
@@ -750,10 +759,15 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
 }
 
 final class ScreenAudioSampleDecoder: @unchecked Sendable {
+    private let audioSampleBufferDecoder:
+        any AudioSampleBufferDecoding
     private let systemConverter: PCMConverter
     private let microphoneConverter: PCMConverter
 
     init(
+        audioSampleBufferDecoder:
+            any AudioSampleBufferDecoding =
+                AudioSampleBufferDecoder(),
         systemConverter: PCMConverter = PCMConverter(
             outputSampleRate: PCMConverter.playbackSampleRate,
             amplitudePolicy: .preserveAmplitude
@@ -763,6 +777,7 @@ final class ScreenAudioSampleDecoder: @unchecked Sendable {
             amplitudePolicy: .preserveAmplitude
         )
     ) {
+        self.audioSampleBufferDecoder = audioSampleBufferDecoder
         self.systemConverter = systemConverter
         self.microphoneConverter = microphoneConverter
     }
@@ -776,36 +791,20 @@ final class ScreenAudioSampleDecoder: @unchecked Sendable {
         _ sampleBuffer: CMSampleBuffer,
         source: RealtimeAudioSource
     ) throws -> CapturedAudioFrame {
-        guard sampleBuffer.isValid else {
-            throw ScreenAudioCaptureError.invalidAudioSample
-        }
-        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let timestamp = CMTimeGetSeconds(presentationTime)
-        guard timestamp.isFinite else {
+        let decoded: DecodedAudioSampleBuffer
+        do {
+            decoded = try audioSampleBufferDecoder.decode(sampleBuffer)
+        } catch {
             throw ScreenAudioCaptureError.invalidAudioSample
         }
         let converter = switch source {
         case .system: systemConverter
         case .microphone: microphoneConverter
         }
-
-        return try sampleBuffer.withAudioBufferList {
-            audioBufferList,
-            _ -> CapturedAudioFrame in
-            guard let description = sampleBuffer.formatDescription?
-                .audioStreamBasicDescription,
-                let format = AVAudioFormat(
-                    standardFormatWithSampleRate: description.mSampleRate,
-                    channels: description.mChannelsPerFrame
-                ),
-                let buffer = AVAudioPCMBuffer(
-                    pcmFormat: format,
-                    bufferListNoCopy: audioBufferList.unsafePointer
-                ) else {
-                throw ScreenAudioCaptureError.invalidAudioSample
-            }
-            return try converter.convert(buffer, timestamp: timestamp)
-        }
+        return try converter.convert(
+            decoded.buffer,
+            timestamp: decoded.timestamp
+        )
     }
 }
 

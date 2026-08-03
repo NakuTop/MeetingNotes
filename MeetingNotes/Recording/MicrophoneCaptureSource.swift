@@ -3,31 +3,52 @@ import Foundation
 
 enum MicrophoneCaptureError: Error, Equatable, Sendable {
     case backlogCapacityExceeded
+    case selectedDeviceUnavailable
+    case defaultDeviceUnavailable
+    case unableToConfigureDevice
+    case unableToStartSession
+    case deviceDisconnected
+    case runtimeFailure
 }
 
 actor MicrophoneCaptureSource: AudioCaptureSource {
     static let productionDrainCapacity = 256
 
-    private let engine: AVAudioEngine
+    private let selectedDeviceID: String?
+    private let sampleProvider: any MicrophoneSampleProviding
     private let storageConverter: PCMConverter
     private let transcriptionConverter: PCMConverter
+    private let drainCapacity: Int
+    private let beforeProcessingSample: @Sendable () async -> Void
     private var continuation: AsyncThrowingStream<CapturedAudioPacket, Error>.Continuation?
     private var isRunning = false
     private var isPaused = false
     private var firstSampleTime: AVAudioFramePosition?
     private var drainQueue: MicrophoneCaptureDrainQueue<MicrophoneCaptureEvent>?
+    private var sampleConsumptionTask: Task<Void, Never>?
 
     init(
-        engine: AVAudioEngine = AVAudioEngine(),
+        selectedDeviceID: String? = nil,
+        sampleProvider: any MicrophoneSampleProviding =
+            AVCaptureMicrophoneSampleProvider(),
         storageConverter: PCMConverter = PCMConverter(
             outputSampleRate: PCMConverter.playbackSampleRate,
             amplitudePolicy: .preserveAmplitude
         ),
-        transcriptionConverter: PCMConverter = PCMConverter(outputSampleRate: PCMConverter.defaultOutputSampleRate)
+        transcriptionConverter: PCMConverter = PCMConverter(
+            outputSampleRate: PCMConverter.defaultOutputSampleRate
+        ),
+        drainCapacity: Int =
+            MicrophoneCaptureSource.productionDrainCapacity,
+        beforeProcessingSample:
+            @escaping @Sendable () async -> Void = {}
     ) {
-        self.engine = engine
+        self.selectedDeviceID = selectedDeviceID
+        self.sampleProvider = sampleProvider
         self.storageConverter = storageConverter
         self.transcriptionConverter = transcriptionConverter
+        self.drainCapacity = max(1, drainCapacity)
+        self.beforeProcessingSample = beforeProcessingSample
     }
 
     func start() async throws -> AsyncThrowingStream<CapturedAudioPacket, Error> {
@@ -36,20 +57,26 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         }
         storageConverter.reset()
         transcriptionConverter.reset()
-        let inputNode = engine.inputNode
-        let format = inputNode.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-            throw AudioCaptureError.invalidInputFormat
+        let streamPair = AsyncThrowingStream<CapturedAudioPacket, Error>.makeStream()
+        let samples: AsyncThrowingStream<MicrophoneSample, Error>
+        do {
+            samples = try await sampleProvider.start(
+                deviceID: selectedDeviceID
+            )
+        } catch {
+            storageConverter.reset()
+            transcriptionConverter.reset()
+            streamPair.continuation.finish(throwing: error)
+            throw error
         }
 
-        let streamPair = AsyncThrowingStream<CapturedAudioPacket, Error>.makeStream()
         continuation = streamPair.continuation
         isRunning = true
         isPaused = false
         firstSampleTime = nil
 
         let drainQueue = MicrophoneCaptureDrainQueue<MicrophoneCaptureEvent>(
-            capacity: Self.productionDrainCapacity,
+            capacity: drainCapacity,
             onOverflow: { [weak self] in
                 Task {
                     await self?.handleBacklogOverflow()
@@ -60,41 +87,18 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
             }
         )
         self.drainQueue = drainQueue
-
-        inputNode.installTap(
-            onBus: 0,
-            bufferSize: 4_096,
-            format: format
-        ) { buffer, time in
-            guard let box = Self.copyBuffer(buffer) else {
-                drainQueue.enqueue(
-                    .failure(AudioCaptureError.unableToCopyInputBuffer)
-                )
-                drainQueue.finishAccepting()
-                return
+        sampleConsumptionTask = Task {
+            do {
+                for try await sample in samples {
+                    guard drainQueue.enqueue(.sample(sample)) else {
+                        return
+                    }
+                }
+                drainQueue.enqueue(.finished)
+            } catch {
+                drainQueue.enqueue(.failure(error))
             }
-            drainQueue.enqueue(
-                .buffer(
-                    box,
-                    sampleTime: time.sampleTime,
-                    sampleRate: time.sampleRate
-                )
-            )
-        }
-
-        engine.prepare()
-        do {
-            try engine.start()
-        } catch {
-            inputNode.removeTap(onBus: 0)
-            await drainQueue.finishAndWait()
-            self.drainQueue = nil
-            isRunning = false
-            storageConverter.reset()
-            transcriptionConverter.reset()
-            continuation?.finish(throwing: AudioCaptureError.engineStartFailed)
-            continuation = nil
-            throw AudioCaptureError.engineStartFailed
+            drainQueue.finishAccepting()
         }
         return streamPair.stream
     }
@@ -106,7 +110,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         guard !isPaused else {
             return
         }
-        engine.pause()
+        try await sampleProvider.pause()
         isPaused = true
     }
 
@@ -118,10 +122,10 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
             return
         }
         do {
-            try engine.start()
+            try await sampleProvider.resume()
             isPaused = false
         } catch {
-            throw AudioCaptureError.engineStartFailed
+            throw error
         }
     }
 
@@ -134,75 +138,81 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
             transcriptionConverter.reset()
             return
         }
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
         drainQueue?.finishAccepting()
+        await sampleProvider.stop()
+        await sampleConsumptionTask?.value
+        sampleConsumptionTask = nil
         await drainQueue?.waitUntilDrained()
         drainQueue = nil
-        continuation?.finish()
-        continuation = nil
         isRunning = false
         isPaused = false
+        continuation?.finish()
+        continuation = nil
         firstSampleTime = nil
         storageConverter.reset()
         transcriptionConverter.reset()
     }
 
-    private func consume(_ event: MicrophoneCaptureEvent) {
+    private func consume(_ event: MicrophoneCaptureEvent) async {
         switch event {
-        case let .buffer(box, sampleTime, sampleRate):
-            process(
-                box,
-                sampleTime: sampleTime,
-                sampleRate: sampleRate
-            )
+        case let .sample(sample):
+            await process(sample)
         case let .failure(error):
-            finishAfterFailure(error)
+            await finishAfterFailure(error)
+        case .finished:
+            await finishAfterProviderCompletion()
         }
     }
 
     private func handleBacklogOverflow() async {
         guard isRunning else { return }
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
-        drainQueue?.finishAccepting()
-        await drainQueue?.waitUntilDrained()
-        guard isRunning else { return }
+        isRunning = false
+        isPaused = false
+        let draining = drainQueue
         drainQueue = nil
+        draining?.finishAccepting()
+        await sampleProvider.stop()
+        sampleConsumptionTask = nil
         continuation?.finish(
             throwing: MicrophoneCaptureError.backlogCapacityExceeded
         )
         continuation = nil
-        isRunning = false
-        isPaused = false
         firstSampleTime = nil
         storageConverter.reset()
         transcriptionConverter.reset()
+        if let draining {
+            Task {
+                await draining.waitUntilDrained()
+            }
+        }
     }
 
-    private func process(
-        _ box: AudioBufferBox,
-        sampleTime: AVAudioFramePosition,
-        sampleRate: Double
-    ) {
+    private func process(_ sample: MicrophoneSample) async {
+        guard isRunning else {
+            return
+        }
+        await beforeProcessingSample()
         guard isRunning else {
             return
         }
         if firstSampleTime == nil {
-            firstSampleTime = sampleTime
+            firstSampleTime = sample.sampleTime
         }
-        let origin = firstSampleTime ?? sampleTime
-        let timestamp = sampleRate > 0
-            ? max(0, Double(sampleTime - origin) / sampleRate)
+        let origin = firstSampleTime ?? sample.sampleTime
+        let timestamp = sample.sampleRate > 0
+            ? max(
+                0,
+                Double(sample.sampleTime - origin) / sample.sampleRate
+            )
             : 0
 
         do {
             let storageFrame = try storageConverter.convert(
-                box.buffer,
+                sample.buffer,
                 timestamp: timestamp
             )
             let transcriptionFrame = try transcriptionConverter.convert(
-                box.buffer,
+                sample.buffer,
                 timestamp: timestamp
             )
             let frame = CapturedAudioFrame(
@@ -215,7 +225,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
             )
             continuation?.yield(Self.packet(from: frame))
         } catch {
-            finishAfterFailure(error)
+            await finishAfterFailure(error)
         }
     }
 
@@ -225,39 +235,31 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         CapturedAudioPacket(master: frame, sourceFrames: [:])
     }
 
-    private func finishAfterFailure(_ error: Error) {
+    private func finishAfterFailure(_ error: Error) async {
         guard isRunning else {
             return
         }
-        engine.stop()
-        engine.inputNode.removeTap(onBus: 0)
-        drainQueue?.finishAccepting()
-        continuation?.finish(throwing: error)
-        continuation = nil
         isRunning = false
         isPaused = false
+        drainQueue?.finishAccepting()
+        await sampleProvider.stop()
+        continuation?.finish(throwing: error)
+        continuation = nil
         firstSampleTime = nil
         storageConverter.reset()
         transcriptionConverter.reset()
     }
 
-    nonisolated private static func copyBuffer(
-        _ source: AVAudioPCMBuffer
-    ) -> AudioBufferBox? {
-        guard let sourceChannels = source.floatChannelData,
-              let copy = AVAudioPCMBuffer(
-                  pcmFormat: source.format,
-                  frameCapacity: source.frameLength
-              ),
-              let copyChannels = copy.floatChannelData else {
-            return nil
-        }
-        copy.frameLength = source.frameLength
-        let byteCount = Int(source.frameLength) * MemoryLayout<Float>.size
-        for channel in 0..<Int(source.format.channelCount) {
-            memcpy(copyChannels[channel], sourceChannels[channel], byteCount)
-        }
-        return AudioBufferBox(copy)
+    private func finishAfterProviderCompletion() async {
+        guard isRunning else { return }
+        isRunning = false
+        isPaused = false
+        await sampleProvider.stop()
+        continuation?.finish()
+        continuation = nil
+        firstSampleTime = nil
+        storageConverter.reset()
+        transcriptionConverter.reset()
     }
 }
 
@@ -371,18 +373,7 @@ private final class MicrophoneCaptureDrainState<Element: Sendable>:
 }
 
 private enum MicrophoneCaptureEvent: @unchecked Sendable {
-    case buffer(
-        AudioBufferBox,
-        sampleTime: AVAudioFramePosition,
-        sampleRate: Double
-    )
-    case failure(AudioCaptureError)
-}
-
-private final class AudioBufferBox: @unchecked Sendable {
-    let buffer: AVAudioPCMBuffer
-
-    init(_ buffer: AVAudioPCMBuffer) {
-        self.buffer = buffer
-    }
+    case sample(MicrophoneSample)
+    case failure(Error)
+    case finished
 }

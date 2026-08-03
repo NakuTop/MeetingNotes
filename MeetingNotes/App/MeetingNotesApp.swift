@@ -56,7 +56,11 @@ struct MeetingNotesApp: App {
         Settings {
             switch startupState {
             case let .ready(container):
-                SettingsView(viewModel: container.settingsViewModel)
+                SettingsView(
+                    viewModel: container.settingsViewModel,
+                    transcriptionModelViewModel:
+                        container.transcriptionModelViewModel
+                )
             case .failed:
                 ContentUnavailableView(
                     "设置暂不可用",

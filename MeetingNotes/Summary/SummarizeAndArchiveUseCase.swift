@@ -95,11 +95,9 @@ extension SummarizeAndArchiving {
 @MainActor
 final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
     private let repository: MeetingRepository
-    private let credentialStore: any CredentialStore
     private let settingsStore: AppSettingsStore
-    private let summaryGenerator: any MeetingSummaryGenerating
-    private let notionArchiver: any MeetingNotionArchiving
     private let operationGate: MeetingOperationGate
+    private let documentsUseCase: MeetingDocumentsUseCase
 
     init(
         repository: MeetingRepository,
@@ -107,14 +105,28 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
         settingsStore: AppSettingsStore,
         summaryGenerator: any MeetingSummaryGenerating,
         notionArchiver: any MeetingNotionArchiving,
-        operationGate: MeetingOperationGate
+        operationGate: MeetingOperationGate,
+        documentsUseCase: MeetingDocumentsUseCase? = nil
     ) {
         self.repository = repository
-        self.credentialStore = credentialStore
         self.settingsStore = settingsStore
-        self.summaryGenerator = summaryGenerator
-        self.notionArchiver = notionArchiver
         self.operationGate = operationGate
+        self.documentsUseCase = documentsUseCase
+            ?? MeetingDocumentsUseCase(
+                repository: repository,
+                credentialStore: credentialStore,
+                settingsStore: settingsStore,
+                summaryGenerator: summaryGenerator,
+                detailedMinutesGenerator:
+                    LiveMeetingDetailedMinutesGenerator(
+                        httpClient: URLSessionHTTPClient()
+                    ),
+                archiver: LegacyMeetingDocumentNotionArchiver(
+                    repository: repository,
+                    archiver: notionArchiver
+                ),
+                operationGate: operationGate
+            )
     }
 
     func execute(meetingID: UUID) async throws {
@@ -125,13 +137,6 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
         meetingID: UUID,
         onProgress: @escaping (RecordingState) -> Void
     ) async throws {
-        guard operationGate.acquire(.summarizeArchive, for: meetingID) else {
-            throw SummarizeAndArchiveError.operationInProgress
-        }
-        defer {
-            operationGate.release(.summarizeArchive, for: meetingID)
-        }
-
         let meeting = try repository.meeting(id: meetingID)
         switch meeting.state {
         case .archived:
@@ -141,202 +146,109 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
             throw SummarizeAndArchiveError.operationInProgress
         case .summaryReady:
             onProgress(.summaryReady)
-            try await archiveExistingSummary(
-                meetingID: meetingID,
-                onProgress: onProgress
-            )
-        case .ready:
-            if meeting.summary == nil {
-                try await generateSummary(
+            guard settingsStore.isNotionArchivingEnabled else { return }
+            onProgress(.archiving)
+            do {
+                try await documentsUseCase.retryArchive(
                     meetingID: meetingID,
-                    onProgress: onProgress
+                    kind: .summary
                 )
-            } else {
-                try repository.updateMeetingState(
-                    id: meetingID,
-                    state: .summaryReady
+                onProgress(.archived)
+            } catch {
+                onProgress(
+                    (try? repository.meeting(id: meetingID).state)
+                        ?? .summaryReady
                 )
-                onProgress(.summaryReady)
+                throw Self.legacyError(error)
             }
-            try await archiveExistingSummary(
-                meetingID: meetingID,
-                onProgress: onProgress
-            )
+        case .ready:
+            if meeting.summary != nil {
+                onProgress(.summaryReady)
+                guard settingsStore.isNotionArchivingEnabled else {
+                    guard operationGate.acquire(
+                        .summarizeArchive,
+                        for: meetingID
+                    ) else {
+                        throw SummarizeAndArchiveError.operationInProgress
+                    }
+                    defer {
+                        operationGate.release(
+                            .summarizeArchive,
+                            for: meetingID
+                        )
+                    }
+                    do {
+                        try repository.updateMeetingState(
+                            id: meetingID,
+                            state: .summaryReady
+                        )
+                    } catch {
+                        throw SummarizeAndArchiveError.localPersistenceFailed
+                    }
+                    return
+                }
+                do {
+                    onProgress(.archiving)
+                    try await documentsUseCase.retryArchive(
+                        meetingID: meetingID,
+                        kind: .summary
+                    )
+                    onProgress(.archived)
+                } catch {
+                    onProgress(
+                        (try? repository.meeting(id: meetingID).state)
+                            ?? .summaryReady
+                    )
+                    throw Self.legacyError(error)
+                }
+                return
+            }
+            onProgress(.summarizing)
+            do {
+                try await documentsUseCase.generate(
+                    meetingID: meetingID,
+                    kind: .summary
+                )
+                onProgress(
+                    try repository.meeting(id: meetingID).state
+                )
+            } catch {
+                onProgress(
+                    (try? repository.meeting(id: meetingID).state) ?? .ready
+                )
+                throw Self.legacyError(error)
+            }
         default:
             throw SummarizeAndArchiveError.invalidState(meeting.state)
         }
     }
 
-    private func generateSummary(
-        meetingID: UUID,
-        onProgress: (RecordingState) -> Void
-    ) async throws {
-        let meeting = try repository.meeting(id: meetingID)
-        let content = contentInputs(for: meeting)
-        guard !content.transcripts.isEmpty else {
-            throw SummarizeAndArchiveError.noFinalTranscript
+    private static func legacyError(_ error: Error) -> Error {
+        guard let error = error as? MeetingDocumentsError else {
+            return error
         }
-        guard let apiKey = try nonemptyCredential(.deepSeekAPIKey) else {
-            throw SummarizeAndArchiveError.missingDeepSeekCredential
-        }
-
-        try repository.updateMeetingState(id: meetingID, state: .summarizing)
-        onProgress(.summarizing)
-        let generated: GeneratedMeetingSummary
-        do {
-            generated = try await summaryGenerator.summarize(
-                apiKey: apiKey,
-                input: MeetingSummaryInput(
-                    title: meeting.title,
-                    transcripts: content.transcripts,
-                    bookmarks: content.bookmarks
-                ),
-                model: settingsStore.deepSeekModel
-            )
-        } catch {
-            try? repository.updateMeetingState(id: meetingID, state: .ready)
-            onProgress(.ready)
-            throw SummarizeAndArchiveError.summaryFailed
-        }
-
-        do {
-            try repository.saveSummary(
-                meetingID: meetingID,
-                overview: generated.overview,
-                keyPoints: generated.keyPoints,
-                decisions: generated.decisions,
-                structuredActionItems: generated.actionItems,
-                bookmarkInsights: generated.bookmarkInsights,
-                model: settingsStore.deepSeekModel
-            )
-            try repository.applySuggestedTitle(
-                meetingID: meetingID,
-                suggestedTitle: generated.suggestedTitle
-            )
-            try repository.updateMeetingState(
-                id: meetingID,
-                state: .summaryReady
-            )
-            onProgress(.summaryReady)
-        } catch {
-            try? repository.updateMeetingState(id: meetingID, state: .ready)
-            onProgress(.ready)
-            throw SummarizeAndArchiveError.localPersistenceFailed
+        return switch error {
+        case .noFinalTranscript:
+            SummarizeAndArchiveError.noFinalTranscript
+        case .missingDeepSeekCredential:
+            SummarizeAndArchiveError.missingDeepSeekCredential
+        case .missingNotionCredential:
+            SummarizeAndArchiveError.missingNotionCredential
+        case .invalidNotionPageURL:
+            SummarizeAndArchiveError.invalidNotionPageURL
+        case .missingLocalDocument:
+            SummarizeAndArchiveError.missingLocalSummary
+        case .invalidGeneratedDocument, .generationFailed:
+            SummarizeAndArchiveError.summaryFailed
+        case .archiveFailed:
+            SummarizeAndArchiveError.archiveFailed
+        case .localPersistenceFailed:
+            SummarizeAndArchiveError.localPersistenceFailed
+        case .operationInProgress:
+            SummarizeAndArchiveError.operationInProgress
+        case .invalidState(let state):
+            SummarizeAndArchiveError.invalidState(state)
         }
     }
 
-    private func archiveExistingSummary(
-        meetingID: UUID,
-        onProgress: (RecordingState) -> Void
-    ) async throws {
-        guard settingsStore.isNotionArchivingEnabled else { return }
-        guard let notionToken = try nonemptyCredential(.notionToken) else {
-            throw SummarizeAndArchiveError.missingNotionCredential
-        }
-        guard let parentPageID = NotionPageLinkParser.parse(
-            settingsStore.notionParentPageURL
-        ) else {
-            throw SummarizeAndArchiveError.invalidNotionPageURL
-        }
-
-        let meeting = try repository.meeting(id: meetingID)
-        guard let localSummary = meeting.summary else {
-            throw SummarizeAndArchiveError.missingLocalSummary
-        }
-        let content = contentInputs(for: meeting)
-        let generatedSummary = GeneratedMeetingSummary(
-            suggestedTitle: meeting.suggestedTitle ?? meeting.title,
-            overview: localSummary.overview,
-            keyPoints: localSummary.keyPoints,
-            decisions: localSummary.decisions,
-            actionItems: localSummary.actionItemRecords,
-            bookmarkInsights: localSummary.bookmarkInsights
-        )
-        let pageContent = NotionMeetingPageContent(
-            title: meeting.title,
-            startedAt: meeting.startedAt,
-            duration: meeting.activeDuration,
-            mode: meeting.mode,
-            summary: generatedSummary,
-            bookmarks: content.bookmarks,
-            transcripts: content.transcripts
-        )
-
-        try repository.updateMeetingState(id: meetingID, state: .archiving)
-        onProgress(.archiving)
-        do {
-            _ = try await notionArchiver.archive(
-                token: notionToken,
-                meetingID: meetingID,
-                parentPageID: parentPageID,
-                content: pageContent
-            )
-            try repository.updateMeetingState(id: meetingID, state: .archived)
-            onProgress(.archived)
-        } catch {
-            try? repository.updateMeetingState(
-                id: meetingID,
-                state: .summaryReady
-            )
-            onProgress(.summaryReady)
-            throw SummarizeAndArchiveError.archiveFailed
-        }
-    }
-
-    private func contentInputs(
-        for meeting: MeetingRecord
-    ) -> (
-        transcripts: [MeetingTranscriptInput],
-        bookmarks: [MeetingBookmarkInput]
-    ) {
-        let transcripts = meeting.transcripts
-            .compactMap { transcript -> MeetingTranscriptInput? in
-                guard transcript.isFinal,
-                      let text = TranscriptTextSanitizer.nonEmpty(
-                          transcript.text
-                      ) else {
-                    return nil
-                }
-                return MeetingTranscriptInput(
-                    startTime: transcript.startTime,
-                    endTime: transcript.endTime,
-                    text: text
-                )
-            }
-            .sorted {
-                if $0.startTime == $1.startTime {
-                    return $0.endTime < $1.endTime
-                }
-                return $0.startTime < $1.startTime
-            }
-        let bookmarks = meeting.bookmarks
-            .sorted { $0.timestamp < $1.timestamp }
-            .map { bookmark in
-                let window = BookmarkWindow(bookmarkTime: bookmark.timestamp)
-                let excerpt = transcripts
-                    .filter {
-                        window.intersects(
-                            transcriptStart: $0.startTime,
-                            transcriptEnd: $0.endTime
-                        )
-                    }
-                    .map(\.text)
-                    .joined(separator: " ")
-                return MeetingBookmarkInput(
-                    timestamp: bookmark.timestamp,
-                    excerpt: excerpt
-                )
-            }
-        return (transcripts, bookmarks)
-    }
-
-    private func nonemptyCredential(
-        _ key: CredentialKey
-    ) throws -> String? {
-        guard let value = try credentialStore.value(for: key) else {
-            return nil
-        }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
 }

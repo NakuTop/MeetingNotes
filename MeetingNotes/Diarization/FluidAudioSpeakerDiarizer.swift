@@ -45,7 +45,7 @@ struct DiarizationDiskAudioSource: StreamingAudioSampleSource {
         guard mappedData.count.isMultiple(
             of: MemoryLayout<Float>.stride
         ) else {
-            throw SpeakerDiarizationError.inferenceFailed
+            throw SpeakerDiarizationError.conversionFailed
         }
         self.mappedData = mappedData
         self.fileURL = fileURL
@@ -80,9 +80,16 @@ struct DiarizationDiskAudioSource: StreamingAudioSampleSource {
 }
 
 actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
+    private static let logger = Logger(
+        subsystem: "MeetingNotes",
+        category: "SpeakerDiarization"
+    )
     private static let sourceSampleRate = 48_000
     private static let targetSampleRate = 16_000
     private static let bufferFrameCount: AVAudioFrameCount = 16_384
+    // Some CAF recordings declare one final 48 kHz encoder packet whose
+    // decoded payload is shorter. Never synthesize more than that one packet.
+    private static let maximumDecodedTailShortfallFrames: Int64 = 1_024
     // FluidAudio 0.12.6 diarization timestamps follow the segmentation
     // model's output grid over its 10-second window, rather than exact 16 kHz
     // sample positions. One tenth of a second is a conservative frame bound.
@@ -140,8 +147,21 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
             timelineAudio = try await makeTimelineAudio(for: source)
         } catch is CancellationError {
             throw CancellationError()
+        } catch SpeakerDiarizationError.invalidSource {
+            Self.logger.error(
+                "stage=source_validation outcome=failed segment_count=\(source.resolvedSegments.count, privacy: .public)"
+            )
+            throw SpeakerDiarizationError.invalidSource
+        } catch SpeakerDiarizationError.timelineAssemblyFailed {
+            Self.logger.error(
+                "stage=timeline_assembly outcome=failed segment_count=\(source.resolvedSegments.count, privacy: .public)"
+            )
+            throw SpeakerDiarizationError.timelineAssemblyFailed
         } catch {
-            throw SpeakerDiarizationError.inferenceFailed
+            Self.logger.error(
+                "stage=timeline_assembly outcome=failed segment_count=\(source.resolvedSegments.count, privacy: .public)"
+            )
+            throw SpeakerDiarizationError.timelineAssemblyFailed
         }
         defer { timelineAudio.cleanup() }
 
@@ -154,24 +174,56 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
                 )
         } catch is CancellationError {
             throw CancellationError()
+        } catch SpeakerDiarizationError.conversionFailed {
+            Self.logger.error(
+                "stage=conversion outcome=failed duration_ms=\(Int(timelineAudio.duration * 1_000), privacy: .public)"
+            )
+            throw SpeakerDiarizationError.conversionFailed
         } catch {
-            throw SpeakerDiarizationError.inferenceFailed
+            Self.logger.error(
+                "stage=conversion outcome=failed duration_ms=\(Int(timelineAudio.duration * 1_000), privacy: .public)"
+            )
+            throw SpeakerDiarizationError.conversionFailed
         }
         defer { diskSource.cleanup() }
 
+        let intervals: [SpeakerInterval]
         do {
-            let intervals = try await engine.process(
+            intervals = try await engine.process(
                 audioSource: diskSource,
                 audioLoadingSeconds: loadDuration
             )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch SpeakerDiarizationError.inferenceFailed {
+            Self.logger.error(
+                "stage=inference outcome=failed sample_count=\(diskSource.sampleCount, privacy: .public)"
+            )
+            throw SpeakerDiarizationError.inferenceFailed
+        } catch {
+            Self.logger.error(
+                "stage=inference outcome=failed sample_count=\(diskSource.sampleCount, privacy: .public)"
+            )
+            throw SpeakerDiarizationError.inferenceFailed
+        }
+
+        do {
             return try validatedIntervals(
                 intervals,
                 timelineDuration: timelineAudio.duration
             )
         } catch is CancellationError {
             throw CancellationError()
+        } catch SpeakerDiarizationError.resultValidationFailed {
+            Self.logger.error(
+                "stage=result_validation outcome=failed interval_count=\(intervals.count, privacy: .public)"
+            )
+            throw SpeakerDiarizationError.resultValidationFailed
         } catch {
-            throw SpeakerDiarizationError.inferenceFailed
+            Self.logger.error(
+                "stage=result_validation outcome=failed interval_count=\(intervals.count, privacy: .public)"
+            )
+            throw SpeakerDiarizationError.resultValidationFailed
         }
     }
 
@@ -240,7 +292,15 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
             modelsArePrepared = true
         } catch is CancellationError {
             throw CancellationError()
+        } catch SpeakerDiarizationError.modelPreparationFailed {
+            Self.logger.error(
+                "stage=model_preparation outcome=failed"
+            )
+            throw SpeakerDiarizationError.modelPreparationFailed
         } catch {
+            Self.logger.error(
+                "stage=model_preparation outcome=failed"
+            )
             throw SpeakerDiarizationError.modelPreparationFailed
         }
     }
@@ -304,13 +364,13 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
               timelineLimits.maximumSingleGapFrames
                 <= timelineLimits.maximumTimelineFrames,
               timelineLimits.maximumTimelineByteCount > 0 else {
-            throw SpeakerDiarizationError.inferenceFailed
+            throw SpeakerDiarizationError.invalidSource
         }
 
         var checkedSourceFrames: Int64 = 0
         for frameCount in source.segmentFrameCounts {
             guard frameCount > 0 else {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.invalidSource
             }
             let addition = checkedSourceFrames.addingReportingOverflow(
                 frameCount
@@ -318,12 +378,12 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
             guard !addition.overflow,
                   addition.partialValue
                     <= timelineLimits.maximumTimelineFrames else {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.invalidSource
             }
             checkedSourceFrames = addition.partialValue
         }
         guard checkedSourceFrames == source.totalFrames else {
-            throw SpeakerDiarizationError.inferenceFailed
+            throw SpeakerDiarizationError.invalidSource
         }
 
         let maximumStartTime =
@@ -338,7 +398,7 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
             guard startTime.isFinite,
                   startTime >= 0,
                   startTime <= maximumStartTime else {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.invalidSource
             }
             let startFrameValue =
                 startTime * Double(Self.sourceSampleRate)
@@ -346,13 +406,13 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
                   startFrameValue >= 0,
                   startFrameValue
                     <= Double(timelineLimits.maximumTimelineFrames) else {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.invalidSource
             }
             let roundedStartFrame = startFrameValue.rounded()
             guard roundedStartFrame >= 0,
                   roundedStartFrame
                     <= Double(timelineLimits.maximumTimelineFrames) else {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.invalidSource
             }
             let startFrame = Int64(roundedStartFrame)
 
@@ -361,7 +421,7 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
                   gap.partialValue >= 0,
                   gap.partialValue
                     <= timelineLimits.maximumSingleGapFrames else {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.invalidSource
             }
 
             let frameCount = source.segmentFrameCounts[index]
@@ -369,7 +429,7 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
             guard !end.overflow,
                   end.partialValue
                     <= timelineLimits.maximumTimelineFrames else {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.invalidSource
             }
             let byteCount = end.partialValue
                 .multipliedReportingOverflow(
@@ -378,7 +438,7 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
             guard !byteCount.overflow,
                   byteCount.partialValue
                     <= timelineLimits.maximumTimelineByteCount else {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.invalidSource
             }
 
             segments.append(
@@ -404,10 +464,16 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
         expectedFormat: AVAudioFormat,
         to outputFile: AVAudioFile
     ) async throws {
-        try await sourceLoader.confirmSegmentIdentity(
-            in: source,
-            segmentIndex: segmentIndex
-        )
+        do {
+            try await sourceLoader.confirmSegmentIdentity(
+                in: source,
+                segmentIndex: segmentIndex
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw SpeakerDiarizationError.invalidSource
+        }
         let inputFile = try AVAudioFile(
             forReading: source.segmentURLs[segmentIndex]
         )
@@ -418,7 +484,10 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
             )
         } catch {
             inputFile.close()
-            throw error
+            if error is CancellationError {
+                throw CancellationError()
+            }
+            throw SpeakerDiarizationError.invalidSource
         }
         defer { inputFile.close() }
 
@@ -426,31 +495,62 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
         guard inputFormat.sampleRate == expectedFormat.sampleRate,
               inputFormat.channelCount == expectedFormat.channelCount,
               inputFormat.commonFormat == .pcmFormatFloat32,
-              inputFile.length == expectedFrames else {
-            throw SpeakerDiarizationError.inferenceFailed
+              inputFile.length <= expectedFrames else {
+            throw SpeakerDiarizationError.timelineAssemblyFailed
         }
         guard let buffer = AVAudioPCMBuffer(
             pcmFormat: expectedFormat,
             frameCapacity: Self.bufferFrameCount
         ) else {
-            throw SpeakerDiarizationError.inferenceFailed
+            throw SpeakerDiarizationError.timelineAssemblyFailed
         }
 
-        var framesRead: Int64 = 0
-        while framesRead < expectedFrames {
+        var progress = try DiarizationSegmentReadProgress(
+            expectedFrames: expectedFrames
+        )
+        while progress.shouldRead {
             try Task.checkCancellation()
             let requested = AVAudioFrameCount(
                 min(
                     Int64(Self.bufferFrameCount),
-                    expectedFrames - framesRead
+                    progress.remainingFrames
                 )
             )
-            try inputFile.read(into: buffer, frameCount: requested)
-            guard buffer.frameLength == requested else {
-                throw SpeakerDiarizationError.inferenceFailed
+            buffer.frameLength = 0
+            let decodedFrames: Int64
+            if progress.framesRead > 0,
+               inputFile.framePosition >= inputFile.length {
+                decodedFrames = 0
+            } else {
+                try inputFile.read(into: buffer, frameCount: requested)
+                decodedFrames = Int64(buffer.frameLength)
             }
-            try outputFile.write(from: buffer)
-            framesRead += Int64(requested)
+            let decision = try progress.recordRead(
+                requestedFrames: Int64(requested),
+                decodedFrames: decodedFrames
+            )
+            if decodedFrames > 0 {
+                try outputFile.write(from: buffer)
+            }
+            if decision == .endOfFile {
+                break
+            }
+        }
+
+        let paddingFrames = try progress.paddingFrames(
+            maximum: Self.maximumDecodedTailShortfallFrames
+        )
+        try writeSilence(
+            frameCount: paddingFrames,
+            format: expectedFormat,
+            to: outputFile
+        )
+        let completedFrames = progress.framesRead.addingReportingOverflow(
+            paddingFrames
+        )
+        guard !completedFrames.overflow,
+              completedFrames.partialValue == expectedFrames else {
+            throw SpeakerDiarizationError.timelineAssemblyFailed
         }
     }
 
@@ -460,7 +560,7 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
         to outputFile: AVAudioFile
     ) throws {
         guard frameCount >= 0 else {
-            throw SpeakerDiarizationError.inferenceFailed
+            throw SpeakerDiarizationError.timelineAssemblyFailed
         }
         guard frameCount > 0 else {
             return
@@ -469,7 +569,7 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
             pcmFormat: format,
             frameCapacity: Self.bufferFrameCount
         ), let channel = buffer.floatChannelData?.pointee else {
-            throw SpeakerDiarizationError.inferenceFailed
+            throw SpeakerDiarizationError.timelineAssemblyFailed
         }
 
         var remaining = frameCount
@@ -495,7 +595,7 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
             channels: 1,
             interleaved: false
         ) else {
-            throw SpeakerDiarizationError.inferenceFailed
+            throw SpeakerDiarizationError.timelineAssemblyFailed
         }
         return format
     }
@@ -527,7 +627,7 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
             )
             guard source.sampleCount == convertedCount,
                   source.sampleCount > 0 else {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.conversionFailed
             }
             return (
                 source,
@@ -554,14 +654,14 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
                   interval.endTime
                     <= timelineDuration
                         + Self.modelFrameEndTolerance else {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.resultValidationFailed
             }
             let clampedEnd = min(
                 interval.endTime,
                 timelineDuration
             )
             guard clampedEnd > interval.startTime else {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.resultValidationFailed
             }
             return SpeakerInterval(
                 rawSpeakerID: speakerID,
@@ -569,6 +669,80 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
                 endTime: clampedEnd
             )
         }
+    }
+}
+
+struct DiarizationSegmentReadProgress: Sendable {
+    enum Decision: Equatable, Sendable {
+        case continueReading
+        case endOfFile
+        case complete
+    }
+
+    let expectedFrames: Int64
+    private(set) var framesRead: Int64 = 0
+    private(set) var reachedEndOfFile = false
+
+    var remainingFrames: Int64 {
+        expectedFrames - framesRead
+    }
+
+    var shouldRead: Bool {
+        !reachedEndOfFile && framesRead < expectedFrames
+    }
+
+    init(expectedFrames: Int64) throws {
+        guard expectedFrames > 0 else {
+            throw SpeakerDiarizationError.timelineAssemblyFailed
+        }
+        self.expectedFrames = expectedFrames
+    }
+
+    mutating func recordRead(
+        requestedFrames: Int64,
+        decodedFrames: Int64
+    ) throws -> Decision {
+        guard !reachedEndOfFile,
+              framesRead < expectedFrames,
+              requestedFrames > 0,
+              requestedFrames <= remainingFrames,
+              decodedFrames >= 0,
+              decodedFrames <= requestedFrames else {
+            throw SpeakerDiarizationError.timelineAssemblyFailed
+        }
+        let updatedFrames = framesRead.addingReportingOverflow(
+            decodedFrames
+        )
+        guard !updatedFrames.overflow,
+              updatedFrames.partialValue <= expectedFrames else {
+            throw SpeakerDiarizationError.timelineAssemblyFailed
+        }
+        framesRead = updatedFrames.partialValue
+        if decodedFrames == 0 {
+            reachedEndOfFile = true
+            return .endOfFile
+        }
+        if framesRead == expectedFrames {
+            return .complete
+        }
+        return .continueReading
+    }
+
+    func paddingFrames(maximum: Int64) throws -> Int64 {
+        guard framesRead > 0,
+              reachedEndOfFile || framesRead == expectedFrames,
+              maximum >= 0 else {
+            throw SpeakerDiarizationError.timelineAssemblyFailed
+        }
+        let shortfall = expectedFrames.subtractingReportingOverflow(
+            framesRead
+        )
+        guard !shortfall.overflow,
+              shortfall.partialValue >= 0,
+              shortfall.partialValue <= maximum else {
+            throw SpeakerDiarizationError.timelineAssemblyFailed
+        }
+        return shortfall.partialValue
     }
 }
 
@@ -650,7 +824,7 @@ private struct AVAudioDiarizationConverter:
             atPath: rawOutputURL.path,
             contents: nil
         ) else {
-            throw SpeakerDiarizationError.inferenceFailed
+            throw SpeakerDiarizationError.conversionFailed
         }
         let handle = try FileHandle(forWritingTo: rawOutputURL)
         defer { try? handle.close() }
@@ -671,7 +845,7 @@ private struct AVAudioDiarizationConverter:
             pcmFormat: audioFile.processingFormat,
             frameCapacity: inputCapacity
         ) else {
-            throw SpeakerDiarizationError.inferenceFailed
+            throw SpeakerDiarizationError.conversionFailed
         }
         let estimatedOutputFrames = AVAudioFrameCount(
             (
@@ -684,7 +858,7 @@ private struct AVAudioDiarizationConverter:
             pcmFormat: converter.outputFormat,
             frameCapacity: max(1_024, estimatedOutputFrames)
         ) else {
-            throw SpeakerDiarizationError.inferenceFailed
+            throw SpeakerDiarizationError.conversionFailed
         }
 
         let inputComplete = OSAllocatedUnfairLock(initialState: false)
@@ -732,16 +906,16 @@ private struct AVAudioDiarizationConverter:
                 withInputFrom: inputBlock
             )
             if conversionError != nil {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.conversionFailed
             }
             if readError.withLock({ $0 }) != nil {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.conversionFailed
             }
             let producedFrames = Int(outputBuffer.frameLength)
             if producedFrames > 0 {
                 guard let samples =
                     outputBuffer.floatChannelData?.pointee else {
-                    throw SpeakerDiarizationError.inferenceFailed
+                    throw SpeakerDiarizationError.conversionFailed
                 }
                 try outputHandle.write(
                     contentsOf: Data(

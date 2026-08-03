@@ -52,7 +52,7 @@ final class NotionClientTests: XCTestCase {
         }
     }
 
-    func testCreatesChildPageAndAppendsNotionBlocks() async throws {
+    func testCreatesChildPageAndAppendReturnsCreatedBlockIDs() async throws {
         let parentID = try XCTUnwrap(
             UUID(uuidString: "ABCDEF12-3456-7890-ABCD-EF1234567890")
         )
@@ -66,7 +66,13 @@ final class NotionClientTests: XCTestCase {
                 "id": page.id,
                 "url": page.url
             ]),
-            .json(["object": "list", "results": []])
+            .json([
+                "object": "list",
+                "results": [
+                    ["object": "block", "id": "  block-1 \n"],
+                    ["object": "block", "id": "block-2"]
+                ]
+            ])
         ])
         let client = NotionClient(token: "test-token", httpClient: httpClient)
         let blocks = [
@@ -78,9 +84,10 @@ final class NotionClientTests: XCTestCase {
             parentPageID: parentID,
             title: "产品周会"
         )
-        try await client.append(blocks: blocks, to: created.id)
+        let blockIDs = try await client.append(blocks: blocks, to: created.id)
 
         XCTAssertEqual(created, page)
+        XCTAssertEqual(blockIDs, ["block-1", "block-2"])
         let requests = await httpClient.recordedRequests()
         XCTAssertEqual(requests.count, 2)
         XCTAssertEqual(requests[0].httpMethod, "POST")
@@ -99,6 +106,61 @@ final class NotionClientTests: XCTestCase {
         let appendBody = try Self.jsonBody(requests[1])
         XCTAssertEqual((appendBody["children"] as? [[String: Any]])?.count, 2)
         XCTAssertNil(appendBody["after"])
+    }
+
+    func testAppendRejectsDuplicateCanonicalBlockIDs() async throws {
+        let httpClient = QueuedNotionHTTPClient(responses: [
+            .json([
+                "object": "list",
+                "results": [
+                    ["object": "block", "id": "duplicate"],
+                    ["object": "block", "id": " duplicate "]
+                ]
+            ])
+        ])
+        let client = NotionClient(token: "test-token", httpClient: httpClient)
+        let blocks = [
+            NotionBlockDraft(kind: .paragraph, text: "一"),
+            NotionBlockDraft(kind: .paragraph, text: "二")
+        ]
+        var receivedError: Error?
+
+        do {
+            _ = try await client.append(blocks: blocks, to: "page")
+        } catch {
+            receivedError = error
+        }
+
+        XCTAssertEqual(
+            receivedError as? NotionClientError,
+            .invalidResponse
+        )
+    }
+
+    func testArchiveBlockUsesDeleteEndpointAndCurrentHeaders() async throws {
+        let httpClient = QueuedNotionHTTPClient(responses: [
+            .json(["object": "block", "id": "block/to archive"])
+        ])
+        let client = NotionClient(token: "test-token", httpClient: httpClient)
+
+        try await client.archiveBlock(id: "block/to archive")
+
+        let requests = await httpClient.recordedRequests()
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.httpMethod, "DELETE")
+        XCTAssertEqual(
+            request.url?.absoluteString,
+            "https://api.notion.com/v1/blocks/block/to%20archive"
+        )
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "Authorization"),
+            "Bearer test-token"
+        )
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "Notion-Version"),
+            NotionClient.apiVersion
+        )
+        XCTAssertEqual(request.timeoutInterval, 30)
     }
 
     func testUpdatesPageTitleWithCurrentHeadersAndCanonicalLength() async throws {

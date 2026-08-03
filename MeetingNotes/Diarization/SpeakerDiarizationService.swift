@@ -8,7 +8,11 @@ struct SpeakerInterval: Equatable, Sendable {
 
 enum SpeakerDiarizationError: Error, Equatable, Sendable {
     case modelPreparationFailed
+    case invalidSource
+    case timelineAssemblyFailed
+    case conversionFailed
     case inferenceFailed
+    case resultValidationFailed
 }
 
 protocol SpeakerDiarizing: Sendable {

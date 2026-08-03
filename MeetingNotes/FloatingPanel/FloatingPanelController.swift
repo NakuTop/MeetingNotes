@@ -40,6 +40,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private let action: (FloatingControl) -> Void
     private let animationDuration: TimeInterval
     private let reduceMotion: () -> Bool
+    private let recordingPresentationStore:
+        RecordingSessionPresentationStore
     private let hostingView: NSHostingView<FloatingRecorderView>
     private var isPaused = false
     private var visibilityGeneration = 0
@@ -50,20 +52,23 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         reduceMotion: @escaping () -> Bool = {
             NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         },
+        recordingPresentationStore: RecordingSessionPresentationStore,
         action: @escaping (FloatingControl) -> Void
     ) {
         positionStore = FloatingPanelPositionStore(defaults: defaults)
         self.action = action
         self.animationDuration = animationDuration
         self.reduceMotion = reduceMotion
+        self.recordingPresentationStore = recordingPresentationStore
         hostingView = NSHostingView(
             rootView: FloatingRecorderView(
                 isPaused: false,
+                recordingPresentationStore: recordingPresentationStore,
                 action: action
             )
         )
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 194, height: 54),
+            contentRect: NSRect(x: 0, y: 0, width: 282, height: 54),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -112,6 +117,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         self.isPaused = isPaused
         hostingView.rootView = FloatingRecorderView(
             isPaused: isPaused,
+            recordingPresentationStore: recordingPresentationStore,
             action: action
         )
     }

@@ -29,10 +29,18 @@ protocol MeetingAudioWriterFactory: Sendable {
 
 protocol MeetingTranscriptionQueueing: Sendable {
     func enqueue(samples: [Float], startingAt: TimeInterval) async
+    func cancel() async
     func drain() async
     func transcripts() async -> [TranscriptDraft]
     func updates() async -> AsyncStream<TranscriptDraft>
     func finishUpdates() async
+    func fixedTranscriptionService() async -> (any TranscriptionService)?
+}
+
+extension MeetingTranscriptionQueueing {
+    func fixedTranscriptionService() async -> (any TranscriptionService)? {
+        nil
+    }
 }
 
 protocol MeetingTranscriptionQueueFactory: Sendable {
@@ -41,6 +49,103 @@ protocol MeetingTranscriptionQueueFactory: Sendable {
 
 protocol SpeakerDiarizationPreferenceReading: Sendable {
     func isSpeakerDiarizationEnabled() async -> Bool
+}
+
+protocol TranscriptionQualityPreferenceReading: Sendable {
+    func transcriptionQualityMode() async -> TranscriptionQualityMode
+}
+
+protocol AudioInputDevicePreferenceReading: Sendable {
+    func preferredInputDeviceID() async -> String?
+}
+
+protocol AudioOutputDevicePreferenceReading: Sendable {
+    func preferredOutputDeviceID() async -> String?
+}
+
+struct SystemDefaultAudioOutputDevicePreference:
+    AudioOutputDevicePreferenceReading {
+    func preferredOutputDeviceID() async -> String? {
+        nil
+    }
+}
+
+@MainActor
+final class MainActorAudioInputDevicePreferenceAdapter:
+    AudioInputDevicePreferenceReading {
+    private let settingsStore: AppSettingsStore
+    private let deviceCatalog: (any AudioDeviceDiscovering)?
+
+    init(
+        settingsStore: AppSettingsStore,
+        deviceCatalog: (any AudioDeviceDiscovering)? = nil
+    ) {
+        self.settingsStore = settingsStore
+        self.deviceCatalog = deviceCatalog
+    }
+
+    func preferredInputDeviceID() async -> String? {
+        let preferredID = settingsStore.preferredInputDeviceID
+        guard let deviceCatalog else {
+            return preferredID
+        }
+        guard let snapshot = try? await deviceCatalog.snapshot() else {
+            return preferredID
+        }
+        switch AudioDevicePreferenceResolver.resolveInput(
+            preferredID: preferredID,
+            devices: snapshot.inputs
+        ) {
+        case let .preferred(device),
+             let .firstUsable(device):
+            return device.id
+        case .systemDefault:
+            return nil
+        case let .fallback(selected, _):
+            return selected.id
+        case .unavailable:
+            return preferredID
+        }
+    }
+}
+
+@MainActor
+final class MainActorAudioOutputDevicePreferenceAdapter:
+    AudioOutputDevicePreferenceReading {
+    private let settingsStore: AppSettingsStore
+    private let deviceCatalog: (any AudioDeviceDiscovering)?
+
+    init(
+        settingsStore: AppSettingsStore,
+        deviceCatalog: (any AudioDeviceDiscovering)? = nil
+    ) {
+        self.settingsStore = settingsStore
+        self.deviceCatalog = deviceCatalog
+    }
+
+    func preferredOutputDeviceID() async -> String? {
+        let preferredID = settingsStore.preferredOutputDeviceID
+        guard let deviceCatalog else {
+            return preferredID
+        }
+        guard let snapshot = try? await deviceCatalog.snapshot() else {
+            return preferredID
+        }
+        switch AudioDevicePreferenceResolver.resolveOutput(
+            preferredID: preferredID,
+            devices: snapshot.outputs
+        ) {
+        case let .preferred(device),
+             let .firstUsable(device):
+            return device.id
+        case .systemDefault:
+            return nil
+        case let .fallback(selected, _):
+            return selected.id
+        case .unavailable:
+            return preferredID
+        }
+    }
 }
 
 @MainActor
@@ -54,6 +159,20 @@ final class MainActorSpeakerDiarizationPreferenceAdapter:
 
     func isSpeakerDiarizationEnabled() async -> Bool {
         settingsStore.isSpeakerDiarizationEnabled
+    }
+}
+
+@MainActor
+final class MainActorTranscriptionQualityPreferenceAdapter:
+    TranscriptionQualityPreferenceReading {
+    private let settingsStore: AppSettingsStore
+
+    init(settingsStore: AppSettingsStore) {
+        self.settingsStore = settingsStore
+    }
+
+    func transcriptionQualityMode() async -> TranscriptionQualityMode {
+        settingsStore.transcriptionQualityMode
     }
 }
 
@@ -106,6 +225,9 @@ struct MeetingCoordinatorDependencies: Sendable {
     let speakerFinalizer: any MeetingSpeakerFinalizing
     let panel: any RecordingPanelPresenting
     let clock: any MeetingClock
+    let captureHealthScheduler: any CaptureHealthCheckScheduling
+    let recordingPresentation:
+        any RecordingSessionPresentationUpdating
 
     init(
         permissions: any MeetingPermissionAuthorizing,
@@ -118,7 +240,12 @@ struct MeetingCoordinatorDependencies: Sendable {
         speakerFinalizer: any MeetingSpeakerFinalizing =
             UnchangedMeetingSpeakerFinalizer(),
         panel: any RecordingPanelPresenting,
-        clock: any MeetingClock
+        clock: any MeetingClock,
+        captureHealthScheduler: any CaptureHealthCheckScheduling =
+            ContinuousCaptureHealthCheckScheduler(),
+        recordingPresentation:
+            any RecordingSessionPresentationUpdating =
+            NoopRecordingSessionPresentationUpdater()
     ) {
         self.permissions = permissions
         self.captureFactory = captureFactory
@@ -129,6 +256,8 @@ struct MeetingCoordinatorDependencies: Sendable {
         self.speakerFinalizer = speakerFinalizer
         self.panel = panel
         self.clock = clock
+        self.captureHealthScheduler = captureHealthScheduler
+        self.recordingPresentation = recordingPresentation
     }
 }
 
@@ -149,12 +278,49 @@ private struct UnchangedMeetingSpeakerFinalizer:
 }
 
 struct LiveMeetingCaptureFactory: MeetingCaptureSourceFactory {
+    typealias MicrophoneFactory =
+        @Sendable (String?) -> any AudioCaptureSource
+    typealias ScreenFactory =
+        @Sendable (String?) -> any AudioCaptureSource
+
+    private let audioInputDevicePreference:
+        any AudioInputDevicePreferenceReading
+    private let microphoneFactory: MicrophoneFactory
+    private let screenFactory: ScreenFactory
+
+    init(
+        audioInputDevicePreference:
+            any AudioInputDevicePreferenceReading,
+        microphoneFactory:
+            @escaping MicrophoneFactory = { selectedDeviceID in
+                MicrophoneCaptureSource(
+                    selectedDeviceID: selectedDeviceID
+                )
+            },
+        screenFactory:
+            @escaping ScreenFactory = { selectedDeviceID in
+                ScreenAudioCaptureSource(
+                    microphoneDeviceID: selectedDeviceID
+                )
+            }
+    ) {
+        self.audioInputDevicePreference = audioInputDevicePreference
+        self.microphoneFactory = microphoneFactory
+        self.screenFactory = screenFactory
+    }
+
     func makeCapture(for mode: MeetingMode) async throws -> any AudioCaptureSource {
         switch mode {
         case .offline:
-            return MicrophoneCaptureSource()
+            let selectedDeviceID =
+                await audioInputDevicePreference
+                    .preferredInputDeviceID()
+            return microphoneFactory(selectedDeviceID)
         case .online:
-            return ScreenAudioCaptureSource()
+            let selectedDeviceID =
+                await audioInputDevicePreference
+                    .preferredInputDeviceID()
+            return screenFactory(selectedDeviceID)
         }
     }
 }
@@ -177,31 +343,47 @@ struct LiveMeetingAudioWriterFactory: MeetingAudioWriterFactory {
 }
 
 struct LiveMeetingTranscriptionQueueFactory: MeetingTranscriptionQueueFactory {
-    let service: any TranscriptionService
+    let modelController: any TranscriptionModelControlling
+    let qualityPreference: any TranscriptionQualityPreferenceReading
 
-    init(service: any TranscriptionService = WhisperKitTranscriptionService(
-        model: "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page")) {
-        self.service = service
+    init(
+        modelController: any TranscriptionModelControlling,
+        qualityPreference: any TranscriptionQualityPreferenceReading
+    ) {
+        self.modelController = modelController
+        self.qualityPreference = qualityPreference
     }
 
     func makeQueue() async throws -> any MeetingTranscriptionQueueing {
-        LiveMeetingTranscriptionQueue(
+        let mode = await qualityPreference.transcriptionQualityMode()
+        let service = try await modelController.service(mode: mode)
+        return LiveMeetingTranscriptionQueue(
             queue: TranscriptionQueue(
                 service: service
-            )
+            ),
+            service: service
         )
     }
 }
 
 private actor LiveMeetingTranscriptionQueue: MeetingTranscriptionQueueing {
     private let queue: TranscriptionQueue
+    private let service: any TranscriptionService
 
-    init(queue: TranscriptionQueue) {
+    init(
+        queue: TranscriptionQueue,
+        service: any TranscriptionService
+    ) {
         self.queue = queue
+        self.service = service
     }
 
     func enqueue(samples: [Float], startingAt: TimeInterval) async {
         await queue.enqueue(samples: samples, startingAt: startingAt)
+    }
+
+    func cancel() async {
+        await queue.cancel()
     }
 
     func drain() async {
@@ -218,6 +400,10 @@ private actor LiveMeetingTranscriptionQueue: MeetingTranscriptionQueueing {
 
     func finishUpdates() async {
         await queue.finishUpdates()
+    }
+
+    func fixedTranscriptionService() -> (any TranscriptionService)? {
+        service
     }
 }
 
@@ -349,22 +535,31 @@ extension MeetingCoordinatorDependencies {
         fileStore: MeetingFileStore,
         speakerDiarizationPreference:
             any SpeakerDiarizationPreferenceReading,
+        audioInputDevicePreference:
+            any AudioInputDevicePreferenceReading,
         permissionSystem: any CapturePermissionSystem = LiveCapturePermissionSystem(),
         panel: any RecordingPanelPresenting = NoopRecordingPanelPresenter(),
+        recordingPresentation:
+            any RecordingSessionPresentationUpdating =
+            NoopRecordingSessionPresentationUpdater(),
         sourceLoader: MeetingAudioSourceLoader? = nil,
-        transcriptionService: any TranscriptionService =
-            WhisperKitTranscriptionService(
-                model: "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page"),
+        transcriptionModelController: any TranscriptionModelControlling,
+        transcriptionQualityPreference:
+            any TranscriptionQualityPreferenceReading,
         speakerDiarizer: any SpeakerDiarizing
     ) -> MeetingCoordinatorDependencies {
         let sourceLoader = sourceLoader
             ?? MeetingAudioSourceLoader(fileStore: fileStore)
         return MeetingCoordinatorDependencies(
             permissions: CapturePermissionClient(system: permissionSystem),
-            captureFactory: LiveMeetingCaptureFactory(),
+            captureFactory: LiveMeetingCaptureFactory(
+                audioInputDevicePreference:
+                    audioInputDevicePreference
+            ),
             writerFactory: LiveMeetingAudioWriterFactory(fileStore: fileStore),
             transcriptionFactory: LiveMeetingTranscriptionQueueFactory(
-                service: transcriptionService
+                modelController: transcriptionModelController,
+                qualityPreference: transcriptionQualityPreference
             ),
             repository: MeetingRepositoryLifecycleAdapter(repository: repository),
             speakerDiarizationPreference: speakerDiarizationPreference,
@@ -372,12 +567,12 @@ extension MeetingCoordinatorDependencies {
                 reader: MeetingTrackAudioReader(
                     sourceLoader: sourceLoader
                 ),
-                transcriptionService: transcriptionService,
                 sourceLoader: sourceLoader,
                 diarizer: speakerDiarizer
             ),
             panel: panel,
-            clock: SystemMeetingClock()
+            clock: SystemMeetingClock(),
+            recordingPresentation: recordingPresentation
         )
     }
 }

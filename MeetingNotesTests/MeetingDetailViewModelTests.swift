@@ -4,6 +4,42 @@ import XCTest
 
 @MainActor
 final class MeetingDetailViewModelTests: XCTestCase {
+    func testDisplayedActiveDurationUsesLivePresentationForCurrentMeeting() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.finalizeMeeting(
+            id: meetingID,
+            endedAt: .now,
+            activeDuration: 12
+        )
+        let presentation = RecordingSessionPresentationStore()
+        await presentation.start(meetingID: meetingID, monotonicTime: 100)
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy(),
+            recordingPresentationStore: presentation
+        )
+
+        XCTAssertEqual(
+            viewModel.displayedActiveDuration(at: 104),
+            4,
+            accuracy: 0.001
+        )
+
+        await presentation.start(meetingID: UUID(), monotonicTime: 200)
+        XCTAssertEqual(
+            viewModel.displayedActiveDuration(at: 204),
+            12,
+            accuracy: 0.001
+        )
+    }
+
     func testRefreshWhileRecordingMakesNewTranscriptVisibleAndStopsWhenReady() async throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(
@@ -116,6 +152,28 @@ final class MeetingDetailViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.primaryAction, .archiveToNotion)
     }
 
+    func testPrimaryActionKeepsLegacySummaryAdapterUntilDocumentPickerMigration()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        let action = DetailActionSpy()
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: action,
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        await viewModel.performPrimaryAction()
+
+        XCTAssertEqual(action.callCount, 1)
+    }
+
     func testSpeakerProcessingStatusReflectsPersistedActiveState() throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(
@@ -147,6 +205,74 @@ final class MeetingDetailViewModelTests: XCTestCase {
         )
     }
 
+    func testStableProcessingMeetingsShowInterruptedWarningAndRetryAction()
+        throws {
+        for state in [
+            RecordingState.ready,
+            .summaryReady,
+            .archived,
+        ] {
+            let repository = try MeetingRepository.inMemory()
+            let meetingID = try repository.createMeeting(
+                mode: .offline,
+                startedAt: .now,
+                speakerDiarizationRequested: true
+            )
+            let meeting = try repository.meeting(id: meetingID)
+            meeting.speakerProcessingState = .processing
+            try repository.updateMeetingState(id: meetingID, state: state)
+            let viewModel = MeetingDetailViewModel(
+                meetingID: meetingID,
+                repository: repository,
+                settingsStore: makeSettingsStore(),
+                action: DetailActionSpy(),
+                titleUpdater: DetailTitleUpdaterSpy(),
+                speakerDiarizationRetryer: DetailSpeakerRetrySpy()
+            )
+
+            XCTAssertNil(viewModel.speakerProcessingStatusMessage)
+            XCTAssertEqual(
+                viewModel.speakerProcessingWarningMessage,
+                "上次说话人分离被中断，可重新尝试。"
+            )
+            XCTAssertTrue(viewModel.shouldShowSpeakerDiarizationRetryAction)
+            XCTAssertTrue(viewModel.canRetrySpeakerDiarization)
+        }
+    }
+
+    func testLiveProcessingMeetingsKeepProgressWithoutRetryAction() throws {
+        for state in [
+            RecordingState.summarizing,
+            .archiving,
+        ] {
+            let repository = try MeetingRepository.inMemory()
+            let meetingID = try repository.createMeeting(
+                mode: .offline,
+                startedAt: .now,
+                speakerDiarizationRequested: true
+            )
+            let meeting = try repository.meeting(id: meetingID)
+            meeting.speakerProcessingState = .processing
+            try repository.updateMeetingState(id: meetingID, state: state)
+            let viewModel = MeetingDetailViewModel(
+                meetingID: meetingID,
+                repository: repository,
+                settingsStore: makeSettingsStore(),
+                action: DetailActionSpy(),
+                titleUpdater: DetailTitleUpdaterSpy(),
+                speakerDiarizationRetryer: DetailSpeakerRetrySpy()
+            )
+
+            XCTAssertEqual(
+                viewModel.speakerProcessingStatusMessage,
+                "正在区分不同说话人…"
+            )
+            XCTAssertNil(viewModel.speakerProcessingWarningMessage)
+            XCTAssertFalse(viewModel.shouldShowSpeakerDiarizationRetryAction)
+            XCTAssertFalse(viewModel.canRetrySpeakerDiarization)
+        }
+    }
+
     func testSpeakerProcessingFailureCodesMapToSafeWarnings() throws {
         let cases = [
             (
@@ -155,7 +281,11 @@ final class MeetingDetailViewModelTests: XCTestCase {
             ),
             (
                 "speaker_diarization_model_preparation_failed",
-                "说话人区分未完成，已保留可用转录，不影响播放、总结与归档。"
+                "说话人模型未准备好，请检查网络后重试。"
+            ),
+            (
+                "speaker_diarization_source_unavailable",
+                "该旧会议缺少可用的分轨标记，无法重新分离说话人。"
             ),
             (
                 "speaker_transcript_replacement_failed",
@@ -197,6 +327,41 @@ final class MeetingDetailViewModelTests: XCTestCase {
         }
     }
 
+    func testPermanentSpeakerRetryErrorsKeepWarningWithoutRetryAction()
+        throws {
+        let cases = [
+            SpeakerDiarizationRetryUseCase.sourceUnavailableCode,
+            SpeakerDiarizationRetryUseCase.transcriptUnavailableCode,
+        ]
+
+        for errorCode in cases {
+            let repository = try MeetingRepository.inMemory()
+            let meetingID = try repository.createMeeting(
+                mode: .online,
+                startedAt: .now,
+                speakerDiarizationRequested: true
+            )
+            let meeting = try repository.meeting(id: meetingID)
+            meeting.speakerProcessingState = .degraded
+            meeting.speakerProcessingErrorCode = errorCode
+            try repository.updateMeetingState(id: meetingID, state: .ready)
+            let viewModel = MeetingDetailViewModel(
+                meetingID: meetingID,
+                repository: repository,
+                settingsStore: makeSettingsStore(),
+                action: DetailActionSpy(),
+                titleUpdater: DetailTitleUpdaterSpy(),
+                speakerDiarizationRetryer: DetailSpeakerRetrySpy()
+            )
+
+            XCTAssertNotNil(viewModel.speakerProcessingWarningMessage)
+            XCTAssertFalse(
+                viewModel.shouldShowSpeakerDiarizationRetryAction
+            )
+            XCTAssertFalse(viewModel.canRetrySpeakerDiarization)
+        }
+    }
+
     func testSpeakerProcessingWarningCanBeDismissedWithoutBlockingActions()
         throws {
         let repository = try MeetingRepository.inMemory()
@@ -225,6 +390,89 @@ final class MeetingDetailViewModelTests: XCTestCase {
 
         XCTAssertNil(viewModel.speakerProcessingWarningMessage)
         XCTAssertTrue(viewModel.primaryAction.isEnabled)
+    }
+
+    func testSpeakerRetryShowsProgressBlocksOtherDetailActionsAndReloadsSuccess()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now,
+            speakerDiarizationRequested: true
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        meeting.speakerProcessingState = .degraded
+        meeting.speakerProcessingErrorCode =
+            "speaker_diarization_inference_failed"
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        let retryer = BlockingDetailSpeakerRetryer {
+            meeting.speakerProcessingState = .completed
+            meeting.speakerProcessingErrorCode = nil
+            try repository.updateMeetingState(id: meetingID, state: .ready)
+        }
+        let action = DetailActionSpy()
+        let titleUpdater = DetailTitleUpdaterSpy()
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: action,
+            titleUpdater: titleUpdater,
+            speakerDiarizationRetryer: retryer
+        )
+
+        let retry = Task { await viewModel.retrySpeakerDiarization() }
+        await retryer.waitUntilStarted()
+
+        XCTAssertTrue(viewModel.isRetryingSpeakerDiarization)
+        XCTAssertFalse(viewModel.canRetrySpeakerDiarization)
+        XCTAssertFalse(viewModel.shouldShowSpeakerDiarizationRetryAction)
+        XCTAssertEqual(
+            viewModel.speakerProcessingStatusMessage,
+            "正在重新分离说话人…"
+        )
+        await viewModel.retrySpeakerDiarization()
+        await viewModel.performPrimaryAction()
+        let renamed = await viewModel.rename(to: "blocked")
+        XCTAssertFalse(renamed)
+        XCTAssertEqual(retryer.requests, [meetingID])
+        XCTAssertEqual(action.callCount, 0)
+        XCTAssertTrue(titleUpdater.requests.isEmpty)
+
+        retryer.finish()
+        await retry.value
+
+        XCTAssertFalse(viewModel.isRetryingSpeakerDiarization)
+        XCTAssertEqual(viewModel.speakerProcessingState, .completed)
+        XCTAssertNil(viewModel.speakerProcessingWarningMessage)
+    }
+
+    func testSpeakerRetryIsOnlyAvailableForDegradedMeetingWithRetryService()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now,
+            speakerDiarizationRequested: true
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        meeting.speakerProcessingState = .degraded
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy(),
+            speakerDiarizationRetryer: DetailSpeakerRetrySpy()
+        )
+
+        XCTAssertTrue(viewModel.canRetrySpeakerDiarization)
+
+        meeting.speakerProcessingState = .completed
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        viewModel.load()
+        XCTAssertFalse(viewModel.canRetrySpeakerDiarization)
     }
 
     func testArchiveFailureReloadsSummaryReadyAndShowsRetryMessage() async throws {
@@ -555,6 +803,492 @@ final class MeetingDetailViewModelTests: XCTestCase {
         _ = await primaryAction.value
     }
 
+    func testDefaultSelectedDocumentIsSummary() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            documentManager: DetailDocumentManagerSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        XCTAssertEqual(viewModel.selectedDocumentKind, .summary)
+        XCTAssertEqual(viewModel.documentOperation, .idle)
+    }
+
+    func testGenerateActsOnlyOnSelectedDocument() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "可用最终转录"
+        )
+        let documentManager = DetailDocumentManagerSpy()
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            documentManager: documentManager,
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        viewModel.selectedDocumentKind = .detailedMinutes
+
+        await viewModel.generateSelectedDocument()
+
+        XCTAssertEqual(documentManager.generatedKinds, [.detailedMinutes])
+        XCTAssertTrue(documentManager.retriedKinds.isEmpty)
+    }
+
+    func testRetryArchiveUsesSelectedSavedDocumentWithoutGeneration()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "",
+                overview: "本地重点总结",
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            ),
+            model: "test-model"
+        )
+        try repository.updateDocumentArchiveState(
+            meetingID: meetingID,
+            kind: .summary,
+            archiveState: .failed,
+            meetingState: .summaryReady,
+            errorCode: MeetingDocumentsUseCase.archiveFailureCode
+        )
+        let documentManager = DetailDocumentManagerSpy()
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            documentManager: documentManager,
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        await viewModel.archiveSelectedDocumentToNotion()
+
+        XCTAssertTrue(documentManager.generatedKinds.isEmpty)
+        XCTAssertEqual(documentManager.retriedKinds, [.summary])
+    }
+
+    func testSavedDocumentArchiveButtonCoversLocalFailedAndArchivedStates()
+        throws {
+        let expectations: [
+            (MeetingDocumentArchiveState, RecordingState, String, Bool)
+        ] = [
+            (.localOnly, .summaryReady, "归档到 Notion", true),
+            (.failed, .summaryReady, "重新归档到 Notion", true),
+            (.archived, .archived, "重新归档并覆盖", true),
+            (.archiving, .archiving, "正在归档", false),
+        ]
+
+        for (archiveState, meetingState, title, isEnabled) in expectations {
+            let repository = try MeetingRepository.inMemory()
+            let meetingID = try repository.createMeeting(
+                mode: .offline,
+                startedAt: .now
+            )
+            try repository.saveGeneratedSummary(
+                meetingID: meetingID,
+                generated: GeneratedMeetingSummary(
+                    suggestedTitle: "",
+                    overview: "本地重点总结",
+                    keyPoints: [],
+                    decisions: [],
+                    actionItems: [],
+                    bookmarkInsights: []
+                ),
+                model: "test-model"
+            )
+            if archiveState != .localOnly {
+                try repository.updateDocumentArchiveState(
+                    meetingID: meetingID,
+                    kind: .summary,
+                    archiveState: archiveState,
+                    meetingState: meetingState
+                )
+            }
+            let viewModel = MeetingDetailViewModel(
+                meetingID: meetingID,
+                repository: repository,
+                settingsStore: makeSettingsStore(),
+                action: DetailActionSpy(),
+                documentManager: DetailDocumentManagerSpy(),
+                titleUpdater: DetailTitleUpdaterSpy()
+            )
+
+            XCTAssertEqual(
+                viewModel.selectedDocumentArchiveButtonTitle,
+                title,
+                "Unexpected title for \(archiveState)"
+            )
+            XCTAssertEqual(
+                viewModel.canArchiveSelectedDocumentToNotion,
+                isEnabled,
+                "Unexpected enabled state for \(archiveState)"
+            )
+        }
+    }
+
+    func testArchiveButtonIsHiddenWithoutSelectedDocumentOrNotion() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        let noDocument = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            documentManager: DetailDocumentManagerSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        XCTAssertNil(noDocument.selectedDocumentArchiveButtonTitle)
+
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "",
+                overview: "本地重点总结",
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            ),
+            model: "test-model"
+        )
+        let notionDisabled = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(
+                isNotionArchivingEnabled: false
+            ),
+            action: DetailActionSpy(),
+            documentManager: DetailDocumentManagerSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        XCTAssertNil(notionDisabled.selectedDocumentArchiveButtonTitle)
+        XCTAssertFalse(
+            notionDisabled.canArchiveSelectedDocumentToNotion
+        )
+    }
+
+    func testArchiveActionHandlesLocalOnlyAndArchivedWithoutGeneration()
+        async throws {
+        for archiveState in [
+            MeetingDocumentArchiveState.localOnly,
+            .archived,
+        ] {
+            let repository = try MeetingRepository.inMemory()
+            let meetingID = try repository.createMeeting(
+                mode: .offline,
+                startedAt: .now
+            )
+            try repository.saveGeneratedSummary(
+                meetingID: meetingID,
+                generated: GeneratedMeetingSummary(
+                    suggestedTitle: "",
+                    overview: "本地重点总结",
+                    keyPoints: [],
+                    decisions: [],
+                    actionItems: [],
+                    bookmarkInsights: []
+                ),
+                model: "test-model"
+            )
+            if archiveState == .archived {
+                try repository.completeDocumentArchive(
+                    meetingID: meetingID,
+                    kind: .summary
+                )
+            }
+            let documentManager = DetailDocumentManagerSpy()
+            let viewModel = MeetingDetailViewModel(
+                meetingID: meetingID,
+                repository: repository,
+                settingsStore: makeSettingsStore(),
+                action: DetailActionSpy(),
+                documentManager: documentManager,
+                titleUpdater: DetailTitleUpdaterSpy()
+            )
+
+            await viewModel.archiveSelectedDocumentToNotion()
+
+            XCTAssertTrue(documentManager.generatedKinds.isEmpty)
+            XCTAssertEqual(documentManager.retriedKinds, [.summary])
+        }
+    }
+
+    func testDocumentGenerationBusyStateBlocksRenameAndSpeakerRetry()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now,
+            speakerDiarizationRequested: true
+        )
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "可用最终转录"
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        meeting.speakerProcessingState = .degraded
+        meeting.speakerProcessingErrorCode =
+            SpeakerAwareTranscriptFinalizer.diarizationInferenceFailedCode
+        let documentManager = BlockingDetailDocumentManager()
+        let titleUpdater = DetailTitleUpdaterSpy()
+        let speakerRetryer = DetailSpeakerRetrySpy()
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            documentManager: documentManager,
+            titleUpdater: titleUpdater,
+            speakerDiarizationRetryer: speakerRetryer
+        )
+
+        let generation = Task { await viewModel.generateSelectedDocument() }
+        await documentManager.waitUntilStarted()
+
+        XCTAssertEqual(viewModel.documentOperation, .generating(.summary))
+        let renamed = await viewModel.rename(to: "不应重命名")
+        XCTAssertFalse(renamed)
+        await viewModel.retrySpeakerDiarization()
+        XCTAssertTrue(titleUpdater.requests.isEmpty)
+        XCTAssertTrue(speakerRetryer.requests.isEmpty)
+
+        documentManager.finish()
+        await generation.value
+    }
+
+    func testGenerateRequiresAtLeastOneSanitizedFinalTranscript() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            documentManager: DetailDocumentManagerSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        XCTAssertFalse(viewModel.canGenerateSelectedDocument)
+
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "<|endoftext|>",
+            isFinal: true
+        )
+        viewModel.load()
+        XCTAssertFalse(viewModel.canGenerateSelectedDocument)
+
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 1,
+            end: 2,
+            text: "真正可用于总结的内容",
+            isFinal: true
+        )
+        viewModel.load()
+        XCTAssertTrue(viewModel.canGenerateSelectedDocument)
+    }
+
+    func testDocumentOperationKeepsCapturedKindWhenSelectionChanges()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "可用最终转录"
+        )
+        let documentManager = CapturedKindDetailDocumentManager()
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            documentManager: documentManager,
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        let generation = Task { await viewModel.generateSelectedDocument() }
+        await documentManager.waitUntilStarted()
+        viewModel.selectedDocumentKind = .detailedMinutes
+        documentManager.beginArchiving()
+        await documentManager.waitUntilArchiving()
+
+        XCTAssertEqual(viewModel.selectedDocumentKind, .detailedMinutes)
+        XCTAssertEqual(viewModel.documentOperation, .archiving(.summary))
+
+        documentManager.failArchive()
+        await generation.value
+
+        XCTAssertNotNil(viewModel.documentErrorMessage(for: .summary))
+        XCTAssertNil(viewModel.documentErrorMessage(for: .detailedMinutes))
+    }
+
+    func testRenamingSpeakerUpdatesEveryMatchingRowAndRemembersName() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        for offset in [0.0, 2.0] {
+            try repository.appendTranscript(
+                meetingID: meetingID,
+                start: offset,
+                end: offset + 1,
+                text: "发言",
+                speakerID: "room-1"
+            )
+        }
+        let settingsStore = makeSettingsStore()
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: settingsStore,
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        XCTAssertTrue(viewModel.renameSpeaker("room-1", to: " 张三 "))
+
+        XCTAssertEqual(viewModel.speakerDisplayNames, ["room-1": "张三"])
+        XCTAssertEqual(settingsStore.frequentSpeakerNames, ["张三"])
+        XCTAssertEqual(
+            viewModel.meeting?.transcripts.filter {
+                $0.speakerID == "room-1"
+            }.count,
+            2
+        )
+
+        XCTAssertTrue(viewModel.clearSpeakerName("room-1"))
+        XCTAssertTrue(viewModel.speakerDisplayNames.isEmpty)
+        XCTAssertEqual(settingsStore.frequentSpeakerNames, ["张三"])
+    }
+
+    func testSpeakerRenameRejectsInvalidNamesWithoutChangingHistory() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "发言",
+            speakerID: "room-1"
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        XCTAssertFalse(viewModel.renameSpeaker("room-1", to: "   "))
+        XCTAssertEqual(
+            viewModel.speakerNameErrorMessage,
+            "请输入 1 到 40 个字符的名称。"
+        )
+        XCTAssertFalse(
+            viewModel.renameSpeaker(
+                "room-1",
+                to: String(repeating: "长", count: 41)
+            )
+        )
+        XCTAssertTrue(viewModel.speakerDisplayNames.isEmpty)
+        XCTAssertEqual(viewModel.meeting?.transcripts.map(\.text), ["发言"])
+    }
+
+    func testSpeakerRenameSaveFailureLeavesNamesAndSuggestionsUntouched()
+        throws {
+        let failure = DetailRepositoryFailureSwitch()
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                if failure.shouldFail {
+                    throw DetailInjectedRepositoryError.forced
+                }
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "发言",
+            speakerID: "room-1"
+        )
+        let settingsStore = makeSettingsStore()
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: settingsStore,
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        failure.shouldFail = true
+
+        XCTAssertFalse(viewModel.renameSpeaker("room-1", to: "张三"))
+
+        XCTAssertEqual(
+            viewModel.speakerNameErrorMessage,
+            "无法保存说话人名称，请稍后重试。"
+        )
+        XCTAssertTrue(viewModel.speakerDisplayNames.isEmpty)
+        XCTAssertTrue(settingsStore.frequentSpeakerNames.isEmpty)
+    }
+
     private func makeSettingsStore(
         isNotionArchivingEnabled: Bool = true
     ) -> AppSettingsStore {
@@ -568,6 +1302,134 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let store = AppSettingsStore(defaults: defaults)
         store.isNotionArchivingEnabled = isNotionArchivingEnabled
         return store
+    }
+}
+
+@MainActor
+private final class DetailDocumentManagerSpy: MeetingDocumentManaging {
+    private(set) var generatedKinds: [MeetingDocumentKind] = []
+    private(set) var retriedKinds: [MeetingDocumentKind] = []
+
+    func generate(meetingID: UUID, kind: MeetingDocumentKind) async throws {
+        _ = meetingID
+        generatedKinds.append(kind)
+    }
+
+    func retryArchive(
+        meetingID: UUID,
+        kind: MeetingDocumentKind
+    ) async throws {
+        _ = meetingID
+        retriedKinds.append(kind)
+    }
+}
+
+@MainActor
+private final class BlockingDetailDocumentManager: MeetingDocumentManaging {
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var finishContinuation: CheckedContinuation<Void, Never>?
+
+    func generate(meetingID: UUID, kind: MeetingDocumentKind) async throws {
+        _ = meetingID
+        _ = kind
+        started = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        await withCheckedContinuation { continuation in
+            finishContinuation = continuation
+        }
+    }
+
+    func retryArchive(
+        meetingID: UUID,
+        kind: MeetingDocumentKind
+    ) async throws {
+        _ = meetingID
+        _ = kind
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func finish() {
+        finishContinuation?.resume()
+        finishContinuation = nil
+    }
+}
+
+@MainActor
+private final class CapturedKindDetailDocumentManager:
+    MeetingDocumentManaging {
+    private var started = false
+    private var archiving = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var archiveWaiters: [CheckedContinuation<Void, Never>] = []
+    private var beginArchiveContinuation: CheckedContinuation<Void, Never>?
+    private var failContinuation: CheckedContinuation<Void, Never>?
+
+    func generate(meetingID: UUID, kind: MeetingDocumentKind) async throws {
+        _ = meetingID
+        _ = kind
+    }
+
+    func generate(
+        meetingID: UUID,
+        kind: MeetingDocumentKind,
+        onOperationChange: @escaping (MeetingDocumentOperation) -> Void
+    ) async throws {
+        _ = meetingID
+        onOperationChange(.generating(kind))
+        started = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        await withCheckedContinuation { continuation in
+            beginArchiveContinuation = continuation
+        }
+        onOperationChange(.archiving(kind))
+        archiving = true
+        archiveWaiters.forEach { $0.resume() }
+        archiveWaiters.removeAll()
+        await withCheckedContinuation { continuation in
+            failContinuation = continuation
+        }
+        throw MeetingDocumentsError.archiveFailed(kind)
+    }
+
+    func retryArchive(
+        meetingID: UUID,
+        kind: MeetingDocumentKind
+    ) async throws {
+        _ = meetingID
+        _ = kind
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func beginArchiving() {
+        beginArchiveContinuation?.resume()
+        beginArchiveContinuation = nil
+    }
+
+    func waitUntilArchiving() async {
+        if archiving { return }
+        await withCheckedContinuation { continuation in
+            archiveWaiters.append(continuation)
+        }
+    }
+
+    func failArchive() {
+        failContinuation?.resume()
+        failContinuation = nil
     }
 }
 
@@ -588,6 +1450,53 @@ private final class DetailTitleUpdaterSpy: MeetingTitleUpdating {
     func updateTitle(meetingID: UUID, title: String) async throws {
         requests.append(TitleUpdateRequest(meetingID: meetingID, title: title))
         if let error { throw error }
+    }
+}
+
+@MainActor
+private final class DetailSpeakerRetrySpy:
+    MeetingSpeakerDiarizationRetrying {
+    private(set) var requests: [UUID] = []
+
+    func retry(meetingID: UUID) async throws {
+        requests.append(meetingID)
+    }
+}
+
+@MainActor
+private final class BlockingDetailSpeakerRetryer:
+    MeetingSpeakerDiarizationRetrying {
+    private let onFinish: () throws -> Void
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var finishContinuation: CheckedContinuation<Void, Never>?
+    private(set) var requests: [UUID] = []
+
+    init(onFinish: @escaping () throws -> Void) {
+        self.onFinish = onFinish
+    }
+
+    func retry(meetingID: UUID) async throws {
+        requests.append(meetingID)
+        started = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        await withCheckedContinuation { continuation in
+            finishContinuation = continuation
+        }
+        try onFinish()
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func finish() {
+        finishContinuation?.resume()
+        finishContinuation = nil
     }
 }
 
@@ -717,4 +1626,12 @@ private final class ProgressingDetailAction: SummarizeAndArchiving {
             finishContinuation = continuation
         }
     }
+}
+
+private enum DetailInjectedRepositoryError: Error {
+    case forced
+}
+
+private final class DetailRepositoryFailureSwitch {
+    var shouldFail = false
 }

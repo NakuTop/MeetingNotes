@@ -471,6 +471,92 @@ final class SpeakerAwareTranscriptFinalizerTests: XCTestCase {
             )
         )
     }
+
+    func testDiarizationFailuresReturnStableStageCodes() async {
+        let cases: [(SpeakerDiarizationError, String)] = [
+            (
+                .invalidSource,
+                "speaker_diarization_invalid_source"
+            ),
+            (
+                .timelineAssemblyFailed,
+                "speaker_diarization_timeline_assembly_failed"
+            ),
+            (
+                .conversionFailed,
+                "speaker_diarization_conversion_failed"
+            ),
+            (
+                .inferenceFailed,
+                "speaker_diarization_inference_failed"
+            ),
+            (
+                .resultValidationFailed,
+                "speaker_diarization_result_validation_failed"
+            ),
+            (
+                .modelPreparationFailed,
+                "speaker_diarization_model_preparation_failed"
+            ),
+        ]
+
+        for (error, expectedCode) in cases {
+            let meetingID = UUID()
+            let finalizer = SpeakerAwareTranscriptFinalizer(
+                reader: FakeMeetingTrackAudioReader(chunksByTrack: [:]),
+                sourceLoader: FakeSpeakerAudioSourceLoader(
+                    sources: [
+                        .master: makeSpeakerFinalizationSource(
+                            meetingID: meetingID
+                        ),
+                    ]
+                ),
+                diarizer: FakeSpeakerDiarizer(
+                    result: .failure(error)
+                )
+            )
+
+            let outcome = await finalizer.finalize(
+                meetingID: meetingID,
+                mode: .offline,
+                diarizationRequested: true,
+                provisional: []
+            )
+
+            XCTAssertEqual(
+                outcome,
+                .degraded(
+                    replacement: nil,
+                    sourceRevision: nil,
+                    errorCode: expectedCode
+                )
+            )
+        }
+    }
+
+    func testSourceLoaderFailureReturnsInvalidSourceCode() async {
+        let finalizer = SpeakerAwareTranscriptFinalizer(
+            reader: FakeMeetingTrackAudioReader(chunksByTrack: [:]),
+            sourceLoader: FakeSpeakerAudioSourceLoader(sources: [:]),
+            diarizer: FakeSpeakerDiarizer(result: .success([]))
+        )
+
+        let outcome = await finalizer.finalize(
+            meetingID: UUID(),
+            mode: .offline,
+            diarizationRequested: true,
+            provisional: []
+        )
+
+        XCTAssertEqual(
+            outcome,
+            .degraded(
+                replacement: nil,
+                sourceRevision: nil,
+                errorCode: "speaker_diarization_invalid_source"
+            )
+        )
+    }
 }
 
 private enum SpeakerFinalizerTestError: Error {

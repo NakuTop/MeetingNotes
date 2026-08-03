@@ -41,12 +41,44 @@ final class FloatingControlTests: XCTestCase {
 
     @MainActor
     func testRecorderViewSourcesButtonsOnlyFromFloatingControlCases() {
+        let presentation = RecordingSessionPresentationStore()
         let view = FloatingRecorderView(
             isPaused: false,
+            recordingPresentationStore: presentation,
             action: { _ in }
         )
 
         XCTAssertEqual(view.controls, FloatingControl.allCases)
+    }
+
+    @MainActor
+    func testRecorderViewFormatsSharedLiveElapsedTime() async {
+        let meetingID = UUID()
+        let presentation = RecordingSessionPresentationStore()
+        await presentation.start(meetingID: meetingID, monotonicTime: 100)
+        let view = FloatingRecorderView(
+            isPaused: false,
+            recordingPresentationStore: presentation,
+            action: { _ in }
+        )
+
+        XCTAssertEqual(view.elapsedText(at: 165), "01:05")
+    }
+
+    @MainActor
+    func testRecorderViewMarksPausedPresentationAsPaused() async {
+        let meetingID = UUID()
+        let presentation = RecordingSessionPresentationStore()
+        await presentation.start(meetingID: meetingID, monotonicTime: 100)
+        await presentation.pause(meetingID: meetingID, activeDuration: 5)
+        let view = FloatingRecorderView(
+            isPaused: true,
+            recordingPresentationStore: presentation,
+            action: { _ in }
+        )
+
+        XCTAssertEqual(view.statusAccessibilityLabel, "录音已暂停")
+        XCTAssertEqual(view.elapsedText(at: 500), "00:05")
     }
 
     @MainActor
@@ -56,6 +88,7 @@ final class FloatingControlTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let controller = FloatingPanelController(
             defaults: defaults,
+            recordingPresentationStore: RecordingSessionPresentationStore(),
             action: { _ in }
         )
         let panel = controller.panel
@@ -77,6 +110,7 @@ final class FloatingControlTests: XCTestCase {
             defaults: defaults,
             animationDuration: 0,
             reduceMotion: { false },
+            recordingPresentationStore: RecordingSessionPresentationStore(),
             action: { _ in }
         )
         let contentView = controller.panel.contentView

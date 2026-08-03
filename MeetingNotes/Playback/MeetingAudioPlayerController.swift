@@ -485,6 +485,8 @@ final class AVFoundationMeetingAudioPlaybackEngine: MeetingAudioPlaybackEngine {
 
     private let player: AVPlayer
     private let compositionBuilder: CompositionBuilder
+    private let outputDevicePreference:
+        any AudioOutputDevicePreferenceReading
     private let observers = ObserverStorage()
     private var generation: UInt64 = 0
 
@@ -493,10 +495,14 @@ final class AVFoundationMeetingAudioPlaybackEngine: MeetingAudioPlaybackEngine {
         compositionBuilder: @escaping CompositionBuilder = { source in
             try await AVFoundationMeetingAudioPlaybackEngine
                 .makeComposition(for: source)
-        }
+        },
+        outputDevicePreference:
+            any AudioOutputDevicePreferenceReading =
+                SystemDefaultAudioOutputDevicePreference()
     ) {
         self.player = player
         self.compositionBuilder = compositionBuilder
+        self.outputDevicePreference = outputDevicePreference
     }
 
     func prepare(
@@ -513,6 +519,13 @@ final class AVFoundationMeetingAudioPlaybackEngine: MeetingAudioPlaybackEngine {
                 throw CancellationError()
             }
             let item = AVPlayerItem(asset: composition)
+            let outputDeviceID = await outputDevicePreference
+                .preferredOutputDeviceID()
+            try Task.checkCancellation()
+            guard generation == requestedGeneration else {
+                throw CancellationError()
+            }
+            player.audioOutputDeviceUniqueID = outputDeviceID
             player.replaceCurrentItem(with: item)
             observers.periodicTimeObserver = player.addPeriodicTimeObserver(
                 forInterval: CMTime(value: 1, timescale: 30),

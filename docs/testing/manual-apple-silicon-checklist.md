@@ -1,6 +1,6 @@
 # MeetingNotes Apple Silicon 验证清单
 
-更新日期：2026-07-28
+更新日期：2026-08-01
 目标平台：macOS 15+、Apple Silicon（arm64）
 
 ## 自动化前置条件
@@ -30,6 +30,7 @@ xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
 - [x] 点击结束后录音浮窗在 3 秒内消失，再进入转录收尾阶段。
 - [x] 详情页可返回录音首页，返回前后历史会议侧栏和会议行都保留。
 - [x] 设置页有两个独立的“测试连接”按钮，并显示 DeepSeek 模型和 Notion 页面标题。
+- [x] 设置页显示 MeetingNotes 专用输入/输出设备、测试按钮、权限修复、智能诊断、本地预览、发送同意和取消流程。
 - [x] “总结并归档”依次显示正在总结、正在归档、已归档与 Notion 链接。
 - [x] 右键菜单的重命名、最近置顶/取消置顶、删除取消与确认流程可用，详情页也可重命名。
 - [x] 本地录音播放器显示竖线波形，支持播放/暂停和键盘拖动等效的实际跳转，暂停后时间保持稳定。
@@ -55,6 +56,57 @@ xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
 
 对应自动化：`MeetingNotesTests/LongRecordingHarnessTests.swift`。真实 PCM 分片边界和文件帧数另由 `SegmentedPCMWriterTests` 覆盖。
 
+## 音频设备与智能诊断真机验收（待用户手动确认）
+
+### 设备作用范围
+
+- [ ] 输入设备选择只控制 MeetingNotes：线下会议和在线会议的本机麦克风轨使用该设备；不修改 macOS 全局输入设备。
+- [ ] 输出设备选择只控制 MeetingNotes 的录音回放和测试音；不修改 macOS 全局输出设备或其他 App。
+- [ ] 设置页打开时接入、断开或切换系统默认设备，列表会自动刷新；快速连续变化后显示最后一次设备状态。
+- [ ] 所选设备断开时，界面提示回退到系统默认或其他可用设备；原设备重新连接后仍保留原偏好。
+- [ ] 正式录音开始后，设备选择、设备测试和智能诊断均不可启动；结束录音后恢复可用。
+
+### 约 8 秒智能诊断步骤
+
+1. 使用 `⌘,` 打开设置，选择输入和输出设备，点击“保存设置”。
+2. 点击“开始智能诊断”；确认 1 秒测试音是否听到。
+3. 麦克风检测阶段持续正常说话约 3 秒。
+4. 系统音频检测阶段保持扬声器可播放，等待约 3 秒。
+5. 确认本地问题、解决方案和“将发送的数据预览”立即出现；此时尚未请求 DeepSeek。
+6. 检查预览后勾选发送同意，再点击“发送给 DeepSeek”；不勾选时按钮应保持禁用。
+7. 若 DeepSeek 成功，确认只得到简短问题和解决方案；若 Key 缺失、断网、超时或响应无效，确认本地结论仍保留。
+8. 中途点击“取消”或关闭设置，确认测试音、麦克风与临时系统音频采集立即停止，随后可正常开始会议录音。
+
+### DeepSeek 数据边界
+
+发送内容仅包括所选模型、固定诊断提示和界面预览中的白名单 JSON：应用版本、Mac 型号类别、macOS 版本、权限枚举、经截断和控制字符过滤的设备显示名称、连接/默认/占用状态、帧数、分桶信号等级、采样率、声道数、观察时长、测试音结果、本地问题/建议代码及 API 错误类别。DeepSeek API Key 仅作为 HTTPS 授权请求头使用，不进入诊断 JSON。
+
+- [ ] 预览和请求中不存在录音或测试音频样本。
+- [ ] 不存在转录、总结、会议标题、书签或 Notion 内容。
+- [ ] 不存在 DeepSeek API Key、Notion Token、设备稳定 ID、用户名、绝对路径、会议文件名或原始系统日志。
+- [ ] 发送前必须由用户逐次勾选同意；重新运行诊断后不能沿用上一次同意。
+
+### 权限说明
+
+macOS 首次麦克风和屏幕录制授权由系统隐私机制控制。MeetingNotes 只能请求权限并打开相应系统设置，不能绕过、静默开启或替用户修改授权。诊断会区分“已授权”“已拒绝”“尚未决定”和“系统当前不可探测”；按系统提示完成授权后重新运行诊断。
+
+### 手动硬件矩阵
+
+| 场景 | 操作与期望 | 结果 |
+|---|---|---|
+| 内置输入 | 选择内置麦克风，测试与线下录音均有可见电平和可播放声音 | [ ] |
+| USB/Bluetooth 输入（如有） | 选择外接麦克风，测试、线下录音及在线“我”轨都使用该设备 | [ ] |
+| 内置输出 | 播放测试音及会议回放均从内置扬声器输出 | [ ] |
+| 外部输出（如有） | 选择耳机/显示器后，测试音及会议回放从所选设备输出 | [ ] |
+| 线下录音 | 正常说话后停止，主录音可播放、转录存在；持续静音会给出警告 | [ ] |
+| 在线双轨 | 播放远端声音并对麦克风说话；主录音可播放，“我”与“远端”来源保持分离 | [ ] |
+| 设备断开 | 断开已选输入/输出，确认出现回退提示且仍可使用可用设备 | [ ] |
+| 权限拒绝 | 分别拒绝麦克风/屏幕录制，确认诊断给出对应问题和权限修复入口 | [ ] |
+| DeepSeek 可用 | 检查预览并同意发送，获得简短通俗解释 | [ ] |
+| DeepSeek 不可用 | 移除 Key 或断网，本地结论保留且没有发送成功误报 | [ ] |
+| 无有效帧 | 开始录音后约 5 秒仍无音频帧，确认停止为失败并提示前往设置运行智能诊断 | [ ] |
+| 单轨静音 | 在线会议只让一轨有声，确认健康轨继续保存，静音轨显示降级警告 | [ ] |
+
 ## 说话人分离与详情布局真机验收（待用户手动确认）
 
 - [ ] 设置中的 FluidAudio 说话人分离实验功能默认关闭；开始会议时保存本次会议的设置快照，录制中途修改设置只影响后续新会议。
@@ -67,7 +119,7 @@ xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
 - [ ] 来源音轨写入或说话人分离降级后，混合主录音仍可播放；详情页显示不阻塞其他操作、且可关闭的警告。
 - [ ] 旧会议仍可播放并显示原有转录；缺少可信说话人身份时不显示误导性的说话人徽标。
 
-## 真机端到端检查（Task 12，待用户手动确认）
+## 真机端到端检查（待用户手动确认）
 
 每项记录日期、macOS 版本、机器型号、结果和证据路径。
 
@@ -110,3 +162,7 @@ xcodebuild test -project MeetingNotes.xcodeproj -scheme MeetingNotes \
 | 2026-07-17 | 签名 UI 流程 + 长录音 harness | 通过 | 完整 UI 8/8、harness 1/1、0 失败；`/tmp/meetingnotes-task12-ui-20260717-115107/Logs/Test/Test-MeetingNotes-2026.07.17_11-55-10-+0800.xcresult`。`-uiTesting` 使用假服务，不代表真实 DeepSeek/Notion 通过 |
 | 2026-07-17 | 固定 Debug 验收包 | 自动化通过 | `/tmp/meetingnotes-feature-real-build/Build/Products/Debug/MeetingNotes.app`；`file` = Mach-O 64-bit executable arm64，`lipo` = arm64，严格 `codesign --verify` 通过；仅 ad-hoc 本机签名，不可用于分发 |
 | 2026-07-17 | 真实录音、在线捕获、Notion 归档/标题同步 | 待用户手动确认 | 自动化证据不足以声称这些真实权限、语音或外部服务流程已通过 |
+| 2026-08-01 | 完整 arm64 单元回归 | 通过 | 662/662、0 失败；包含设备回退、热插拔刷新合并、设置会话隔离和采集取消竞态测试；`.deriveddata-audio-diagnostics-final/Logs/Test/Test-MeetingNotes-2026.08.01_23-41-24-+0800.xcresult` |
+| 2026-08-01 | 完整 MeetingFlow UI 回归 | 通过 | 最近一次成功进入用例的回归为 9/9、0 失败；包含音频设备与智能诊断 UI；`~/Library/Developer/Xcode/DerivedData/MeetingNotes-aadthspcjnfjcacraljrzxdobzyr/Logs/Test/Test-MeetingNotes-2026.08.01_23-07-39-+0800.xcresult` |
+| 2026-08-01 | 最终 MeetingFlow UI 重跑 | 环境阻塞 | macOS XCTest 在 0 个用例执行前报 `Timed out while enabling automation mode`，不是产品断言失败；`~/Library/Developer/Xcode/DerivedData/MeetingNotes-aadthspcjnfjcacraljrzxdobzyr/Logs/Test/Test-MeetingNotes-2026.08.01_23-41-56-+0800.xcresult` |
+| 2026-08-01 | Debug 构建与诊断隐私静态检查 | 通过 | `BUILD SUCCEEDED`；`git diff --check` 无错误；诊断目录的敏感词搜索仅命中 API Key 的 HTTPS 授权请求头边界，未进入诊断 JSON |

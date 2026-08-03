@@ -79,7 +79,7 @@ struct NotionClient: NotionAPIClient, Sendable {
     func append(
         blocks: [NotionBlockDraft],
         to pageID: String
-    ) async throws {
+    ) async throws -> [String] {
         guard !blocks.isEmpty, blocks.count <= 100 else {
             throw NotionClientError.invalidRequest
         }
@@ -96,7 +96,42 @@ struct NotionClient: NotionAPIClient, Sendable {
         } catch {
             throw NotionClientError.invalidRequest
         }
-        _ = try await perform(request)
+        let response: AppendBlocksResponse
+        do {
+            response = try decoder.decode(
+                AppendBlocksResponse.self,
+                from: try await perform(request)
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as NotionClientError {
+            throw error
+        } catch {
+            throw NotionClientError.invalidResponse
+        }
+        let blockIDs = response.results.map {
+            $0.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard blockIDs.count == blocks.count,
+              blockIDs.allSatisfy({ !$0.isEmpty }),
+              Set(blockIDs).count == blockIDs.count else {
+            throw NotionClientError.invalidResponse
+        }
+        return blockIDs
+    }
+
+    func archiveBlock(id: String) async throws {
+        let canonicalID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !canonicalID.isEmpty else {
+            throw NotionClientError.invalidRequest
+        }
+        _ = try await perform(
+            request(
+                method: "DELETE",
+                path: ["blocks", canonicalID],
+                timeout: 30
+            )
+        )
     }
 
     func updatePageTitle(pageID: String, title: String) async throws {
@@ -273,6 +308,14 @@ private struct PlainRichText: Encodable {
 
 private struct AppendBlocksRequest: Encodable {
     let children: [NotionBlockDraft]
+}
+
+private struct AppendBlocksResponse: Decodable {
+    let results: [Block]
+
+    struct Block: Decodable {
+        let id: String
+    }
 }
 
 private struct UpdatePageTitleRequest: Encodable {

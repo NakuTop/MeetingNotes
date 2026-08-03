@@ -3,6 +3,161 @@ import XCTest
 
 final class FluidAudioSpeakerDiarizerTimelineTests:
     DiarizationAdapterTestCase {
+    func testContinuesReadingAfterPositivePartialBuffer() throws {
+        var progress = try DiarizationSegmentReadProgress(
+            expectedFrames: 10
+        )
+
+        let firstDecision = try progress.recordRead(
+            requestedFrames: 10,
+            decodedFrames: 4
+        )
+
+        XCTAssertEqual(firstDecision, .continueReading)
+        XCTAssertEqual(progress.framesRead, 4)
+        XCTAssertEqual(progress.remainingFrames, 6)
+
+        let secondDecision = try progress.recordRead(
+            requestedFrames: 6,
+            decodedFrames: 6
+        )
+
+        XCTAssertEqual(secondDecision, .complete)
+        XCTAssertEqual(progress.framesRead, 10)
+        XCTAssertEqual(
+            try progress.paddingFrames(maximum: 1_024),
+            0
+        )
+    }
+
+    func testPadsBoundedCAFTailShortReadWithSilence() async throws {
+        let root = try makeTemporaryRoot()
+        let physicalFrameCount = 719_872
+        let declaredFrameCount: Int64 = 720_000
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [
+                Array(repeating: 0.25, count: physicalFrameCount),
+            ],
+            segmentStartTimes: [0],
+            declaredFrameCounts: [declaredFrameCount]
+        )
+        let converter = DiarizationAdapterTestConverter()
+        let engine = DiarizationAdapterImmediateEngine(results: [[]])
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: engine,
+            converter: converter
+        )
+
+        _ = try await diarizer.diarize(source: source)
+
+        let recordedInputs = await converter.recordedInputSamples()
+        let captured = try XCTUnwrap(recordedInputs.first)
+        XCTAssertEqual(captured.count, Int(declaredFrameCount))
+        XCTAssertEqual(
+            captured[physicalFrameCount - 1],
+            0.25,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            Array(captured[physicalFrameCount..<Int(declaredFrameCount)]),
+            Array(repeating: 0, count: 128)
+        )
+    }
+
+    func testRejectsSegmentWhenCAFDecodesNoFrames() async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [[]],
+            segmentStartTimes: [0],
+            declaredFrameCounts: [1]
+        )
+        let converter = DiarizationAdapterTestConverter()
+        let engine = DiarizationAdapterImmediateEngine(results: [[]])
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: engine,
+            converter: converter
+        )
+
+        await assertDiarizationFailure(.timelineAssemblyFailed) {
+            try await diarizer.diarize(source: source)
+        }
+
+        let recordedInputs = await converter.recordedInputSamples()
+        let counts = await engine.counts()
+        XCTAssertTrue(recordedInputs.isEmpty)
+        XCTAssertEqual(counts.process, 0)
+    }
+
+    func testRejectsCAFTailShortfallAboveSafetyBound() async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [[0.25]],
+            segmentStartTimes: [0],
+            declaredFrameCounts: [1_026]
+        )
+        let converter = DiarizationAdapterTestConverter()
+        let engine = DiarizationAdapterImmediateEngine(results: [[]])
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: engine,
+            converter: converter
+        )
+
+        await assertDiarizationFailure(.timelineAssemblyFailed) {
+            try await diarizer.diarize(source: source)
+        }
+
+        let recordedInputs = await converter.recordedInputSamples()
+        let counts = await engine.counts()
+        XCTAssertTrue(recordedInputs.isEmpty)
+        XCTAssertEqual(counts.process, 0)
+    }
+
+    func testPadsCAFTailShortfallAtSafetyBound() async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [[0.25]],
+            segmentStartTimes: [0],
+            declaredFrameCounts: [1_025]
+        )
+        let converter = DiarizationAdapterTestConverter()
+        let engine = DiarizationAdapterImmediateEngine(results: [[]])
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: engine,
+            converter: converter
+        )
+
+        _ = try await diarizer.diarize(source: source)
+
+        let recordedInputs = await converter.recordedInputSamples()
+        let captured = try XCTUnwrap(recordedInputs.first)
+        XCTAssertEqual(captured.count, 1_025)
+        XCTAssertEqual(captured[0], 0.25, accuracy: 0.001)
+        XCTAssertEqual(
+            Array(captured[1..<1_025]),
+            Array(repeating: 0, count: 1_024)
+        )
+    }
+
     func testGappedSegmentsInsertSilenceAndKeepPostGapSpeakerTiming()
         async throws {
         let root = try makeTemporaryRoot()
@@ -102,7 +257,7 @@ final class FluidAudioSpeakerDiarizerTimelineTests:
             converter: converter
         )
 
-        await assertInferenceFailure {
+        await assertDiarizationFailure(.invalidSource) {
             try await diarizer.diarize(source: malformed)
         }
 
@@ -135,7 +290,7 @@ final class FluidAudioSpeakerDiarizerTimelineTests:
             converter: converter
         )
 
-        await assertInferenceFailure {
+        await assertDiarizationFailure(.invalidSource) {
             try await diarizer.diarize(source: source)
         }
 
@@ -166,7 +321,7 @@ final class FluidAudioSpeakerDiarizerTimelineTests:
             converter: converter
         )
 
-        await assertInferenceFailure {
+        await assertDiarizationFailure(.invalidSource) {
             try await diarizer.diarize(source: source)
         }
 
@@ -197,7 +352,7 @@ final class FluidAudioSpeakerDiarizerTimelineTests:
             converter: converter
         )
 
-        await assertInferenceFailure {
+        await assertDiarizationFailure(.invalidSource) {
             try await diarizer.diarize(source: source)
         }
 
@@ -233,7 +388,7 @@ final class FluidAudioSpeakerDiarizerTimelineTests:
             )
         )
 
-        await assertInferenceFailure {
+        await assertDiarizationFailure(.invalidSource) {
             try await diarizer.diarize(source: source)
         }
 

@@ -2,6 +2,21 @@ import SwiftUI
 
 struct ModelStatusView: View {
     @Bindable var viewModel: TranscriptionModelViewModel
+    let mode: TranscriptionQualityMode?
+    let accessibilityIdentifier: String
+    let showsRetryButton: Bool
+
+    init(
+        viewModel: TranscriptionModelViewModel,
+        mode: TranscriptionQualityMode? = nil,
+        accessibilityIdentifier: String = "model.status",
+        showsRetryButton: Bool = true
+    ) {
+        self.viewModel = viewModel
+        self.mode = mode
+        self.accessibilityIdentifier = accessibilityIdentifier
+        self.showsRetryButton = showsRetryButton
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -18,13 +33,14 @@ struct ModelStatusView: View {
 
             Spacer()
 
-            if viewModel.status == .downloading {
+            if status == .downloading {
                 ProgressView()
                     .controlSize(.small)
-            } else if viewModel.canRetry {
+            } else if showsRetryButton && viewModel.canRetry(mode: displayMode) {
                 Button("重试模型准备", systemImage: "arrow.clockwise") {
+                    let mode = displayMode
                     Task {
-                        await viewModel.retry()
+                        await viewModel.retry(mode: mode)
                     }
                 }
                 .controlSize(.small)
@@ -34,15 +50,12 @@ struct ModelStatusView: View {
         .padding(12)
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("model.status")
-        .task {
-            await viewModel.prepareIfNeeded()
-        }
+        .accessibilityIdentifier(accessibilityIdentifier)
     }
 
     @ViewBuilder
     private var statusIcon: some View {
-        switch viewModel.status {
+        switch status {
         case .notDownloaded:
             Image(systemName: "arrow.down.circle")
                 .foregroundStyle(.secondary)
@@ -59,24 +72,33 @@ struct ModelStatusView: View {
     }
 
     private var title: String {
-        switch viewModel.status {
-        case .notDownloaded: "本地转录模型尚未准备"
-        case .downloading: "正在下载或加载本地转录模型"
-        case .ready: "本地转录模型可用"
-        case .failed: "本地转录模型准备失败"
+        let displayName = viewModel.descriptor(for: displayMode).mode.displayName
+        return switch status {
+        case .notDownloaded: "\(displayName)模型尚未准备"
+        case .downloading: "正在下载或加载\(displayName)模型"
+        case .ready: "\(displayName)模型可用"
+        case .failed: "\(displayName)模型准备失败"
         }
     }
 
     private var detail: String {
-        switch viewModel.status {
+        switch status {
         case .notDownloaded:
-            "仍可开始录音；模型就绪前不会宣称实时转录。"
+            "仍可发起会议；开始录音前会先准备模型。"
         case .downloading:
-            "录音不受影响，音频会安全保存在本机。"
+            "正在准备本地转录模型，会议开始前会等待完成。"
         case .ready:
             "会议音频会在这台 Mac 上转录。"
         case .failed:
-            "可继续录音；请检查网络、磁盘空间后重试。"
+            "会议开始时会重试；也可先检查网络和磁盘空间。"
         }
+    }
+
+    private var displayMode: TranscriptionQualityMode {
+        mode ?? viewModel.selectedMode
+    }
+
+    private var status: TranscriptionModelStatus {
+        viewModel.status(for: displayMode)
     }
 }

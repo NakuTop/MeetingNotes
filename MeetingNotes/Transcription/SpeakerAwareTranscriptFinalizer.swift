@@ -20,6 +20,32 @@ protocol MeetingSpeakerFinalizing: Sendable {
         diarizationRequested: Bool,
         provisional: [TranscriptDraft]
     ) async -> SpeakerFinalizationOutcome
+
+    func finalize(
+        meetingID: UUID,
+        mode: MeetingMode,
+        diarizationRequested: Bool,
+        provisional: [TranscriptDraft],
+        transcriptionService: any TranscriptionService
+    ) async -> SpeakerFinalizationOutcome
+}
+
+extension MeetingSpeakerFinalizing {
+    func finalize(
+        meetingID: UUID,
+        mode: MeetingMode,
+        diarizationRequested: Bool,
+        provisional: [TranscriptDraft],
+        transcriptionService: any TranscriptionService
+    ) async -> SpeakerFinalizationOutcome {
+        _ = transcriptionService
+        return await finalize(
+            meetingID: meetingID,
+            mode: mode,
+            diarizationRequested: diarizationRequested,
+            provisional: provisional
+        )
+    }
 }
 
 struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
@@ -28,15 +54,21 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
         "speaker_diarization_unavailable"
     static let diarizationModelPreparationFailedCode =
         "speaker_diarization_model_preparation_failed"
+    static let diarizationInvalidSourceCode =
+        "speaker_diarization_invalid_source"
+    static let diarizationTimelineAssemblyFailedCode =
+        "speaker_diarization_timeline_assembly_failed"
+    static let diarizationConversionFailedCode =
+        "speaker_diarization_conversion_failed"
     static let diarizationInferenceFailedCode =
         "speaker_diarization_inference_failed"
-    static let diarizationSourceFailedCode =
-        "speaker_diarization_source_failed"
+    static let diarizationResultValidationFailedCode =
+        "speaker_diarization_result_validation_failed"
     static let diarizationFailedCode =
         "speaker_diarization_failed"
 
     private let reader: any MeetingTrackAudioReading
-    private let transcriptionService: any TranscriptionService
+    private let transcriptionService: (any TranscriptionService)?
     private let sourceLoader: (any MeetingTrackAudioSourceLoading)?
     private let diarizer: (any SpeakerDiarizing)?
     private let merger: TranscriptMerger
@@ -45,7 +77,7 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
 
     init(
         reader: any MeetingTrackAudioReading,
-        transcriptionService: any TranscriptionService,
+        transcriptionService: (any TranscriptionService)? = nil,
         sourceLoader: (any MeetingTrackAudioSourceLoading)? = nil,
         diarizer: (any SpeakerDiarizing)? = nil,
         merger: TranscriptMerger = TranscriptMerger(),
@@ -76,7 +108,46 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
                 provisional: provisional
             )
         }
+        guard let transcriptionService else {
+            return .degraded(
+                replacement: nil,
+                sourceRevision: nil,
+                errorCode: "source_track_transcription_failed_microphone"
+            )
+        }
+        return await finalizeOnline(
+            meetingID: meetingID,
+            diarizationRequested: diarizationRequested,
+            transcriptionService: transcriptionService
+        )
+    }
 
+    func finalize(
+        meetingID: UUID,
+        mode: MeetingMode,
+        diarizationRequested: Bool,
+        provisional: [TranscriptDraft],
+        transcriptionService: any TranscriptionService
+    ) async -> SpeakerFinalizationOutcome {
+        guard mode == .online else {
+            return await finalizeOffline(
+                meetingID: meetingID,
+                diarizationRequested: diarizationRequested,
+                provisional: provisional
+            )
+        }
+        return await finalizeOnline(
+            meetingID: meetingID,
+            diarizationRequested: diarizationRequested,
+            transcriptionService: transcriptionService
+        )
+    }
+
+    private func finalizeOnline(
+        meetingID: UUID,
+        diarizationRequested: Bool,
+        transcriptionService: any TranscriptionService
+    ) async -> SpeakerFinalizationOutcome {
         var attributedTracks: [AttributedTranscriptDraft] = []
         var mergedSystemDrafts: [TranscriptDraft] = []
         for track in [AudioTrack.microphone, .system] {
@@ -143,7 +214,7 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
             return .degraded(
                 replacement: coarseReplacement,
                 sourceRevision: Self.coarseSourceRevision,
-                errorCode: Self.diarizationSourceFailedCode
+                errorCode: Self.diarizationInvalidSourceCode
             )
         }
 
@@ -152,7 +223,7 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
                 source: systemSource
             )
             guard !intervals.isEmpty else {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.resultValidationFailed
             }
             let microphoneDrafts = attributedTracks.filter {
                 $0.source == .microphone
@@ -204,7 +275,7 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
             return .degraded(
                 replacement: nil,
                 sourceRevision: nil,
-                errorCode: Self.diarizationSourceFailedCode
+                errorCode: Self.diarizationInvalidSourceCode
             )
         }
 
@@ -213,7 +284,7 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
                 source: masterSource
             )
             guard !intervals.isEmpty else {
-                throw SpeakerDiarizationError.inferenceFailed
+                throw SpeakerDiarizationError.resultValidationFailed
             }
             return .replacement(
                 assembler.assemble(
@@ -235,14 +306,22 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
         }
     }
 
-    private static func diarizationErrorCode(
+    static func diarizationErrorCode(
         for error: Error
     ) -> String {
         switch error {
         case SpeakerDiarizationError.modelPreparationFailed:
             diarizationModelPreparationFailedCode
+        case SpeakerDiarizationError.invalidSource:
+            diarizationInvalidSourceCode
+        case SpeakerDiarizationError.timelineAssemblyFailed:
+            diarizationTimelineAssemblyFailedCode
+        case SpeakerDiarizationError.conversionFailed:
+            diarizationConversionFailedCode
         case SpeakerDiarizationError.inferenceFailed:
             diarizationInferenceFailedCode
+        case SpeakerDiarizationError.resultValidationFailed:
+            diarizationResultValidationFailedCode
         default:
             diarizationFailedCode
         }

@@ -18,20 +18,27 @@ extension MeetingFileStore: MeetingFileDeleting {}
 
 protocol MeetingStarting: Sendable {
     @discardableResult
-    func start(mode: MeetingMode) async throws -> UUID
+    func start(
+        mode: MeetingMode,
+        onMeetingCreated: @Sendable @escaping (UUID) async -> Void
+    ) async throws -> UUID
+}
+
+extension MeetingStarting {
+    @discardableResult
+    func start(mode: MeetingMode) async throws -> UUID {
+        try await start(mode: mode, onMeetingCreated: { _ in })
+    }
 }
 
 extension MeetingCoordinator: MeetingStarting {}
 
-protocol MeetingDeletionGuarding: Sendable {
-    func canDeleteMeeting(id: UUID) async -> Bool
+protocol MeetingDeletionPreparing: Sendable {
+    func prepareForDeletion(id: UUID) async throws
 }
 
-struct AllowMeetingDeletionGuard: MeetingDeletionGuarding {
-    func canDeleteMeeting(id: UUID) async -> Bool {
-        _ = id
-        return true
-    }
+struct NoopMeetingDeletionPreparer: MeetingDeletionPreparing {
+    func prepareForDeletion(id: UUID) async throws { _ = id }
 }
 
 @MainActor
@@ -49,7 +56,7 @@ final class MeetingLibraryViewModel {
     private let titleUpdater: any MeetingTitleUpdating
     private let operationGate: MeetingOperationGate
     private let playbackStopper: any MeetingPlaybackStopping
-    private let deletionGuard: any MeetingDeletionGuarding
+    private let deletionPreparer: any MeetingDeletionPreparing
     private let systemRequirements: any SystemRequirementChecking
     private let recordingsURL: URL
 
@@ -77,7 +84,8 @@ final class MeetingLibraryViewModel {
         titleUpdater: any MeetingTitleUpdating,
         operationGate: MeetingOperationGate,
         playbackStopper: any MeetingPlaybackStopping,
-        deletionGuard: any MeetingDeletionGuarding = AllowMeetingDeletionGuard(),
+        deletionPreparer: any MeetingDeletionPreparing =
+            NoopMeetingDeletionPreparer(),
         systemRequirements: any SystemRequirementChecking = SystemRequirements(),
         recordingsURL: URL = FileManager.default.temporaryDirectory
     ) {
@@ -87,7 +95,7 @@ final class MeetingLibraryViewModel {
         self.titleUpdater = titleUpdater
         self.operationGate = operationGate
         self.playbackStopper = playbackStopper
-        self.deletionGuard = deletionGuard
+        self.deletionPreparer = deletionPreparer
         self.systemRequirements = systemRequirements
         self.recordingsURL = recordingsURL
         systemRequirementsSnapshot = systemRequirements.snapshot(
@@ -198,10 +206,18 @@ final class MeetingLibraryViewModel {
         defer { isStarting = false }
 
         do {
-            let createdMeetingID = try await starter.start(mode: mode)
+            let createdMeetingID = try await starter.start(
+                mode: mode,
+                onMeetingCreated: { [weak self] meetingID in
+                    await self?.presentCreatedMeeting(meetingID)
+                }
+            )
             load()
             selectedMeetingID = createdMeetingID
+        } catch is CancellationError {
+            load()
         } catch {
+            load()
             let message = Self.message(for: error, operation: .start)
             if case let MeetingCoordinatorError.permissionDenied(permissions) =
                 error {
@@ -226,35 +242,27 @@ final class MeetingLibraryViewModel {
 
     func deleteMeeting(id: UUID) async {
         guard !deletingMeetingIDs.contains(id) else { return }
-        guard let meeting = meetingForOperation(id: id) else {
+        guard meetingForOperation(id: id) != nil else {
             setErrorPresentation(message: "找不到要删除的会议，请刷新后重试。")
-            return
-        }
-        guard canDelete(meeting) else {
-            setErrorPresentation(message: "会议正在进行关键操作，请稍后重试。")
-            return
-        }
-        guard operationGate.acquire(.delete, for: id) else {
-            setErrorPresentation(message: "会议正在执行其他操作，暂时不能删除。")
-            return
-        }
-        defer { operationGate.release(.delete, for: id) }
-        guard await deletionGuard.canDeleteMeeting(id: id) else {
-            setErrorPresentation(message: "会议仍在完成录音处理，请稍后重试。")
             return
         }
         deletingMeetingIDs.insert(id)
         setErrorPresentation()
         defer { deletingMeetingIDs.remove(id) }
+        if selectedMeetingID == id {
+            selectedMeetingID = nil
+        }
 
-        await playbackStopper.stopAndWait(meetingID: id)
         do {
+            try await operationGate.acquireWhenAvailable(.delete, for: id)
+            defer { operationGate.release(.delete, for: id) }
+            try await deletionPreparer.prepareForDeletion(id: id)
+            await playbackStopper.stopAndWait(meetingID: id)
             try await fileDeleter.deleteMeetingDirectory(for: id)
             try repository.deleteMeeting(id: id)
-            if selectedMeetingID == id {
-                selectedMeetingID = nil
-            }
             load()
+        } catch is CancellationError {
+            return
         } catch {
             setErrorPresentation(
                 message: Self.message(for: error, operation: .delete)
@@ -267,13 +275,8 @@ final class MeetingLibraryViewModel {
     }
 
     func canDelete(_ meeting: MeetingRecord) -> Bool {
-        switch meeting.state {
-        case .preparing, .recording, .paused:
-            false
-        case .idle, .finalizing, .ready, .summarizing,
-                .summaryReady, .archiving, .archived:
-            true
-        }
+        _ = meeting
+        return true
     }
 
     func canRename(_ meeting: MeetingRecord) -> Bool {
@@ -320,6 +323,12 @@ final class MeetingLibraryViewModel {
             ?? (try? repository.meetings().first { $0.id == id })
     }
 
+    private func presentCreatedMeeting(_ meetingID: UUID) {
+        load()
+        guard meetings.contains(where: { $0.id == meetingID }) else { return }
+        selectedMeetingID = meetingID
+    }
+
     private func setErrorPresentation(
         message: String? = nil,
         repairPermissions: [CapturePermission] = [],
@@ -342,6 +351,9 @@ final class MeetingLibraryViewModel {
         for error: Error,
         operation: Operation
     ) -> String {
+        if case MeetingCoordinatorError.capturePipelineFailed = error {
+            return "未检测到有效录音。请打开设置并运行“智能诊断”。"
+        }
         if case let MeetingCoordinatorError.permissionDenied(permissions) = error {
             let names = permissions.sorted {
                 permissionRank($0) < permissionRank($1)

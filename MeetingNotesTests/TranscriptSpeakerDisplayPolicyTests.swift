@@ -2,6 +2,113 @@ import XCTest
 @testable import MeetingNotes
 
 final class TranscriptSpeakerDisplayPolicyTests: XCTestCase {
+    func testSemanticLabelPolicyExactlyMatchesEverySupportedCurrentRule() {
+        XCTAssertEqual(
+            TranscriptSpeakerLabelPolicy.label(
+                speakerID: "me",
+                source: .microphone
+            ),
+            "我"
+        )
+        XCTAssertEqual(
+            TranscriptSpeakerLabelPolicy.label(
+                speakerID: "remote",
+                source: .system
+            ),
+            "远端"
+        )
+        XCTAssertEqual(
+            TranscriptSpeakerLabelPolicy.label(
+                speakerID: "remote-2",
+                source: .system
+            ),
+            "远端 2"
+        )
+        XCTAssertEqual(
+            TranscriptSpeakerLabelPolicy.label(
+                speakerID: "room-3",
+                source: .room
+            ),
+            "说话人 3"
+        )
+    }
+
+    func testCustomSpeakerNameOverridesSemanticAndNumberedLabels() {
+        let names = [
+            "me": "沈明昊",
+            "remote-2": "张老师",
+            "raw-provider-id": "产品负责人",
+        ]
+
+        XCTAssertEqual(
+            TranscriptSpeakerLabelPolicy.label(
+                speakerID: "me",
+                source: .microphone,
+                customNames: names
+            ),
+            "沈明昊"
+        )
+        XCTAssertEqual(
+            TranscriptSpeakerLabelPolicy.label(
+                speakerID: "remote-2",
+                source: .system,
+                customNames: names
+            ),
+            "张老师"
+        )
+        XCTAssertEqual(
+            TranscriptSpeakerLabelPolicy.label(
+                speakerID: "raw-provider-id",
+                source: .system,
+                customNames: names
+            ),
+            "产品负责人"
+        )
+        XCTAssertNil(
+            TranscriptSpeakerLabelPolicy.label(
+                speakerID: nil,
+                source: .mixed,
+                customNames: names
+            )
+        )
+    }
+
+    func testSpeakerBadgeUsesCustomNameWithoutChangingStableIdentityStyle() {
+        XCTAssertEqual(
+            TranscriptSpeakerDisplayPolicy.badge(
+                speakerID: "remote-2",
+                source: .system,
+                customNames: ["remote-2": "张老师"]
+            ),
+            TranscriptSpeakerBadge(
+                label: "张老师",
+                paletteIndex: 1,
+                isLocalUser: false
+            )
+        )
+    }
+
+    func testSemanticLabelPolicyRejectsEveryUnsupportedCurrentRule() {
+        let unsupported: [(String?, TranscriptAudioSource)] = [
+            (nil, .mixed),
+            ("unknown", .system),
+            ("remote-2", .mixed),
+            ("me", .system),
+            ("remote-0", .system),
+            ("room--1", .room),
+            ("room-1", .microphone)
+        ]
+
+        for (speakerID, source) in unsupported {
+            XCTAssertNil(
+                TranscriptSpeakerLabelPolicy.label(
+                    speakerID: speakerID,
+                    source: source
+                )
+            )
+        }
+    }
+
     func testKnownSpeakerIDsMapToLocalizedBadges() {
         XCTAssertEqual(
             TranscriptSpeakerDisplayPolicy.badge(
@@ -112,5 +219,84 @@ final class TranscriptSpeakerDisplayPolicyTests: XCTestCase {
 
         XCTAssertEqual(entry.speakerID, "remote-2")
         XCTAssertEqual(entry.source, .system)
+    }
+
+    @MainActor
+    func testAdjacentSameSpeakerEntriesBecomeOneOrderedTurn() throws {
+        let firstID = UUID()
+        let secondID = UUID()
+        let transcripts = [
+            TranscriptRecord(
+                id: firstID,
+                startTime: 0,
+                endTime: 2,
+                text: " 第一段 ",
+                isFinal: true,
+                speakerID: "room-1",
+                sourceRawValue: TranscriptAudioSource.room.rawValue
+            ),
+            TranscriptRecord(
+                id: secondID,
+                startTime: 5,
+                endTime: 7,
+                text: "第二段",
+                isFinal: true,
+                speakerID: "room-1",
+                sourceRawValue: TranscriptAudioSource.room.rawValue
+            ),
+        ]
+
+        let turns = TranscriptDisplayPolicy.turns(
+            from: transcripts,
+            bookmarks: []
+        )
+
+        let turn = try XCTUnwrap(turns.first)
+        XCTAssertEqual(turns.count, 1)
+        XCTAssertEqual(turn.transcriptIDs, [firstID, secondID])
+        XCTAssertEqual(turn.text, "第一段 第二段")
+        XCTAssertEqual(turn.startTime, 0)
+        XCTAssertEqual(turn.endTime, 7)
+        XCTAssertEqual(transcripts.map(\.text), [" 第一段 ", "第二段"])
+    }
+
+    @MainActor
+    func testTurnBoundariesRespectSpeakerGapNilIdentityAndBookmarks() {
+        let transcripts = [
+            makeTranscript(start: 0, end: 1, speakerID: "room-1"),
+            makeTranscript(start: 2, end: 3, speakerID: "room-2"),
+            makeTranscript(start: 10, end: 11, speakerID: "room-2"),
+            makeTranscript(start: 12, end: 13, speakerID: nil),
+            makeTranscript(start: 14, end: 15, speakerID: nil),
+            makeTranscript(start: 29, end: 30, speakerID: "room-3"),
+            makeTranscript(start: 34, end: 35, speakerID: "room-3"),
+        ]
+        let bookmark = BookmarkRecord(timestamp: 0)
+
+        let turns = TranscriptDisplayPolicy.turns(
+            from: transcripts,
+            bookmarks: [bookmark]
+        )
+
+        XCTAssertEqual(turns.count, 7)
+        XCTAssertEqual(turns.map(\.isHighlighted), [
+            true, true, true, true, true, true, false,
+        ])
+    }
+
+    @MainActor
+    private func makeTranscript(
+        start: TimeInterval,
+        end: TimeInterval,
+        speakerID: String?
+    ) -> TranscriptRecord {
+        TranscriptRecord(
+            startTime: start,
+            endTime: end,
+            text: "\(start)",
+            isFinal: true,
+            speakerID: speakerID,
+            sourceRawValue: TranscriptAudioSource.room.rawValue
+        )
     }
 }

@@ -3,6 +3,54 @@ import XCTest
 @testable import MeetingNotes
 
 final class AppSettingsStoreTests: XCTestCase {
+    func testTranscriptionQualityDefaultsToBalancedWhenPreferenceIsMissing() throws {
+        let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        let store = AppSettingsStore(defaults: defaults)
+
+        XCTAssertEqual(store.transcriptionQualityMode, .balanced)
+    }
+
+    func testTranscriptionQualityModesPersistAcrossStoreInstances() throws {
+        for mode in TranscriptionQualityMode.allCases {
+            let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer {
+                defaults.removePersistentDomain(forName: suiteName)
+            }
+            let first = AppSettingsStore(defaults: defaults)
+
+            first.transcriptionQualityMode = mode
+
+            let reloaded = AppSettingsStore(defaults: defaults)
+            XCTAssertEqual(reloaded.transcriptionQualityMode, mode)
+            XCTAssertEqual(
+                defaults.string(forKey: "settings.transcriptionQualityMode"),
+                mode.rawValue
+            )
+        }
+    }
+
+    func testUnknownTranscriptionQualityPreferenceFallsBackToBalanced() throws {
+        let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        defaults.set(
+            "future-quality-mode",
+            forKey: "settings.transcriptionQualityMode"
+        )
+
+        let store = AppSettingsStore(defaults: defaults)
+
+        XCTAssertEqual(store.transcriptionQualityMode, .balanced)
+    }
+
     @MainActor
     func testMainActorSpeakerPreferenceAdapterReadsStoreAsynchronously() async throws {
         let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
@@ -151,5 +199,45 @@ final class AppSettingsStoreTests: XCTestCase {
         store.deepSeekModel = ""
 
         XCTAssertEqual(store.deepSeekModel, AppSettingsStore.defaultDeepSeekModel)
+    }
+
+    func testFrequentSpeakerNamesNormalizeAndPersistAcrossInstances() throws {
+        let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let store = AppSettingsStore(defaults: defaults)
+
+        store.frequentSpeakerNames = [
+            " 张三 ",
+            "张三",
+            "ALICE",
+            "alice",
+            "",
+            String(repeating: "人", count: 41),
+        ]
+
+        XCTAssertEqual(store.frequentSpeakerNames, ["张三", "ALICE"])
+        XCTAssertEqual(
+            AppSettingsStore(defaults: defaults).frequentSpeakerNames,
+            ["张三", "ALICE"]
+        )
+    }
+
+    func testRememberSpeakerNameAppendsOnlyNewValidName() throws {
+        let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        let store = AppSettingsStore(defaults: defaults)
+        store.frequentSpeakerNames = ["张三"]
+
+        store.rememberSpeakerName(" 李四 ")
+        store.rememberSpeakerName("张三")
+        store.rememberSpeakerName("   ")
+
+        XCTAssertEqual(store.frequentSpeakerNames, ["张三", "李四"])
     }
 }

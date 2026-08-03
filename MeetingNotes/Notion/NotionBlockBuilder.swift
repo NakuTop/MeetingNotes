@@ -5,9 +5,48 @@ struct NotionMeetingPageContent: Equatable, Sendable {
     let startedAt: Date
     let duration: TimeInterval
     let mode: MeetingMode
-    let summary: GeneratedMeetingSummary
+    let kind: MeetingDocumentKind
+    let summary: GeneratedMeetingSummary?
+    let detailedMinutes: GeneratedDetailedMinutes?
     let bookmarks: [MeetingBookmarkInput]
     let transcripts: [MeetingTranscriptInput]
+
+    init(
+        title: String,
+        startedAt: Date,
+        duration: TimeInterval,
+        mode: MeetingMode,
+        kind: MeetingDocumentKind,
+        summary: GeneratedMeetingSummary?,
+        detailedMinutes: GeneratedDetailedMinutes?,
+        bookmarks: [MeetingBookmarkInput],
+        transcripts: [MeetingTranscriptInput]
+    ) throws {
+        if summary != nil, detailedMinutes != nil {
+            throw NotionMeetingPageContentError.multipleDocuments
+        }
+        switch kind {
+        case .summary:
+            guard summary != nil, detailedMinutes == nil else {
+                throw NotionMeetingPageContentError
+                    .missingRequestedDocument(kind)
+            }
+        case .detailedMinutes:
+            guard detailedMinutes != nil, summary == nil else {
+                throw NotionMeetingPageContentError
+                    .missingRequestedDocument(kind)
+            }
+        }
+        self.title = title
+        self.startedAt = startedAt
+        self.duration = duration
+        self.mode = mode
+        self.kind = kind
+        self.summary = summary
+        self.detailedMinutes = detailedMinutes
+        self.bookmarks = bookmarks
+        self.transcripts = transcripts
+    }
 }
 
 enum NotionBlockKind: String, Codable, Equatable, Sendable {
@@ -68,16 +107,31 @@ private struct NotionRichText: Encodable {
 struct NotionBlockBuilder: Sendable {
     let maximumTextLength: Int
     let maximumBlocksPerBatch: Int
+    let maximumRequestBodyBytes: Int
 
     init(
         maximumTextLength: Int = 1_900,
-        maximumBlocksPerBatch: Int = 100
+        maximumBlocksPerBatch: Int = 100,
+        maximumRequestBodyBytes: Int = 480_000
     ) {
-        self.maximumTextLength = max(1, maximumTextLength)
-        self.maximumBlocksPerBatch = max(1, maximumBlocksPerBatch)
+        self.maximumTextLength = min(1_900, max(2, maximumTextLength))
+        self.maximumBlocksPerBatch = min(
+            100,
+            max(1, maximumBlocksPerBatch)
+        )
+        self.maximumRequestBodyBytes = min(
+            480_000,
+            max(1, maximumRequestBodyBytes)
+        )
     }
 
     func blocks(for content: NotionMeetingPageContent) -> [NotionBlockDraft] {
+        metadataBlocks(for: content) + documentBlocks(for: content)
+    }
+
+    func metadataBlocks(
+        for content: NotionMeetingPageContent
+    ) -> [NotionBlockDraft] {
         var result: [NotionBlockDraft] = []
 
         appendHeading("元信息", to: &result)
@@ -86,19 +140,48 @@ struct NotionBlockBuilder: Sendable {
             text: metadata(for: content),
             to: &result
         )
+        return result
+    }
+
+    func documentBlocks(
+        for content: NotionMeetingPageContent
+    ) -> [NotionBlockDraft] {
+        switch content.kind {
+        case .summary:
+            guard let summary = content.summary else {
+                preconditionFailure(
+                    "Validated summary content must contain its payload."
+                )
+            }
+            return summaryBlocks(summary, content: content)
+        case .detailedMinutes:
+            guard let detailedMinutes = content.detailedMinutes else {
+                preconditionFailure(
+                    "Validated detailed-minutes content must contain its payload."
+                )
+            }
+            return detailedMinutesBlocks(detailedMinutes)
+        }
+    }
+
+    private func summaryBlocks(
+        _ summary: GeneratedMeetingSummary,
+        content: NotionMeetingPageContent
+    ) -> [NotionBlockDraft] {
+        var result: [NotionBlockDraft] = []
 
         appendHeading("摘要", to: &result)
-        append(kind: .paragraph, text: content.summary.overview, to: &result)
+        append(kind: .paragraph, text: summary.overview, to: &result)
 
         appendHeading("关键结论", to: &result)
-        appendList(content.summary.keyPoints, to: &result)
+        appendList(summary.keyPoints, to: &result)
 
         appendHeading("决定事项", to: &result)
-        appendList(content.summary.decisions, to: &result)
+        appendList(summary.decisions, to: &result)
 
         appendHeading("行动项", to: &result)
         appendList(
-            content.summary.actionItems.map(actionItemText),
+            summary.actionItems.map(actionItemText),
             to: &result
         )
 
@@ -106,23 +189,62 @@ struct NotionBlockBuilder: Sendable {
         let bookmarkLines = content.bookmarks
             .sorted { $0.timestamp < $1.timestamp }
             .map { "[\(formatTime($0.timestamp))] \($0.excerpt)" }
-        let insightLines = content.summary.bookmarkInsights.map {
+        let insightLines = summary.bookmarkInsights.map {
             "AI 解读：\($0)"
         }
         appendList(bookmarkLines + insightLines, to: &result)
 
         appendHeading("完整转录", to: &result)
         let transcriptLines = content.transcripts
+            .enumerated()
             .sorted { lhs, rhs in
-                if lhs.startTime == rhs.startTime {
-                    return lhs.endTime < rhs.endTime
+                if lhs.element.startTime != rhs.element.startTime {
+                    return lhs.element.startTime < rhs.element.startTime
                 }
-                return lhs.startTime < rhs.startTime
+                if lhs.element.endTime != rhs.element.endTime {
+                    return lhs.element.endTime < rhs.element.endTime
+                }
+                return lhs.offset < rhs.offset
             }
             .map {
-                "[\(formatTime($0.startTime))-\(formatTime($0.endTime))] \($0.text)"
+                let transcript = $0.element
+                return "[\(formatTime(transcript.startTime))-\(formatTime(transcript.endTime))] \(transcript.text)"
             }
         appendList(transcriptLines, emptyKind: .paragraph, to: &result)
+
+        return result
+    }
+
+    private func detailedMinutesBlocks(
+        _ minutes: GeneratedDetailedMinutes
+    ) -> [NotionBlockDraft] {
+        var result: [NotionBlockDraft] = []
+
+        appendHeading("完整纪要", to: &result)
+        append(kind: .paragraph, text: minutes.overview, to: &result)
+
+        appendHeading("议题章节", to: &result)
+        if minutes.sections.isEmpty {
+            append(kind: .paragraph, text: "无", to: &result)
+        } else {
+            for section in minutes.sections {
+                append(
+                    kind: .bulletedListItem,
+                    text: sectionHeading(section),
+                    to: &result
+                )
+                append(kind: .paragraph, text: section.content, to: &result)
+            }
+        }
+
+        appendHeading("决定事项", to: &result)
+        appendList(minutes.decisions, to: &result)
+
+        appendHeading("行动项", to: &result)
+        appendList(minutes.actionItems.map(actionItemText), to: &result)
+
+        appendHeading("待确认问题", to: &result)
+        appendList(minutes.openQuestions, to: &result)
 
         return result
     }
@@ -130,12 +252,35 @@ struct NotionBlockBuilder: Sendable {
     func batches(
         for content: NotionMeetingPageContent
     ) -> [[NotionBlockDraft]] {
-        let allBlocks = blocks(for: content)
-        return stride(from: 0, to: allBlocks.count, by: maximumBlocksPerBatch)
-            .map { start in
-                let end = min(start + maximumBlocksPerBatch, allBlocks.count)
-                return Array(allBlocks[start..<end])
+        batches(of: blocks(for: content))
+    }
+
+    func batches(
+        of blocks: [NotionBlockDraft]
+    ) -> [[NotionBlockDraft]] {
+        var result: [[NotionBlockDraft]] = []
+        var current: [NotionBlockDraft] = []
+
+        for block in blocks {
+            let singleBlock = [block]
+            precondition(
+                encodedPayloadSize(singleBlock) <= maximumRequestBodyBytes,
+                "A single Notion block exceeds the configured request budget."
+            )
+            let candidate = current + singleBlock
+            if candidate.count > maximumBlocksPerBatch
+                || encodedPayloadSize(candidate) > maximumRequestBodyBytes {
+                precondition(!current.isEmpty)
+                result.append(current)
+                current = singleBlock
+            } else {
+                current = candidate
             }
+        }
+        if !current.isEmpty {
+            result.append(current)
+        }
+        return result
     }
 
     private func appendHeading(
@@ -171,17 +316,66 @@ struct NotionBlockBuilder: Sendable {
 
     private func chunks(of text: String) -> [String] {
         var chunks: [String] = []
-        var start = text.startIndex
-        while start < text.endIndex {
-            let end = text.index(
-                start,
-                offsetBy: maximumTextLength,
-                limitedBy: text.endIndex
-            ) ?? text.endIndex
-            chunks.append(String(text[start..<end]))
-            start = end
+        var current = ""
+        var currentLength = 0
+
+        func flushCurrent() {
+            guard !current.isEmpty else { return }
+            chunks.append(current)
+            current = ""
+            currentLength = 0
+        }
+
+        for character in text {
+            let grapheme = String(character)
+            let graphemeLength = grapheme.utf16.count
+            if graphemeLength > maximumTextLength {
+                flushCurrent()
+                chunks.append(contentsOf: scalarChunks(of: grapheme))
+            } else if currentLength + graphemeLength > maximumTextLength {
+                flushCurrent()
+                current = grapheme
+                currentLength = graphemeLength
+            } else {
+                current.append(contentsOf: grapheme)
+                currentLength += graphemeLength
+            }
+        }
+        flushCurrent()
+        return chunks
+    }
+
+    private func scalarChunks(of grapheme: String) -> [String] {
+        var chunks: [String] = []
+        var current = ""
+        var currentLength = 0
+        for scalar in grapheme.unicodeScalars {
+            let fragment = String(scalar)
+            let fragmentLength = fragment.utf16.count
+            precondition(fragmentLength <= maximumTextLength)
+            if currentLength + fragmentLength > maximumTextLength {
+                chunks.append(current)
+                current = fragment
+                currentLength = fragmentLength
+            } else {
+                current.append(contentsOf: fragment)
+                currentLength += fragmentLength
+            }
+        }
+        if !current.isEmpty {
+            chunks.append(current)
         }
         return chunks
+    }
+
+    private func encodedPayloadSize(_ blocks: [NotionBlockDraft]) -> Int {
+        do {
+            return try JSONEncoder().encode(
+                NotionChildrenPayload(children: blocks)
+            ).count
+        } catch {
+            preconditionFailure("Notion block payload encoding failed: \(error)")
+        }
     }
 
     private func metadata(for content: NotionMeetingPageContent) -> String {
@@ -200,6 +394,17 @@ struct NotionBlockBuilder: Sendable {
         return "\(item.task)｜负责人：\(owner)｜截止：\(dueDate)"
     }
 
+    private func sectionHeading(_ section: DetailedMinutesSection) -> String {
+        var components = [section.title]
+        if let timeRange = section.timeRange, !timeRange.isEmpty {
+            components.append(timeRange)
+        }
+        if !section.speakers.isEmpty {
+            components.append(section.speakers.joined(separator: "、"))
+        }
+        return components.joined(separator: "｜")
+    }
+
     private func formatTime(_ seconds: TimeInterval) -> String {
         let totalSeconds = max(0, Int(seconds.rounded(.down)))
         let hours = totalSeconds / 3_600
@@ -210,4 +415,8 @@ struct NotionBlockBuilder: Sendable {
         }
         return String(format: "%02d:%02d", minutes, remainder)
     }
+}
+
+private struct NotionChildrenPayload: Encodable {
+    let children: [NotionBlockDraft]
 }

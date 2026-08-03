@@ -19,6 +19,19 @@ struct MeetingTranscriptInput: Equatable, Sendable {
     let startTime: TimeInterval
     let endTime: TimeInterval
     let text: String
+    let speakerLabel: String?
+
+    init(
+        startTime: TimeInterval,
+        endTime: TimeInterval,
+        text: String,
+        speakerLabel: String? = nil
+    ) {
+        self.startTime = startTime
+        self.endTime = endTime
+        self.text = text
+        self.speakerLabel = speakerLabel
+    }
 }
 
 struct MeetingBookmarkInput: Equatable, Sendable {
@@ -45,4 +58,19 @@ enum DeepSeekClientError: Error, Equatable, Sendable {
     case unexpectedFinishReason(String)
     case invalidResponse
     case invalidSummaryJSON
+    case invalidDetailedMinutesJSON
+    case inputTooLarge
+    case invalidDiagnosticJSON
+    case invalidDiagnosticExplanation
+}
+
+enum AudioDiagnosticExplanationSource: Sendable, Equatable {
+    case deepSeek
+    case localFallback
+}
+
+struct AudioDiagnosticExplanation: Sendable, Equatable {
+    let issue: String
+    let solution: String
+    let source: AudioDiagnosticExplanationSource
 }

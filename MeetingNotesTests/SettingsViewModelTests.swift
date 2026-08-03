@@ -4,7 +4,869 @@ import XCTest
 
 @MainActor
 final class SettingsViewModelTests: XCTestCase {
-    func testSpeakerDiarizationPreferenceDefaultsOffAndLoadsAndSaves() throws {
+    func testLoadReadsPersistedTranscriptionQualityMode() throws {
+        let fixture = try makeFixture()
+        fixture.settings.transcriptionQualityMode = .highAccuracy
+
+        fixture.viewModel.load()
+
+        XCTAssertEqual(
+            fixture.viewModel.selectedTranscriptionQualityMode,
+            .highAccuracy
+        )
+    }
+
+    func testSavePersistsSelectedTranscriptionQualityMode() async throws {
+        let fixture = try makeFixture()
+        fixture.viewModel.selectedTranscriptionQualityMode = .highAccuracy
+
+        let saved = await fixture.viewModel.save()
+
+        XCTAssertTrue(saved)
+        XCTAssertEqual(
+            fixture.settings.transcriptionQualityMode,
+            .highAccuracy
+        )
+    }
+
+    func testTranscriptionQualityDraftDoesNotApplyUntilSaveSucceeds() async throws {
+        let fixture = try makeFixture()
+        fixture.settings.transcriptionQualityMode = .balanced
+        let appliedModel = TranscriptionModelViewModel(
+            preparer: SettingsModelPreparerStub(),
+            selectedMode: fixture.settings.transcriptionQualityMode
+        )
+        fixture.viewModel.load()
+
+        fixture.viewModel.selectedTranscriptionQualityMode = .highAccuracy
+
+        XCTAssertEqual(appliedModel.selectedMode, .balanced)
+        XCTAssertEqual(fixture.settings.transcriptionQualityMode, .balanced)
+
+        if await fixture.viewModel.save() {
+            appliedModel.selectedMode =
+                fixture.viewModel.selectedTranscriptionQualityMode
+        }
+
+        XCTAssertEqual(appliedModel.selectedMode, .highAccuracy)
+        XCTAssertEqual(fixture.settings.transcriptionQualityMode, .highAccuracy)
+    }
+
+    func testSaveRechecksRecordingAndWritesNothingWhenMeetingBecameActive() async throws {
+        let recordingActivity = MutableSettingsRecordingActivityStub()
+        let fixture = try makeFixture(recordingActivity: recordingActivity)
+        let appliedModel = TranscriptionModelViewModel(
+            preparer: SettingsModelPreparerStub(),
+            selectedMode: .balanced
+        )
+        fixture.settings.deepSeekModel = "saved-model"
+        fixture.settings.notionParentPageURL = "saved-page"
+        fixture.settings.isNotionArchivingEnabled = true
+        fixture.settings.isSpeakerDiarizationEnabled = false
+        fixture.settings.transcriptionQualityMode = .balanced
+        fixture.settings.preferredInputDeviceID = "saved-input"
+        fixture.settings.preferredOutputDeviceID = "saved-output"
+        fixture.viewModel.load()
+        await fixture.viewModel.refreshAudioControlAvailability()
+        XCTAssertFalse(fixture.viewModel.areTranscriptionControlsDisabled)
+
+        fixture.viewModel.deepSeekAPIKeyInput = "new-deepseek-key"
+        fixture.viewModel.notionTokenInput = "new-notion-token"
+        fixture.viewModel.selectedModel = "new-model"
+        fixture.viewModel.notionParentPageURL = "new-page"
+        fixture.viewModel.isNotionArchivingEnabled = false
+        fixture.viewModel.isSpeakerDiarizationEnabled = true
+        fixture.viewModel.selectedTranscriptionQualityMode = .highAccuracy
+        fixture.viewModel.selectedInputDeviceID = "new-input"
+        fixture.viewModel.selectedOutputDeviceID = "new-output"
+        await recordingActivity.setActive(true)
+
+        let saved = await fixture.viewModel.save()
+        if saved {
+            appliedModel.selectedMode =
+                fixture.viewModel.selectedTranscriptionQualityMode
+        }
+
+        XCTAssertFalse(saved)
+        XCTAssertEqual(appliedModel.selectedMode, .balanced)
+        XCTAssertTrue(fixture.viewModel.areTranscriptionControlsDisabled)
+        XCTAssertEqual(
+            fixture.viewModel.saveState,
+            .failed(message: "会议录音进行中，无法保存设置。")
+        )
+        XCTAssertNil(
+            try fixture.credentials.value(for: .deepSeekAPIKey)
+        )
+        XCTAssertNil(
+            try fixture.credentials.value(for: .notionToken)
+        )
+        XCTAssertEqual(fixture.settings.deepSeekModel, "saved-model")
+        XCTAssertEqual(fixture.settings.notionParentPageURL, "saved-page")
+        XCTAssertTrue(fixture.settings.isNotionArchivingEnabled)
+        XCTAssertFalse(fixture.settings.isSpeakerDiarizationEnabled)
+        XCTAssertEqual(fixture.settings.transcriptionQualityMode, .balanced)
+        XCTAssertEqual(
+            fixture.settings.preferredInputDeviceID,
+            "saved-input"
+        )
+        XCTAssertEqual(
+            fixture.settings.preferredOutputDeviceID,
+            "saved-output"
+        )
+    }
+
+    func testTranscriptionControlsFollowRecordingActivityAvailability() async throws {
+        for isActive in [true, false] {
+            let fixture = try makeFixture(
+                recordingActivity: SettingsRecordingActivityStub(
+                    isActive: isActive
+                )
+            )
+
+            await fixture.viewModel.refreshAudioControlAvailability()
+
+            XCTAssertEqual(
+                fixture.viewModel.areTranscriptionControlsDisabled,
+                isActive
+            )
+        }
+    }
+
+    func testOnlyActiveCaptureStatesBlockTranscriptionQualityControls() {
+        for state in [
+            RecordingState.preparing,
+            .recording,
+            .paused,
+            .finalizing
+        ] {
+            XCTAssertTrue(
+                state.blocksCaptureSettingsChanges,
+                "Expected \(state) to block transcription controls"
+            )
+        }
+
+        for state in RecordingState.allCases where ![
+            .preparing,
+            .recording,
+            .paused,
+            .finalizing
+        ].contains(state) {
+            XCTAssertFalse(
+                state.blocksCaptureSettingsChanges,
+                "Expected \(state) to allow transcription controls"
+            )
+        }
+    }
+
+    func testLoadReadsPreferredAudioDeviceIDsSynchronously() throws {
+        let fixture = try makeFixture()
+        fixture.settings.preferredInputDeviceID = "saved-input"
+        fixture.settings.preferredOutputDeviceID = "saved-output"
+
+        fixture.viewModel.load()
+
+        XCTAssertEqual(
+            fixture.viewModel.selectedInputDeviceID,
+            "saved-input"
+        )
+        XCTAssertEqual(
+            fixture.viewModel.selectedOutputDeviceID,
+            "saved-output"
+        )
+    }
+
+    func testSavePersistsAudioDeviceIDsAndExistingPreferences() async throws {
+        let fixture = try makeFixture()
+        fixture.viewModel.selectedInputDeviceID = "input-123"
+        fixture.viewModel.selectedOutputDeviceID = "output-456"
+        fixture.viewModel.isNotionArchivingEnabled = false
+        fixture.viewModel.isSpeakerDiarizationEnabled = true
+
+        let saved = await fixture.viewModel.save()
+
+        XCTAssertTrue(saved)
+
+        XCTAssertEqual(
+            fixture.settings.preferredInputDeviceID,
+            "input-123"
+        )
+        XCTAssertEqual(
+            fixture.settings.preferredOutputDeviceID,
+            "output-456"
+        )
+        XCTAssertFalse(fixture.settings.isNotionArchivingEnabled)
+        XCTAssertTrue(fixture.settings.isSpeakerDiarizationEnabled)
+    }
+
+    func testRefreshLoadsSnapshotAndResolvesPreferredDevices() async throws {
+        let input = makeInputDevice(
+            id: "preferred-input",
+            name: "USB 麦克风"
+        )
+        let output = makeOutputDevice(
+            id: "preferred-output",
+            name: "显示器扬声器"
+        )
+        let snapshot = AudioDeviceSnapshot(
+            inputs: [input],
+            outputs: [output]
+        )
+        let fixture = try makeFixture(
+            audioDeviceCatalog: StaticAudioDeviceCatalog(snapshot: snapshot)
+        )
+        fixture.settings.preferredInputDeviceID = input.id
+        fixture.settings.preferredOutputDeviceID = output.id
+        fixture.viewModel.load()
+
+        await fixture.viewModel.refreshAudioDevices()
+
+        XCTAssertEqual(fixture.viewModel.audioDevices, snapshot)
+        XCTAssertEqual(
+            fixture.viewModel.resolvedInputDevice,
+            .preferred(input)
+        )
+        XCTAssertEqual(
+            fixture.viewModel.resolvedOutputDevice,
+            .preferred(output)
+        )
+        XCTAssertNil(fixture.viewModel.audioDeviceMessage)
+        XCTAssertFalse(fixture.viewModel.isRefreshingAudioDevices)
+    }
+
+    func testAudioControlsAreDisabledWhenMeetingIsRecording() async throws {
+        let fixture = try makeFixture(
+            recordingActivity: SettingsRecordingActivityStub(isActive: true)
+        )
+
+        await fixture.viewModel.refreshAudioControlAvailability()
+
+        XCTAssertTrue(fixture.viewModel.areAudioControlsDisabled)
+    }
+
+    func testAudioControlsRemainEnabledWhenMeetingIsInactive() async throws {
+        let fixture = try makeFixture(
+            recordingActivity: SettingsRecordingActivityStub(isActive: false)
+        )
+
+        await fixture.viewModel.refreshAudioControlAvailability()
+
+        XCTAssertFalse(fixture.viewModel.areAudioControlsDisabled)
+    }
+
+    func testRefreshFallsBackButPreservesMissingPreferredDeviceIDs() async throws {
+        let input = makeInputDevice(
+            id: "system-input",
+            name: "内置麦克风",
+            isSystemDefault: true
+        )
+        let output = makeOutputDevice(
+            id: "system-output",
+            name: "内置扬声器",
+            isSystemDefault: true
+        )
+        let fixture = try makeFixture(
+            audioDeviceCatalog: StaticAudioDeviceCatalog(
+                snapshot: AudioDeviceSnapshot(
+                    inputs: [input],
+                    outputs: [output]
+                )
+            )
+        )
+        fixture.settings.preferredInputDeviceID = "missing-input"
+        fixture.settings.preferredOutputDeviceID = "missing-output"
+        fixture.viewModel.load()
+
+        await fixture.viewModel.refreshAudioDevices()
+
+        XCTAssertEqual(
+            fixture.viewModel.resolvedInputDevice,
+            .fallback(
+                selected: input,
+                unavailablePreferredID: "missing-input"
+            )
+        )
+        XCTAssertEqual(
+            fixture.viewModel.resolvedOutputDevice,
+            .fallback(
+                selected: output,
+                unavailablePreferredID: "missing-output"
+            )
+        )
+        XCTAssertEqual(
+            fixture.viewModel.selectedInputDeviceID,
+            "missing-input"
+        )
+        XCTAssertEqual(
+            fixture.viewModel.selectedOutputDeviceID,
+            "missing-output"
+        )
+        XCTAssertEqual(
+            fixture.settings.preferredInputDeviceID,
+            "missing-input"
+        )
+        XCTAssertEqual(
+            fixture.settings.preferredOutputDeviceID,
+            "missing-output"
+        )
+        XCTAssertEqual(
+            fixture.viewModel.audioDeviceMessage,
+            """
+            已保存的麦克风不可用，已临时使用“内置麦克风”。
+            已保存的扬声器不可用，已临时使用“内置扬声器”。
+            """
+        )
+    }
+
+    func testRefreshIdentifiesUnavailableInputAndOutput() async throws {
+        let fixture = try makeFixture(
+            audioDeviceCatalog: StaticAudioDeviceCatalog(
+                snapshot: AudioDeviceSnapshot(inputs: [], outputs: [])
+            )
+        )
+
+        await fixture.viewModel.refreshAudioDevices()
+
+        XCTAssertEqual(fixture.viewModel.resolvedInputDevice, .unavailable)
+        XCTAssertEqual(fixture.viewModel.resolvedOutputDevice, .unavailable)
+        XCTAssertEqual(
+            fixture.viewModel.audioDeviceMessage,
+            """
+            没有可用的麦克风。
+            没有可用的扬声器。
+            """
+        )
+    }
+
+    func testRefreshErrorRetainsPriorAudioStateAndShowsReadableMessage() async throws {
+        let input = makeInputDevice(id: "input-123", name: "会议麦克风")
+        let output = makeOutputDevice(id: "output-456", name: "会议扬声器")
+        let snapshot = AudioDeviceSnapshot(
+            inputs: [input],
+            outputs: [output]
+        )
+        let catalog = SequencedAudioDeviceCatalog(
+            results: [
+                .success(snapshot),
+                .failure(.readFailed)
+            ]
+        )
+        let fixture = try makeFixture(audioDeviceCatalog: catalog)
+        fixture.settings.preferredInputDeviceID = input.id
+        fixture.settings.preferredOutputDeviceID = output.id
+        fixture.viewModel.load()
+        await fixture.viewModel.refreshAudioDevices()
+        let previousInputResolution =
+            fixture.viewModel.resolvedInputDevice
+        let previousOutputResolution =
+            fixture.viewModel.resolvedOutputDevice
+
+        await fixture.viewModel.refreshAudioDevices()
+
+        XCTAssertEqual(fixture.viewModel.audioDevices, snapshot)
+        XCTAssertEqual(
+            fixture.viewModel.selectedInputDeviceID,
+            input.id
+        )
+        XCTAssertEqual(
+            fixture.viewModel.selectedOutputDeviceID,
+            output.id
+        )
+        XCTAssertEqual(
+            fixture.viewModel.resolvedInputDevice,
+            previousInputResolution
+        )
+        XCTAssertEqual(
+            fixture.viewModel.resolvedOutputDevice,
+            previousOutputResolution
+        )
+        XCTAssertEqual(
+            fixture.viewModel.audioDeviceMessage,
+            "无法读取音频设备，请稍后重试。"
+        )
+        XCTAssertFalse(fixture.viewModel.isRefreshingAudioDevices)
+    }
+
+    func testConcurrentRefreshCoalescesIntoSingleFollowUpCatalogCall()
+        async throws {
+        let catalog = QueuedBlockingAudioDeviceCatalog()
+        let fixture = try makeFixture(audioDeviceCatalog: catalog)
+        let firstRefresh = Task {
+            await fixture.viewModel.refreshAudioDevices()
+        }
+        await catalog.waitUntilCallCount(1)
+
+        await fixture.viewModel.refreshAudioDevices()
+
+        let initialCallCount = await catalog.callCount()
+        XCTAssertEqual(initialCallCount, 1)
+        XCTAssertTrue(fixture.viewModel.isRefreshingAudioDevices)
+
+        await catalog.finish(
+            call: 1,
+            with: AudioDeviceSnapshot(inputs: [], outputs: [])
+        )
+        await catalog.waitUntilCallCount(2)
+
+        let coalescedCallCount = await catalog.callCount()
+        XCTAssertEqual(coalescedCallCount, 2)
+        await catalog.finish(
+            call: 2,
+            with: AudioDeviceSnapshot(inputs: [], outputs: [])
+        )
+        await firstRefresh.value
+
+        XCTAssertFalse(fixture.viewModel.isRefreshingAudioDevices)
+    }
+
+    func testAudioDeviceChangesRefreshOnlyWhileSettingsAreVisible()
+        async throws {
+        let initial = AudioDeviceSnapshot(inputs: [], outputs: [])
+        let changed = AudioDeviceSnapshot(
+            inputs: [makeInputDevice(id: "usb-mic", name: "USB 麦克风")],
+            outputs: []
+        )
+        let catalog = DeviceChangeAudioDeviceCatalog(
+            snapshots: [initial, changed]
+        )
+        let observer = SettingsAudioDeviceChangeObserver()
+        let fixture = try makeFixture(
+            audioDeviceCatalog: catalog,
+            audioDeviceChangeObserver: observer
+        )
+        fixture.viewModel.audioSettingsDidAppear()
+        await fixture.viewModel.refreshAudioDevices()
+
+        observer.sendChange()
+        await catalog.waitUntilCallCount(2)
+
+        XCTAssertEqual(fixture.viewModel.audioDevices, changed)
+        XCTAssertEqual(observer.startCount, 1)
+
+        fixture.viewModel.audioSettingsDidDisappear()
+        observer.sendChange()
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        let callCount = await catalog.callCount()
+        XCTAssertEqual(callCount, 2)
+        XCTAssertEqual(observer.stopCount, 1)
+    }
+
+    func testAudioDeviceChangeDuringRefreshQueuesAnotherSnapshot()
+        async throws {
+        let changed = AudioDeviceSnapshot(
+            inputs: [makeInputDevice(id: "new-mic", name: "新麦克风")],
+            outputs: []
+        )
+        let catalog = QueuedBlockingAudioDeviceCatalog()
+        let observer = SettingsAudioDeviceChangeObserver()
+        let fixture = try makeFixture(
+            audioDeviceCatalog: catalog,
+            audioDeviceChangeObserver: observer
+        )
+        fixture.viewModel.audioSettingsDidAppear()
+        let initialRefresh = Task {
+            await fixture.viewModel.refreshAudioDevices()
+        }
+        await catalog.waitUntilCallCount(1)
+
+        observer.sendChange()
+        await Task.yield()
+        await catalog.finish(
+            call: 1,
+            with: AudioDeviceSnapshot(inputs: [], outputs: [])
+        )
+        await catalog.waitUntilCallCount(2)
+        await catalog.finish(call: 2, with: changed)
+        await initialRefresh.value
+
+        XCTAssertEqual(fixture.viewModel.audioDevices, changed)
+        let callCount = await catalog.callCount()
+        XCTAssertEqual(callCount, 2)
+    }
+
+    func testCloseAndReopenDuringRefreshDiscardsOldSessionResult()
+        async throws {
+        let stale = AudioDeviceSnapshot(
+            inputs: [makeInputDevice(id: "stale-mic", name: "旧麦克风")],
+            outputs: []
+        )
+        let current = AudioDeviceSnapshot(
+            inputs: [makeInputDevice(id: "current-mic", name: "当前麦克风")],
+            outputs: []
+        )
+        let catalog = QueuedBlockingAudioDeviceCatalog()
+        let fixture = try makeFixture(audioDeviceCatalog: catalog)
+        fixture.viewModel.audioSettingsDidAppear()
+        let oldRefresh = Task {
+            await fixture.viewModel.refreshAudioDevices()
+        }
+        await catalog.waitUntilCallCount(1)
+
+        fixture.viewModel.audioSettingsDidDisappear()
+        fixture.viewModel.audioSettingsDidAppear()
+        let reopenedRefresh = Task {
+            await fixture.viewModel.refreshAudioDevices()
+        }
+        await Task.yield()
+        await catalog.finish(call: 1, with: stale)
+        await catalog.waitUntilCallCount(2)
+
+        XCTAssertNotEqual(fixture.viewModel.audioDevices, stale)
+
+        await catalog.finish(call: 2, with: current)
+        await oldRefresh.value
+        await reopenedRefresh.value
+
+        XCTAssertEqual(fixture.viewModel.audioDevices, current)
+        let callCount = await catalog.callCount()
+        XCTAssertEqual(callCount, 2)
+    }
+
+    func testInputTestPublishesLiveMetricsThenCompletes() async throws {
+        let tester = StreamingSettingsSignalTester()
+        let fixture = try makeFixture(audioInputTester: tester)
+        let task = Task { await fixture.viewModel.testSelectedInput() }
+        await tester.waitUntilStarted()
+
+        await tester.publish(audibleDiagnosticMetrics(sampleCount: 48_000))
+
+        guard case let .testing(metrics) =
+                fixture.viewModel.audioInputTestState else {
+            return XCTFail("Expected live input metrics")
+        }
+        XCTAssertEqual(metrics?.sampleCount, 48_000)
+        XCTAssertEqual(metrics?.level, .audible)
+
+        await tester.finish(audibleDiagnosticMetrics())
+        await task.value
+        XCTAssertEqual(
+            fixture.viewModel.audioInputTestState,
+            .completed(audibleDiagnosticMetrics())
+        )
+    }
+
+    func testOutputTestTransitionsThroughTestingAndSuccess() async throws {
+        let tester = BlockingSettingsOutputTester()
+        let fixture = try makeFixture(audioOutputTester: tester)
+        let task = Task { await fixture.viewModel.testSelectedOutput() }
+        await tester.waitUntilStarted()
+
+        XCTAssertEqual(fixture.viewModel.audioOutputTestState, .testing)
+
+        await tester.finish()
+        await task.value
+        XCTAssertEqual(
+            fixture.viewModel.audioOutputTestState,
+            .succeeded(message: "测试音已播放")
+        )
+    }
+
+    func testSmartDiagnosticCannotStartTwice() async throws {
+        let coordinator = SettingsDiagnosticCoordinatorStub(
+            report: settingsDiagnosticReport(.microphoneNoFrames)
+        )
+        let factory = SettingsDiagnosticCoordinatorFactoryStub(
+            coordinator: coordinator
+        )
+        let fixture = try makeFixture(
+            diagnosticCoordinatorFactory: factory
+        )
+
+        await fixture.viewModel.startSmartDiagnostic()
+        await fixture.viewModel.startSmartDiagnostic()
+
+        let makeCount = await factory.makeCount
+        XCTAssertEqual(makeCount, 1)
+        XCTAssertEqual(
+            fixture.viewModel.audioDiagnosticState,
+            .awaitingOutputConfirmation
+        )
+    }
+
+    func testSmartDiagnosticCannotStartDuringMeeting() async throws {
+        let coordinator = SettingsDiagnosticCoordinatorStub(
+            report: settingsDiagnosticReport(.microphoneNoFrames)
+        )
+        let factory = SettingsDiagnosticCoordinatorFactoryStub(
+            coordinator: coordinator
+        )
+        let fixture = try makeFixture(
+            recordingActivity: SettingsRecordingActivityStub(isActive: true),
+            diagnosticCoordinatorFactory: factory
+        )
+
+        await fixture.viewModel.startSmartDiagnostic()
+
+        let makeCount = await factory.makeCount
+        XCTAssertEqual(makeCount, 0)
+        XCTAssertEqual(
+            fixture.viewModel.audioDiagnosticState,
+            .failed(local: nil, message: "录音进行中无法运行音频诊断。")
+        )
+    }
+
+    func testRecordingBecomingActiveCancelsRunningInputTest() async throws {
+        let recordingActivity = MutableSettingsRecordingActivityStub()
+        let inputTester = StreamingSettingsSignalTester()
+        let fixture = try makeFixture(
+            recordingActivity: recordingActivity,
+            audioInputTester: inputTester
+        )
+
+        let inputTask = Task {
+            await fixture.viewModel.testSelectedInput()
+        }
+        await inputTester.waitUntilStarted()
+        await recordingActivity.setActive(true)
+
+        await fixture.viewModel.refreshAudioControlAvailability()
+        await inputTask.value
+
+        XCTAssertTrue(fixture.viewModel.areAudioControlsDisabled)
+        XCTAssertEqual(fixture.viewModel.audioInputTestState, .idle)
+    }
+
+    func testAudioOperationsAreMutuallyExclusiveInViewModel() async throws {
+        let inputTester = StreamingSettingsSignalTester()
+        let outputTester = CountingSettingsOutputTester()
+        let coordinator = SettingsDiagnosticCoordinatorStub(
+            report: settingsDiagnosticReport(.microphoneNoFrames)
+        )
+        let factory = SettingsDiagnosticCoordinatorFactoryStub(
+            coordinator: coordinator
+        )
+        let fixture = try makeFixture(
+            audioInputTester: inputTester,
+            audioOutputTester: outputTester,
+            diagnosticCoordinatorFactory: factory
+        )
+        let inputTask = Task {
+            await fixture.viewModel.testSelectedInput()
+        }
+        await inputTester.waitUntilStarted()
+
+        await fixture.viewModel.testSelectedOutput()
+        await fixture.viewModel.startSmartDiagnostic()
+
+        let outputPlayCount = await outputTester.playCount
+        let coordinatorMakeCount = await factory.makeCount
+        XCTAssertEqual(outputPlayCount, 0)
+        XCTAssertEqual(coordinatorMakeCount, 0)
+        XCTAssertEqual(fixture.viewModel.audioOutputTestState, .idle)
+        XCTAssertEqual(fixture.viewModel.audioDiagnosticState, .idle)
+        await fixture.viewModel.cancelAudioDiagnostic()
+        await inputTask.value
+    }
+
+    func testSettingsDisappearanceCancelsRunningAudioOperation() async throws {
+        let inputTester = StreamingSettingsSignalTester()
+        let fixture = try makeFixture(audioInputTester: inputTester)
+        let inputTask = Task {
+            await fixture.viewModel.testSelectedInput()
+        }
+        await inputTester.waitUntilStarted()
+
+        fixture.viewModel.audioSettingsDidDisappear()
+        await inputTask.value
+
+        XCTAssertEqual(fixture.viewModel.audioInputTestState, .idle)
+    }
+
+    func testSettingsDisappearanceCannotResurrectStartingDiagnostic()
+        async throws {
+        let catalog = BlockingAudioDeviceCatalog()
+        let coordinator = SettingsDiagnosticCoordinatorStub(
+            report: settingsDiagnosticReport(.microphoneNoFrames)
+        )
+        let factory = SettingsDiagnosticCoordinatorFactoryStub(
+            coordinator: coordinator
+        )
+        let fixture = try makeFixture(
+            audioDeviceCatalog: catalog,
+            diagnosticCoordinatorFactory: factory
+        )
+        let diagnosticTask = Task {
+            await fixture.viewModel.startSmartDiagnostic()
+        }
+        await catalog.waitUntilStarted()
+
+        fixture.viewModel.audioSettingsDidDisappear()
+        await catalog.finish(
+            with: AudioDeviceSnapshot(inputs: [], outputs: [])
+        )
+        await diagnosticTask.value
+
+        XCTAssertEqual(fixture.viewModel.audioDiagnosticState, .idle)
+        let makeCount = await factory.makeCount
+        XCTAssertEqual(makeCount, 0)
+    }
+
+    func testSettingsDisappearanceInvalidatesOperationWaitingForStatus()
+        async throws {
+        let recordingActivity = BlockingSettingsRecordingActivityStub()
+        let coordinator = SettingsDiagnosticCoordinatorStub(
+            report: settingsDiagnosticReport(.microphoneNoFrames)
+        )
+        let factory = SettingsDiagnosticCoordinatorFactoryStub(
+            coordinator: coordinator
+        )
+        let fixture = try makeFixture(
+            audioDeviceCatalog: StaticAudioDeviceCatalog(
+                snapshot: AudioDeviceSnapshot(inputs: [], outputs: [])
+            ),
+            recordingActivity: recordingActivity,
+            diagnosticCoordinatorFactory: factory
+        )
+        let diagnosticTask = Task {
+            await fixture.viewModel.startSmartDiagnostic()
+        }
+        await recordingActivity.waitUntilStarted()
+
+        fixture.viewModel.audioSettingsDidDisappear()
+        await recordingActivity.finish(isActive: false)
+        await diagnosticTask.value
+
+        XCTAssertEqual(fixture.viewModel.audioDiagnosticState, .idle)
+        let makeCount = await factory.makeCount
+        XCTAssertEqual(makeCount, 0)
+    }
+
+    func testOutputConfirmationStopsWhenRecordingBecomesActive() async throws {
+        let recordingActivity = MutableSettingsRecordingActivityStub()
+        let coordinator = SettingsDiagnosticCoordinatorStub(
+            report: settingsDiagnosticReport(.microphoneNoFrames)
+        )
+        let fixture = try makeDiagnosticFixture(
+            recordingActivity: recordingActivity,
+            coordinator: coordinator
+        )
+        await fixture.viewModel.startSmartDiagnostic()
+        await recordingActivity.setActive(true)
+
+        await fixture.viewModel.confirmOutputWasAudible(true)
+
+        XCTAssertTrue(fixture.viewModel.areAudioControlsDisabled)
+        XCTAssertEqual(fixture.viewModel.audioDiagnosticState, .idle)
+        let cancelCount = await coordinator.cancelCount
+        XCTAssertEqual(cancelCount, 1)
+    }
+
+    func testDiagnosticShowsLocalPreviewBeforeManualUpload() async throws {
+        let explainer = SettingsDiagnosticExplainerStub(
+            result: .success(
+                AudioDiagnosticExplanation(
+                    issue: "AI 问题",
+                    solution: "AI 方案",
+                    source: .deepSeek
+                )
+            )
+        )
+        let fixture = try makeDiagnosticFixture(explainer: explainer)
+
+        await fixture.viewModel.startSmartDiagnostic()
+        await fixture.viewModel.confirmOutputWasAudible(true)
+
+        guard case let .readyForUpload(preview) =
+                fixture.viewModel.audioDiagnosticState else {
+            return XCTFail("Expected upload preview")
+        }
+        XCTAssertEqual(preview.primaryIssue, .microphoneNoFrames)
+        XCTAssertEqual(
+            preview.localIssue,
+            AudioDiagnosticIssueCode.microphoneNoFrames.localIssue
+        )
+        XCTAssertTrue(preview.allowlistedJSON.contains("USB 麦克风"))
+        XCTAssertFalse(preview.allowlistedJSON.contains("api-key"))
+        let callCount = await explainer.callCount
+        XCTAssertEqual(callCount, 0)
+    }
+
+    func testDiagnosticUploadRequiresKeyAndKeepsLocalPreview() async throws {
+        let fixture = try makeDiagnosticFixture()
+        await fixture.viewModel.startSmartDiagnostic()
+        await fixture.viewModel.confirmOutputWasAudible(false)
+
+        await fixture.viewModel.sendDiagnosticToDeepSeek()
+
+        guard case let .failed(local, message) =
+                fixture.viewModel.audioDiagnosticState else {
+            return XCTFail("Expected missing-key failure")
+        }
+        XCTAssertNotNil(local)
+        XCTAssertEqual(message, "请输入 DeepSeek API Key，或先保存已有 Key。")
+    }
+
+    func testDiagnosticUploadUsesCurrentKeyAndSelectedModel() async throws {
+        let explainer = SettingsDiagnosticExplainerStub(
+            result: .success(
+                AudioDiagnosticExplanation(
+                    issue: "麦克风路由异常",
+                    solution: "重新选择麦克风后测试。",
+                    source: .deepSeek
+                )
+            )
+        )
+        let fixture = try makeDiagnosticFixture(explainer: explainer)
+        fixture.viewModel.deepSeekAPIKeyInput = "current-api-key"
+        fixture.viewModel.selectedModel = "deepseek-reasoner"
+        await fixture.viewModel.startSmartDiagnostic()
+        await fixture.viewModel.confirmOutputWasAudible(true)
+
+        await fixture.viewModel.sendDiagnosticToDeepSeek()
+
+        let calls = await explainer.calls
+        XCTAssertEqual(calls.map(\.apiKey), ["current-api-key"])
+        XCTAssertEqual(calls.map(\.model), ["deepseek-reasoner"])
+        guard case let .completed(presentation) =
+                fixture.viewModel.audioDiagnosticState else {
+            return XCTFail("Expected completed presentation")
+        }
+        XCTAssertEqual(presentation.issue, "麦克风路由异常")
+        XCTAssertEqual(presentation.local.primaryIssue, .microphoneNoFrames)
+    }
+
+    func testDeepSeekFailureLeavesLocalDiagnosisVisible() async throws {
+        let fixture = try makeDiagnosticFixture(
+            explainer: SettingsDiagnosticExplainerStub(
+                result: .failure(DeepSeekClientError.timeout)
+            )
+        )
+        try fixture.credentials.save("saved-key", for: .deepSeekAPIKey)
+        await fixture.viewModel.startSmartDiagnostic()
+        await fixture.viewModel.confirmOutputWasAudible(true)
+
+        await fixture.viewModel.sendDiagnosticToDeepSeek()
+
+        guard case let .failed(local, message) =
+                fixture.viewModel.audioDiagnosticState else {
+            return XCTFail("Expected explain failure")
+        }
+        XCTAssertEqual(local?.primaryIssue, .microphoneNoFrames)
+        XCTAssertTrue(message.contains("本地诊断仍可用"))
+    }
+
+    func testCancelReturnsDiagnosticToIdleAndCleansCoordinator() async throws {
+        let coordinator = SettingsDiagnosticCoordinatorStub(
+            report: settingsDiagnosticReport(.microphoneNoFrames)
+        )
+        let fixture = try makeFixture(
+            diagnosticCoordinatorFactory:
+                SettingsDiagnosticCoordinatorFactoryStub(
+                    coordinator: coordinator
+                )
+        )
+        await fixture.viewModel.startSmartDiagnostic()
+
+        await fixture.viewModel.cancelAudioDiagnostic()
+
+        XCTAssertEqual(fixture.viewModel.audioDiagnosticState, .idle)
+        let cancelCount = await coordinator.cancelCount
+        XCTAssertEqual(cancelCount, 1)
+    }
+
+    func testSpeakerDiarizationPreferenceDefaultsOffAndLoadsAndSaves() async throws {
         let fixture = try makeFixture()
 
         fixture.viewModel.load()
@@ -12,7 +874,8 @@ final class SettingsViewModelTests: XCTestCase {
         XCTAssertFalse(fixture.viewModel.isSpeakerDiarizationEnabled)
 
         fixture.viewModel.isSpeakerDiarizationEnabled = true
-        fixture.viewModel.save()
+        let saved = await fixture.viewModel.save()
+        XCTAssertTrue(saved)
         fixture.viewModel.isSpeakerDiarizationEnabled = false
         fixture.viewModel.load()
 
@@ -20,7 +883,7 @@ final class SettingsViewModelTests: XCTestCase {
         XCTAssertTrue(fixture.viewModel.isSpeakerDiarizationEnabled)
     }
 
-    func testNotionArchivingPreferenceLoadsAndSaves() throws {
+    func testNotionArchivingPreferenceLoadsAndSaves() async throws {
         let fixture = try makeFixture()
         fixture.settings.isNotionArchivingEnabled = false
 
@@ -29,7 +892,8 @@ final class SettingsViewModelTests: XCTestCase {
         XCTAssertFalse(fixture.viewModel.isNotionArchivingEnabled)
 
         fixture.viewModel.isNotionArchivingEnabled = true
-        fixture.viewModel.save()
+        let saved = await fixture.viewModel.save()
+        XCTAssertTrue(saved)
         fixture.viewModel.isNotionArchivingEnabled = false
         fixture.viewModel.load()
 
@@ -37,7 +901,7 @@ final class SettingsViewModelTests: XCTestCase {
         XCTAssertTrue(fixture.viewModel.isNotionArchivingEnabled)
     }
 
-    func testSaveWritesSecretsToCredentialStoreAndNonSecretsToSettings() throws {
+    func testSaveWritesSecretsToCredentialStoreAndNonSecretsToSettings() async throws {
         let fixture = try makeFixture()
         let viewModel = fixture.viewModel
         viewModel.deepSeekAPIKeyInput = "  sk-deepseek-123456  "
@@ -45,7 +909,9 @@ final class SettingsViewModelTests: XCTestCase {
         viewModel.selectedModel = "deepseek-reasoner"
         viewModel.notionParentPageURL = " https://www.notion.so/Parent-1234567890abcdef1234567890abcdef "
 
-        viewModel.save()
+        let saved = await viewModel.save()
+
+        XCTAssertTrue(saved)
 
         XCTAssertEqual(
             try fixture.credentials.value(for: .deepSeekAPIKey),
@@ -215,13 +1081,107 @@ final class SettingsViewModelTests: XCTestCase {
         XCTAssertTrue(message.contains("API Key"))
     }
 
+    func testLoadReadsFrequentSpeakerNamesAndClearsDraft() throws {
+        let fixture = try makeFixture()
+        fixture.settings.frequentSpeakerNames = ["张三", "李四"]
+        fixture.viewModel.newSpeakerName = "旧草稿"
+
+        fixture.viewModel.load()
+
+        XCTAssertEqual(
+            fixture.viewModel.frequentSpeakerNames,
+            ["张三", "李四"]
+        )
+        XCTAssertEqual(fixture.viewModel.newSpeakerName, "")
+    }
+
+    func testAddFrequentSpeakerNamePersistsAndMergesLatestStore() throws {
+        let fixture = try makeFixture()
+        fixture.settings.frequentSpeakerNames = ["张三"]
+        fixture.viewModel.load()
+        fixture.settings.rememberSpeakerName("王五")
+
+        fixture.viewModel.newSpeakerName = " 李四 "
+        fixture.viewModel.addFrequentSpeakerName()
+        fixture.viewModel.newSpeakerName = "张三"
+        fixture.viewModel.addFrequentSpeakerName()
+
+        XCTAssertEqual(
+            fixture.viewModel.frequentSpeakerNames,
+            ["张三", "王五", "李四"]
+        )
+        XCTAssertEqual(
+            fixture.settings.frequentSpeakerNames,
+            ["张三", "王五", "李四"]
+        )
+        XCTAssertEqual(fixture.viewModel.newSpeakerName, "")
+    }
+
+    func testSavingOtherSettingsKeepsNameRememberedAfterLoad() async throws {
+        let fixture = try makeFixture()
+        fixture.settings.frequentSpeakerNames = ["张三"]
+        fixture.viewModel.load()
+        fixture.settings.rememberSpeakerName("李四")
+        fixture.viewModel.selectedModel = "updated-model"
+
+        let saved = await fixture.viewModel.save()
+
+        XCTAssertTrue(saved)
+        XCTAssertEqual(fixture.settings.deepSeekModel, "updated-model")
+        XCTAssertEqual(
+            fixture.settings.frequentSpeakerNames,
+            ["张三", "李四"]
+        )
+        XCTAssertEqual(
+            fixture.viewModel.frequentSpeakerNames,
+            ["张三", "李四"]
+        )
+    }
+
+    func testRemoveFrequentSpeakerNamePersistsImmediately() throws {
+        let fixture = try makeFixture()
+        fixture.settings.frequentSpeakerNames = ["张三", "李四"]
+        fixture.viewModel.load()
+
+        fixture.viewModel.removeFrequentSpeakerName("张三")
+
+        XCTAssertEqual(fixture.viewModel.frequentSpeakerNames, ["李四"])
+        XCTAssertEqual(fixture.settings.frequentSpeakerNames, ["李四"])
+    }
+
     private func makeFixture(
         deepSeekTester: any DeepSeekConnectionTesting = RecordingDeepSeekTester(
             result: .success([])
         ),
         notionTester: any NotionConnectionTesting = RecordingNotionTester(
             result: .failure(NotionClientError.transport)
-        )
+        ),
+        audioDeviceCatalog: any AudioDeviceDiscovering =
+            StaticAudioDeviceCatalog(
+                snapshot: AudioDeviceSnapshot(inputs: [], outputs: [])
+            ),
+        audioDeviceChangeObserver: any AudioDeviceChangeObserving =
+            SettingsAudioDeviceChangeObserver(),
+        recordingActivity: any AudioDiagnosticRecordingActivityChecking =
+            SettingsRecordingActivityStub(isActive: false),
+        audioInputTester: any AudioDiagnosticSignalTesting =
+            SettingsSignalTesterStub(),
+        audioOutputTester: any AudioOutputTesting =
+            SettingsOutputTesterStub(),
+        diagnosticCoordinatorFactory:
+            any AudioDiagnosticCoordinatorCreating =
+                SettingsDiagnosticCoordinatorFactoryStub(
+                    coordinator: SettingsDiagnosticCoordinatorStub(
+                        report: settingsDiagnosticReport(.captureHealthy)
+                    )
+                ),
+        diagnosticExplainer: any AudioDiagnosticExplanationRequesting =
+            SettingsDiagnosticExplainerStub(
+                result: .failure(DeepSeekClientError.transport)
+            ),
+        diagnosticEnvironment:
+            any AudioDiagnosticEnvironmentInfoProviding =
+                SettingsDiagnosticEnvironmentStub()
     ) throws -> Fixture {
         let suiteName = "SettingsViewModelTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -235,10 +1195,58 @@ final class SettingsViewModelTests: XCTestCase {
                 credentialStore: credentials,
                 settingsStore: settings,
                 deepSeekTester: deepSeekTester,
-                notionTester: notionTester
+                notionTester: notionTester,
+                audioDeviceCatalog: audioDeviceCatalog,
+                audioDeviceChangeObserver: audioDeviceChangeObserver,
+                recordingActivity: recordingActivity,
+                audioInputTester: audioInputTester,
+                audioOutputTester: audioOutputTester,
+                diagnosticCoordinatorFactory: diagnosticCoordinatorFactory,
+                diagnosticExplainer: diagnosticExplainer,
+                diagnosticEnvironment: diagnosticEnvironment
             ),
             credentials: credentials,
             settings: settings
+        )
+    }
+
+    private func makeDiagnosticFixture(
+        recordingActivity: any AudioDiagnosticRecordingActivityChecking =
+            SettingsRecordingActivityStub(isActive: false),
+        coordinator: SettingsDiagnosticCoordinatorStub? = nil,
+        explainer: SettingsDiagnosticExplainerStub =
+            SettingsDiagnosticExplainerStub(
+                result: .failure(DeepSeekClientError.transport)
+            )
+    ) throws -> Fixture {
+        let input = makeInputDevice(
+            id: "input",
+            name: "USB 麦克风",
+            isSystemDefault: false
+        )
+        let output = makeOutputDevice(
+            id: "output",
+            name: "显示器音频",
+            isSystemDefault: true
+        )
+        return try makeFixture(
+            audioDeviceCatalog: StaticAudioDeviceCatalog(
+                snapshot: AudioDeviceSnapshot(
+                    inputs: [input],
+                    outputs: [output]
+                )
+            ),
+            recordingActivity: recordingActivity,
+            diagnosticCoordinatorFactory:
+                SettingsDiagnosticCoordinatorFactoryStub(
+                    coordinator: coordinator
+                        ?? SettingsDiagnosticCoordinatorStub(
+                            report: settingsDiagnosticReport(
+                                .microphoneNoFrames
+                            )
+                        )
+                ),
+            diagnosticExplainer: explainer
         )
     }
 
@@ -342,4 +1350,500 @@ private actor BlockingDeepSeekTester: DeepSeekConnectionTesting {
         self.resultContinuation = nil
         resultContinuation.resume(with: result)
     }
+}
+
+private struct StaticAudioDeviceCatalog: AudioDeviceDiscovering {
+    let snapshotValue: AudioDeviceSnapshot
+
+    init(snapshot: AudioDeviceSnapshot) {
+        snapshotValue = snapshot
+    }
+
+    func snapshot() async throws -> AudioDeviceSnapshot {
+        snapshotValue
+    }
+}
+
+private enum TestAudioDeviceCatalogError: Error, Sendable {
+    case readFailed
+}
+
+private actor SequencedAudioDeviceCatalog: AudioDeviceDiscovering {
+    private var results:
+        [Result<AudioDeviceSnapshot, TestAudioDeviceCatalogError>]
+
+    init(
+        results: [Result<AudioDeviceSnapshot, TestAudioDeviceCatalogError>]
+    ) {
+        self.results = results
+    }
+
+    func snapshot() async throws -> AudioDeviceSnapshot {
+        guard !results.isEmpty else {
+            throw TestAudioDeviceCatalogError.readFailed
+        }
+        return try results.removeFirst().get()
+    }
+}
+
+private actor BlockingAudioDeviceCatalog: AudioDeviceDiscovering {
+    private var calls = 0
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var resultContinuation:
+        CheckedContinuation<AudioDeviceSnapshot, Never>?
+
+    func snapshot() async throws -> AudioDeviceSnapshot {
+        calls += 1
+        started = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        return await withCheckedContinuation { continuation in
+            resultContinuation = continuation
+        }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func callCount() -> Int {
+        calls
+    }
+
+    func finish(with snapshot: AudioDeviceSnapshot) {
+        guard let resultContinuation else { return }
+        self.resultContinuation = nil
+        resultContinuation.resume(returning: snapshot)
+    }
+}
+
+private actor DeviceChangeAudioDeviceCatalog: AudioDeviceDiscovering {
+    private let snapshots: [AudioDeviceSnapshot]
+    private var calls = 0
+    private var callWaiters:
+        [(target: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    init(snapshots: [AudioDeviceSnapshot]) {
+        self.snapshots = snapshots
+    }
+
+    func snapshot() async throws -> AudioDeviceSnapshot {
+        let snapshot = snapshots[min(calls, snapshots.count - 1)]
+        calls += 1
+        let ready = callWaiters.filter { calls >= $0.target }
+        callWaiters.removeAll { calls >= $0.target }
+        ready.forEach { $0.continuation.resume() }
+        return snapshot
+    }
+
+    func waitUntilCallCount(_ target: Int) async {
+        guard calls < target else { return }
+        await withCheckedContinuation { continuation in
+            callWaiters.append((target, continuation))
+        }
+    }
+
+    func callCount() -> Int {
+        calls
+    }
+}
+
+private actor QueuedBlockingAudioDeviceCatalog: AudioDeviceDiscovering {
+    private var calls = 0
+    private var resultContinuations:
+        [Int: CheckedContinuation<AudioDeviceSnapshot, Never>] = [:]
+    private var callWaiters:
+        [(target: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func snapshot() async throws -> AudioDeviceSnapshot {
+        calls += 1
+        let call = calls
+        let ready = callWaiters.filter { calls >= $0.target }
+        callWaiters.removeAll { calls >= $0.target }
+        ready.forEach { $0.continuation.resume() }
+        return await withCheckedContinuation { continuation in
+            resultContinuations[call] = continuation
+        }
+    }
+
+    func waitUntilCallCount(_ target: Int) async {
+        guard calls < target else { return }
+        await withCheckedContinuation { continuation in
+            callWaiters.append((target, continuation))
+        }
+    }
+
+    func finish(call: Int, with snapshot: AudioDeviceSnapshot) {
+        resultContinuations.removeValue(forKey: call)?.resume(
+            returning: snapshot
+        )
+    }
+
+    func callCount() -> Int {
+        calls
+    }
+}
+
+@MainActor
+private final class SettingsAudioDeviceChangeObserver:
+    AudioDeviceChangeObserving {
+    private var handler: (@Sendable () -> Void)?
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+
+    func start(handler: @escaping @Sendable () -> Void) {
+        startCount += 1
+        self.handler = handler
+    }
+
+    func stop() {
+        stopCount += 1
+        handler = nil
+    }
+
+    func sendChange() {
+        handler?()
+    }
+}
+
+private struct SettingsRecordingActivityStub:
+    AudioDiagnosticRecordingActivityChecking {
+    let isActive: Bool
+
+    func isRecordingActive() async -> Bool {
+        isActive
+    }
+}
+
+private actor SettingsModelPreparerStub: TranscriptionModelPreparing {
+    func prepare() async throws {}
+}
+
+private actor MutableSettingsRecordingActivityStub:
+    AudioDiagnosticRecordingActivityChecking {
+    private var isActive = false
+
+    func isRecordingActive() async -> Bool {
+        isActive
+    }
+
+    func setActive(_ isActive: Bool) {
+        self.isActive = isActive
+    }
+}
+
+private actor BlockingSettingsRecordingActivityStub:
+    AudioDiagnosticRecordingActivityChecking {
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func isRecordingActive() async -> Bool {
+        started = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func finish(isActive: Bool) {
+        continuation?.resume(returning: isActive)
+        continuation = nil
+    }
+}
+
+private struct SettingsSignalTesterStub: AudioDiagnosticSignalTesting {
+    func testSignal(duration: TimeInterval) async throws -> AudioSignalMetrics {
+        _ = duration
+        return audibleDiagnosticMetrics()
+    }
+
+    func cancel() async {}
+}
+
+private actor StreamingSettingsSignalTester: AudioDiagnosticSignalTesting {
+    private var updateHandler:
+        (@Sendable (AudioSignalMetrics) async -> Void)?
+    private var continuation:
+        CheckedContinuation<AudioSignalMetrics, Error>?
+    private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var hasStarted = false
+
+    func testSignal(duration: TimeInterval) async throws -> AudioSignalMetrics {
+        try await testSignal(duration: duration) { _ in }
+    }
+
+    func testSignal(
+        duration: TimeInterval,
+        onMetrics: @escaping @Sendable (AudioSignalMetrics) async -> Void
+    ) async throws -> AudioSignalMetrics {
+        _ = duration
+        updateHandler = onMetrics
+        hasStarted = true
+        startedWaiters.forEach { $0.resume() }
+        startedWaiters.removeAll()
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func cancel() async {
+        continuation?.resume(throwing: CancellationError())
+        continuation = nil
+    }
+
+    func waitUntilStarted() async {
+        if hasStarted { return }
+        await withCheckedContinuation { continuation in
+            startedWaiters.append(continuation)
+        }
+    }
+
+    func publish(_ metrics: AudioSignalMetrics) async {
+        await updateHandler?(metrics)
+    }
+
+    func finish(_ metrics: AudioSignalMetrics) {
+        continuation?.resume(returning: metrics)
+        continuation = nil
+    }
+}
+
+private struct SettingsOutputTesterStub: AudioOutputTesting {
+    func playTestTone(
+        duration: TimeInterval
+    ) async throws -> AudioOutputTestResult {
+        AudioOutputTestResult(
+            wasScheduled: true,
+            duration: duration,
+            outputDeviceID: nil
+        )
+    }
+
+    func stop() async {}
+}
+
+private actor CountingSettingsOutputTester: AudioOutputTesting {
+    private(set) var playCount = 0
+
+    func playTestTone(
+        duration: TimeInterval
+    ) async throws -> AudioOutputTestResult {
+        playCount += 1
+        return AudioOutputTestResult(
+            wasScheduled: true,
+            duration: duration,
+            outputDeviceID: nil
+        )
+    }
+
+    func stop() async {}
+}
+
+private actor BlockingSettingsOutputTester: AudioOutputTesting {
+    private var continuation:
+        CheckedContinuation<AudioOutputTestResult, Error>?
+    private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var hasStarted = false
+
+    func playTestTone(
+        duration: TimeInterval
+    ) async throws -> AudioOutputTestResult {
+        hasStarted = true
+        startedWaiters.forEach { $0.resume() }
+        startedWaiters.removeAll()
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func stop() async {
+        continuation?.resume(throwing: CancellationError())
+        continuation = nil
+    }
+
+    func waitUntilStarted() async {
+        if hasStarted { return }
+        await withCheckedContinuation { continuation in
+            startedWaiters.append(continuation)
+        }
+    }
+
+    func finish() {
+        continuation?.resume(
+            returning: AudioOutputTestResult(
+                wasScheduled: true,
+                duration: 1,
+                outputDeviceID: nil
+            )
+        )
+        continuation = nil
+    }
+}
+
+private actor SettingsDiagnosticCoordinatorStub:
+    AudioDiagnosticCoordinating {
+    private var current: AudioDiagnosticCoordinatorState = .idle
+    private let report: AudioDiagnosticReport
+    private(set) var cancelCount = 0
+
+    init(report: AudioDiagnosticReport) {
+        self.report = report
+    }
+
+    func prepare() async throws {
+        current = .awaitingOutputConfirmation
+    }
+
+    func continueAfterOutputConfirmation(heardTone: Bool) async throws {
+        _ = heardTone
+        current = .testingMicrophone
+        await Task.yield()
+        current = .testingSystemAudio
+        await Task.yield()
+        current = .readyForUpload(report)
+    }
+
+    func cancel() async {
+        cancelCount += 1
+        current = .failed("cancelled")
+    }
+
+    func currentState() async -> AudioDiagnosticCoordinatorState {
+        current
+    }
+}
+
+private actor SettingsDiagnosticCoordinatorFactoryStub:
+    AudioDiagnosticCoordinatorCreating {
+    let coordinator: SettingsDiagnosticCoordinatorStub
+    private(set) var makeCount = 0
+
+    init(coordinator: SettingsDiagnosticCoordinatorStub) {
+        self.coordinator = coordinator
+    }
+
+    func makeCoordinator() async -> any AudioDiagnosticCoordinating {
+        makeCount += 1
+        return coordinator
+    }
+}
+
+private actor SettingsDiagnosticExplainerStub:
+    AudioDiagnosticExplanationRequesting {
+    struct Call: Sendable, Equatable {
+        let apiKey: String
+        let model: String
+    }
+
+    let result: Result<AudioDiagnosticExplanation, Error>
+    private(set) var calls: [Call] = []
+
+    init(result: Result<AudioDiagnosticExplanation, Error>) {
+        self.result = result
+    }
+
+    func requestExplanation(
+        apiKey: String,
+        report: AudioDiagnosticReport,
+        metadata: AudioDiagnosticUploadMetadata,
+        model: String
+    ) async throws -> AudioDiagnosticExplanation {
+        _ = report
+        _ = metadata
+        calls.append(Call(apiKey: apiKey, model: model))
+        return try result.get()
+    }
+
+    var callCount: Int {
+        calls.count
+    }
+}
+
+private struct SettingsDiagnosticEnvironmentStub:
+    AudioDiagnosticEnvironmentInfoProviding {
+    func environmentInfo() -> AudioDiagnosticEnvironmentInfo {
+        AudioDiagnosticEnvironmentInfo(
+            appVersion: "1.0",
+            hardwareModel: "MacBook Pro M5",
+            macOSVersion: "26.5"
+        )
+    }
+}
+
+private func settingsDiagnosticReport(
+    _ issue: AudioDiagnosticIssueCode
+) -> AudioDiagnosticReport {
+    AudioDiagnosticReport(
+        primaryIssue: issue,
+        supportingIssues: [],
+        facts: AudioDiagnosticFacts(
+            microphonePermission: .authorized,
+            screenPermission: .authorized,
+            inputDeviceAvailable: true,
+            outputToneWasScheduled: true,
+            userHeardOutputTone: true,
+            microphoneMetrics: audibleDiagnosticMetrics(),
+            systemAudioMetrics: audibleDiagnosticMetrics(),
+            historicalPlaybackFailed: false
+        )
+    )
+}
+
+private func audibleDiagnosticMetrics(
+    sampleCount: Int = 144_000
+) -> AudioSignalMetrics {
+    AudioSignalMetrics(
+        sampleCount: sampleCount,
+        rms: 0.1,
+        peak: 0.2,
+        observationDuration: Double(sampleCount) / 48_000,
+        sampleRate: 48_000,
+        channelCount: 1,
+        level: .audible
+    )
+}
+
+private func makeInputDevice(
+    id: String,
+    name: String,
+    isConnected: Bool = true,
+    isSuspended: Bool = false,
+    isSystemDefault: Bool = false
+) -> AudioInputDevice {
+    AudioInputDevice(
+        id: id,
+        name: name,
+        manufacturer: "Test",
+        isConnected: isConnected,
+        isSuspended: isSuspended,
+        isInUseByAnotherApplication: false,
+        isSystemDefault: isSystemDefault
+    )
+}
+
+private func makeOutputDevice(
+    id: String,
+    name: String,
+    isConnected: Bool = true,
+    isSystemDefault: Bool = false
+) -> AudioOutputDevice {
+    AudioOutputDevice(
+        id: id,
+        name: name,
+        isConnected: isConnected,
+        isSystemDefault: isSystemDefault
+    )
 }

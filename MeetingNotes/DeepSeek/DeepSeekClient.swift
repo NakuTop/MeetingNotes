@@ -5,6 +5,8 @@ struct DeepSeekClient: Sendable {
     private let httpClient: any HTTPClient
     private let baseURL: URL
     private let chunker: SummaryInputChunker
+    private let detailedMinutesLimits: DetailedMinutesInputLimits
+    private let detailedMinutesChunker: DetailedMinutesInputChunker
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -12,12 +14,17 @@ struct DeepSeekClient: Sendable {
         apiKey: String,
         httpClient: any HTTPClient,
         baseURL: URL = URL(string: "https://api.deepseek.com")!,
-        chunker: SummaryInputChunker = SummaryInputChunker()
+        chunker: SummaryInputChunker = SummaryInputChunker(),
+        detailedMinutesLimits: DetailedMinutesInputLimits = .init()
     ) {
         self.apiKey = apiKey
         self.httpClient = httpClient
         self.baseURL = baseURL
         self.chunker = chunker
+        self.detailedMinutesLimits = detailedMinutesLimits
+        self.detailedMinutesChunker = DetailedMinutesInputChunker(
+            byteLimit: detailedMinutesLimits.requestByteLimit
+        )
     }
 
     func testConnection() async throws -> [String] {
@@ -45,7 +52,7 @@ struct DeepSeekClient: Sendable {
         let chunks = chunker.chunks(input.transcripts)
         guard chunks.count > 1 else {
             return try await requestSummary(
-                userMessage: MeetingSummaryPrompt.userMessage(for: input),
+                userMessage: try MeetingSummaryPrompt.userMessage(for: input),
                 model: model
             )
         }
@@ -59,7 +66,9 @@ struct DeepSeekClient: Sendable {
             )
             partialSummaries.append(
                 try await requestSummary(
-                    userMessage: MeetingSummaryPrompt.userMessage(for: partialInput),
+                    userMessage: try MeetingSummaryPrompt.userMessage(
+                        for: partialInput
+                    ),
                     model: model
                 )
             )
@@ -75,10 +84,83 @@ struct DeepSeekClient: Sendable {
         )
     }
 
+    func detailedMinutes(
+        input: MeetingSummaryInput,
+        model: String
+    ) async throws -> GeneratedDetailedMinutes {
+        switch try detailedMinutesChunker.plan(for: input) {
+        case .direct(let userMessage):
+            return try await requestDetailedMinutes(
+                userMessage: userMessage,
+                model: model
+            )
+        case .partials(let userMessages):
+            var partialMinutes: [GeneratedDetailedMinutes] = []
+            for userMessage in userMessages {
+                partialMinutes.append(
+                    try await requestDetailedMinutes(
+                        userMessage: userMessage,
+                        model: model
+                    )
+                )
+            }
+
+            let aggregateMessage = try DetailedMinutesPrompt.aggregationMessage(
+                partialMinutes: partialMinutes,
+                bookmarks: input.bookmarks
+            )
+            let aggregateByteCount = aggregateMessage.utf8.count
+            guard aggregateByteCount <= detailedMinutesLimits.aggregateByteLimit else {
+                throw DeepSeekClientError.inputTooLarge
+            }
+            return try await requestDetailedMinutes(
+                userMessage: aggregateMessage,
+                model: model
+            )
+        }
+    }
+
     private func requestSummary(
         userMessage: String,
         model: String
     ) async throws -> GeneratedMeetingSummary {
+        do {
+            return try await requestJSON(
+                systemMessage: MeetingSummaryPrompt.systemMessage,
+                userMessage: userMessage,
+                responseType: GeneratedMeetingSummary.self,
+                model: model,
+                maxTokens: 4_096
+            )
+        } catch ResponseDecodingError.invalidJSON {
+            throw DeepSeekClientError.invalidSummaryJSON
+        }
+    }
+
+    private func requestDetailedMinutes(
+        userMessage: String,
+        model: String
+    ) async throws -> GeneratedDetailedMinutes {
+        do {
+            return try await requestJSON(
+                systemMessage: DetailedMinutesPrompt.systemMessage,
+                userMessage: userMessage,
+                responseType: GeneratedDetailedMinutes.self,
+                model: model,
+                maxTokens: 8_192
+            )
+        } catch ResponseDecodingError.invalidJSON {
+            throw DeepSeekClientError.invalidDetailedMinutesJSON
+        }
+    }
+
+    private func requestJSON<Response: Decodable>(
+        systemMessage: String,
+        userMessage: String,
+        responseType: Response.Type,
+        model: String,
+        maxTokens: Int
+    ) async throws -> Response {
         var request = URLRequest(
             url: baseURL.appendingPathComponent("chat/completions"),
             timeoutInterval: 60
@@ -90,9 +172,10 @@ struct DeepSeekClient: Sendable {
             ChatCompletionRequest(
                 model: model,
                 messages: [
-                    .init(role: "system", content: MeetingSummaryPrompt.systemMessage),
+                    .init(role: "system", content: systemMessage),
                     .init(role: "user", content: userMessage)
-                ]
+                ],
+                maxTokens: maxTokens
             )
         )
 
@@ -125,15 +208,19 @@ struct DeepSeekClient: Sendable {
         }
 
         do {
-            return try decoder.decode(GeneratedMeetingSummary.self, from: contentData)
+            return try decoder.decode(responseType, from: contentData)
         } catch {
-            throw DeepSeekClientError.invalidSummaryJSON
+            throw ResponseDecodingError.invalidJSON
         }
     }
 
     private func perform(_ request: URLRequest) async throws -> Data {
         do {
             return try await httpClient.data(for: request).0
+        } catch let error as CancellationError {
+            throw error
+        } catch let error as URLError where error.code == .cancelled {
+            throw error
         } catch let error as DeepSeekClientError {
             throw error
         } catch HTTPClientError.unacceptableStatus(let status) {
@@ -173,7 +260,7 @@ private struct ChatCompletionRequest: Encodable {
     let responseFormat = ResponseFormat(type: "json_object")
     let thinking = Thinking(type: "disabled")
     let stream = false
-    let maxTokens = 4_096
+    let maxTokens: Int
 
     enum CodingKeys: String, CodingKey {
         case model
@@ -196,6 +283,10 @@ private struct ChatCompletionRequest: Encodable {
     struct Thinking: Encodable {
         let type: String
     }
+}
+
+private enum ResponseDecodingError: Error {
+    case invalidJSON
 }
 
 private struct ChatCompletionResponse: Decodable {

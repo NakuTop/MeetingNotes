@@ -150,6 +150,8 @@ struct RootView: View {
         }
         .task {
             viewModel.load()
+            await transcriptionModelViewModel.refreshStatuses()
+            await transcriptionModelViewModel.prepareBalancedIfNeeded()
         }
         .sheet(
             isPresented: Binding(

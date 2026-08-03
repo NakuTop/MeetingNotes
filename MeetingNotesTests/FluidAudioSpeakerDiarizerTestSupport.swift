@@ -3,10 +3,12 @@ import Foundation
 import XCTest
 @testable import MeetingNotes
 
-enum DiarizationAdapterTestError: Error {
+enum DiarizationAdapterTestError: Error, Sendable {
     case conversion
     case identityChanged
+    case invalidFixture
     case preparation
+    case processing
 }
 
 class DiarizationAdapterTestCase: XCTestCase {
@@ -30,10 +32,15 @@ class DiarizationAdapterTestCase: XCTestCase {
         root: URL,
         segmentSamples: [[Float]],
         segmentStartTimes: [TimeInterval],
+        declaredFrameCounts: [Int64]? = nil,
         meetingID: UUID = UUID()
     ) throws -> MeetingAudioSource {
+        let frameCounts = declaredFrameCounts
+            ?? segmentSamples.map { Int64($0.count) }
+        guard frameCounts.count == segmentSamples.count else {
+            throw DiarizationAdapterTestError.invalidFixture
+        }
         var resolvedSegments: [ResolvedMeetingRecordingSegment] = []
-        var frameCounts: [Int64] = []
         for (index, samples) in segmentSamples.enumerated() {
             let url = root.appendingPathComponent(
                 "segment-\(meetingID.uuidString)-\(index).caf"
@@ -53,7 +60,6 @@ class DiarizationAdapterTestCase: XCTestCase {
                         )
                 )
             )
-            frameCounts.append(Int64(samples.count))
         }
         return MeetingAudioSource(
             meetingID: meetingID,
@@ -88,18 +94,19 @@ class DiarizationAdapterTestCase: XCTestCase {
         )
     }
 
-    func assertInferenceFailure(
+    func assertDiarizationFailure(
+        _ expected: SpeakerDiarizationError,
         _ operation: () async throws -> [SpeakerInterval],
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
         do {
             _ = try await operation()
-            XCTFail("Expected inference failure", file: file, line: line)
+            XCTFail("Expected diarization failure", file: file, line: line)
         } catch {
             XCTAssertEqual(
                 error as? SpeakerDiarizationError,
-                .inferenceFailed,
+                expected,
                 file: file,
                 line: line
             )
@@ -124,6 +131,10 @@ class DiarizationAdapterTestCase: XCTestCase {
             commonFormat: .pcmFormatFloat32,
             interleaved: false
         )
+        guard !samples.isEmpty else {
+            file.close()
+            return
+        }
         let buffer = try XCTUnwrap(
             AVAudioPCMBuffer(
                 pcmFormat: format,
@@ -144,14 +155,17 @@ actor DiarizationAdapterTestSourceLoader:
     MeetingTrackAudioSourceLoading {
     private let source: MeetingAudioSource
     private let failingConfirmation: Int?
+    private let cancellingConfirmation: Int?
     private var confirmationCount = 0
 
     init(
         source: MeetingAudioSource,
-        failingConfirmation: Int? = nil
+        failingConfirmation: Int? = nil,
+        cancellingConfirmation: Int? = nil
     ) {
         self.source = source
         self.failingConfirmation = failingConfirmation
+        self.cancellingConfirmation = cancellingConfirmation
     }
 
     func load(
@@ -170,6 +184,9 @@ actor DiarizationAdapterTestSourceLoader:
         _ = source
         _ = segmentIndex
         confirmationCount += 1
+        if confirmationCount == cancellingConfirmation {
+            throw CancellationError()
+        }
         if confirmationCount == failingConfirmation {
             throw DiarizationAdapterTestError.identityChanged
         }
@@ -184,6 +201,7 @@ actor DiarizationAdapterTestConverter: DiarizationAudioConverting {
     enum Behavior: Sendable {
         case succeed
         case failAfterWriting
+        case cancelAfterWriting
     }
 
     private let behavior: Behavior
@@ -246,6 +264,9 @@ actor DiarizationAdapterTestConverter: DiarizationAudioConverting {
         if behavior == .failAfterWriting {
             throw DiarizationAdapterTestError.conversion
         }
+        if behavior == .cancelAfterWriting {
+            throw CancellationError()
+        }
         return converted.count
     }
 
@@ -265,18 +286,30 @@ actor DiarizationAdapterImmediateEngine: DiarizationEngine {
     private var processCount = 0
     private var processedSampleCounts: [Int] = []
     private var processedURLs: [URL] = []
+    private let processError: DiarizationAdapterTestError?
+    private let cancelPreparation: Bool
+    private let cancelProcessing: Bool
 
     init(
         results: [[SpeakerInterval]],
-        preparationFailures: Int = 0
+        preparationFailures: Int = 0,
+        processError: DiarizationAdapterTestError? = nil,
+        cancelPreparation: Bool = false,
+        cancelProcessing: Bool = false
     ) {
         self.results = results
         remainingPreparationFailures = preparationFailures
+        self.processError = processError
+        self.cancelPreparation = cancelPreparation
+        self.cancelProcessing = cancelProcessing
     }
 
     func prepareModels(directory: URL) async throws {
         _ = directory
         prepareCount += 1
+        if cancelPreparation {
+            throw CancellationError()
+        }
         if remainingPreparationFailures > 0 {
             remainingPreparationFailures -= 1
             throw DiarizationAdapterTestError.preparation
@@ -291,6 +324,12 @@ actor DiarizationAdapterImmediateEngine: DiarizationEngine {
         processCount += 1
         processedSampleCounts.append(audioSource.sampleCount)
         processedURLs.append(audioSource.fileURL)
+        if cancelProcessing {
+            throw CancellationError()
+        }
+        if let processError {
+            throw processError
+        }
         guard !results.isEmpty else {
             return []
         }

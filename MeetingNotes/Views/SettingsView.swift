@@ -2,10 +2,113 @@ import SwiftUI
 
 struct SettingsView: View {
     @Bindable var viewModel: SettingsViewModel
+    @Bindable var transcriptionModelViewModel: TranscriptionModelViewModel
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                AudioDeviceSettingsView(viewModel: viewModel)
+
+                AdaptiveGlassCard {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("本地转录精度")
+                            .font(.headline)
+
+                        Picker(
+                            "转录精度",
+                            selection: $viewModel
+                                .selectedTranscriptionQualityMode
+                        ) {
+                            ForEach(
+                                TranscriptionQualityMode.allCases,
+                                id: \.self
+                            ) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .disabled(
+                            viewModel.areTranscriptionControlsDisabled
+                        )
+                        .accessibilityIdentifier(
+                            "settings.transcription.quality"
+                        )
+
+                        Text(
+                            transcriptionModelViewModel
+                                .descriptor(
+                                    for: viewModel
+                                        .selectedTranscriptionQualityMode
+                                ).detail
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                        ModelStatusView(
+                            viewModel: transcriptionModelViewModel,
+                            mode: viewModel.selectedTranscriptionQualityMode,
+                            accessibilityIdentifier:
+                                "settings.transcription.status",
+                            showsRetryButton: false
+                        )
+
+                        if (
+                            viewModel.selectedTranscriptionQualityMode
+                                == .highAccuracy
+                                && transcriptionModelViewModel
+                                    .canDownload(
+                                        mode: viewModel
+                                            .selectedTranscriptionQualityMode
+                                    )
+                        ) || transcriptionModelViewModel.canRetry(
+                            mode: viewModel.selectedTranscriptionQualityMode
+                        ) {
+                            HStack {
+                                Spacer()
+                                Button(
+                                    transcriptionDownloadButtonTitle(
+                                        for: viewModel
+                                            .selectedTranscriptionQualityMode
+                                    )
+                                ) {
+                                    let mode = viewModel
+                                        .selectedTranscriptionQualityMode
+                                    Task {
+                                        await viewModel
+                                            .refreshAudioControlAvailability()
+                                        guard !viewModel
+                                            .areTranscriptionControlsDisabled
+                                        else { return }
+                                        if transcriptionModelViewModel
+                                            .canRetry(mode: mode) {
+                                            await transcriptionModelViewModel
+                                                .retry(mode: mode)
+                                        } else {
+                                            await transcriptionModelViewModel
+                                                .download(mode: mode)
+                                        }
+                                    }
+                                }
+                                .disabled(
+                                    viewModel.areTranscriptionControlsDisabled
+                                        || transcriptionModelViewModel
+                                            .status(
+                                                for: viewModel
+                                                    .selectedTranscriptionQualityMode
+                                            ) == .downloading
+                                )
+                                .accessibilityIdentifier(
+                                    "settings.transcription.download"
+                                )
+                            }
+                        }
+
+                        Text("切换后从下一场会议生效")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 AdaptiveGlassCard {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("DeepSeek")
@@ -63,7 +166,7 @@ struct SettingsView: View {
                             .font(.headline)
 
                         Toggle(
-                            "总结后自动归档到 Notion",
+                            "生成后自动归档到 Notion",
                             isOn: $viewModel.isNotionArchivingEnabled
                         )
                         .accessibilityIdentifier(
@@ -71,9 +174,7 @@ struct SettingsView: View {
                         )
 
                         Text(
-                            viewModel.isNotionArchivingEnabled
-                                ? "生成总结后会继续写入已配置的 Notion 父页面。"
-                                : "总结只保存在本软件中，不会连接 Notion。"
+                            "仅在本地生成成功后，自动归档会议详情页滑块当前选择的文档类型（重点总结或完整纪要）。"
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -128,6 +229,89 @@ struct SettingsView: View {
 
                 AdaptiveGlassCard {
                     VStack(alignment: .leading, spacing: 12) {
+                        Text("常用说话人")
+                            .font(.headline)
+
+                        Text("提前保存高频参会者姓名，会议中可直接选择，无需重复输入。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        HStack(spacing: 8) {
+                            TextField(
+                                "输入姓名或角色",
+                                text: $viewModel.newSpeakerName
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit {
+                                viewModel.addFrequentSpeakerName()
+                            }
+                            .accessibilityIdentifier(
+                                "settings.speakers.newName"
+                            )
+
+                            Button("添加") {
+                                viewModel.addFrequentSpeakerName()
+                            }
+                            .disabled(
+                                AppSettingsStore.normalizedSpeakerNames([
+                                    viewModel.newSpeakerName
+                                ]).isEmpty
+                            )
+                            .accessibilityIdentifier("settings.speakers.add")
+                        }
+
+                        if viewModel.frequentSpeakerNames.isEmpty {
+                            Text("尚未添加常用说话人")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            LazyVGrid(
+                                columns: [
+                                    GridItem(
+                                        .adaptive(minimum: 120),
+                                        spacing: 8
+                                    )
+                                ],
+                                alignment: .leading,
+                                spacing: 8
+                            ) {
+                                ForEach(
+                                    Array(
+                                        viewModel.frequentSpeakerNames
+                                            .enumerated()
+                                    ),
+                                    id: \.offset
+                                ) { index, name in
+                                    HStack(spacing: 6) {
+                                        Text(name)
+                                            .lineLimit(1)
+                                        Spacer(minLength: 0)
+                                        Button {
+                                            viewModel
+                                                .removeFrequentSpeakerName(name)
+                                        } label: {
+                                            Image(systemName: "xmark")
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityLabel("删除 \(name)")
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        .secondary.opacity(0.1),
+                                        in: Capsule()
+                                    )
+                                    .accessibilityIdentifier(
+                                        "settings.speakers.name.\(index)"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                AdaptiveGlassCard {
+                    VStack(alignment: .leading, spacing: 12) {
                         Text("试验功能")
                             .font(.headline)
 
@@ -151,8 +335,22 @@ struct SettingsView: View {
                     ConnectionStateView(state: viewModel.saveState)
                     Spacer()
                     Button("保存设置") {
-                        viewModel.save()
+                        Task {
+                            if await viewModel.save() {
+                                transcriptionModelViewModel.selectedMode =
+                                    viewModel
+                                        .selectedTranscriptionQualityMode
+                            }
+                        }
                     }
+                    .disabled(
+                        viewModel.areTranscriptionControlsDisabled
+                            || !transcriptionModelViewModel
+                                .canPersistSelection(
+                                    mode: viewModel
+                                        .selectedTranscriptionQualityMode
+                                )
+                    )
                     .adaptivePrimaryButtonStyle()
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("settings.save")
@@ -160,10 +358,34 @@ struct SettingsView: View {
             }
             .padding(22)
         }
-        .frame(width: 560, height: 640)
+        .accessibilityIdentifier("settings.scroll")
+        .frame(width: 620, height: 780)
         .task {
+            viewModel.audioSettingsDidAppear()
             viewModel.load()
+            await transcriptionModelViewModel.refreshStatuses()
+            await viewModel.refreshAudioControlAvailability()
+            await viewModel.refreshAudioDevices()
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .milliseconds(500))
+                } catch {
+                    return
+                }
+                await viewModel.refreshAudioControlAvailability()
+            }
         }
+        .onDisappear {
+            viewModel.audioSettingsDidDisappear()
+        }
+    }
+
+    private func transcriptionDownloadButtonTitle(
+        for mode: TranscriptionQualityMode
+    ) -> String {
+        transcriptionModelViewModel.canRetry(mode: mode)
+            ? "重试下载"
+            : "下载高精度模型"
     }
 }
 

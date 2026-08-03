@@ -4,6 +4,7 @@ struct FloatingRecorderView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let isPaused: Bool
+    let recordingPresentationStore: RecordingSessionPresentationStore
     let action: (FloatingControl) -> Void
     let controls = FloatingControl.allCases
 
@@ -34,10 +35,78 @@ struct FloatingRecorderView: View {
 
     private func controlsRow(liquidGlass: Bool) -> some View {
         HStack(spacing: 8) {
+            elapsedDisplay
+
+            Divider()
+                .frame(height: 24)
+                .opacity(0.45)
+
             ForEach(controls) { control in
                 controlButton(control, liquidGlass: liquidGlass)
             }
         }
+    }
+
+    private var elapsedDisplay: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+                    .opacity(statusOpacity(at: context.date))
+
+                Text(
+                    elapsedText(
+                        at: ProcessInfo.processInfo.systemUptime
+                    )
+                )
+                .font(.system(.body, design: .monospaced).weight(.semibold))
+                .contentTransition(.numericText())
+                .frame(minWidth: 46, alignment: .leading)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(
+                "\(statusAccessibilityLabel) \(elapsedText(at: ProcessInfo.processInfo.systemUptime))"
+            )
+            .accessibilityIdentifier("floating.elapsed")
+        }
+    }
+
+    func elapsedText(at monotonicTime: TimeInterval) -> String {
+        guard let meetingID = recordingPresentationStore.meetingID else {
+            return MeetingDisplayFormat.duration(0)
+        }
+        return MeetingDisplayFormat.duration(
+            recordingPresentationStore.activeDuration(
+                for: meetingID,
+                at: monotonicTime
+            ) ?? 0
+        )
+    }
+
+    private var presentationPhase: RecordingSessionPresentationPhase {
+        recordingPresentationStore.phase ?? (isPaused ? .paused : .recording)
+    }
+
+    private var statusColor: Color {
+        presentationPhase == .paused ? .orange : .red
+    }
+
+    var statusAccessibilityLabel: String {
+        switch presentationPhase {
+        case .recording: "正在录音"
+        case .paused: "录音已暂停"
+        case .finished: "录音已结束"
+        }
+    }
+
+    private func statusOpacity(at date: Date) -> Double {
+        guard presentationPhase == .recording, !reduceMotion else {
+            return 1
+        }
+        return Int(date.timeIntervalSinceReferenceDate) % 2 == 0
+            ? 1
+            : 0.42
     }
 
     @ViewBuilder

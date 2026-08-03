@@ -9,6 +9,26 @@ enum RecordingState: String, Codable, CaseIterable, Equatable, Sendable {
     case summaryReady
     case archiving
     case archived
+
+    var blocksCaptureSettingsChanges: Bool {
+        switch self {
+        case .preparing, .recording, .paused, .finalizing:
+            true
+        case .idle, .ready, .summarizing, .summaryReady, .archiving,
+             .archived:
+            false
+        }
+    }
+
+    var allowsInterruptedSpeakerDiarizationRetryRecovery: Bool {
+        switch self {
+        case .ready, .summaryReady, .archived:
+            true
+        case .idle, .preparing, .recording, .paused, .finalizing,
+             .summarizing, .archiving:
+            false
+        }
+    }
 }
 
 enum RecordingAction: String, Codable, CaseIterable, Equatable, Sendable {

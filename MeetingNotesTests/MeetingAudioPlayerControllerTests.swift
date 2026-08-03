@@ -723,6 +723,95 @@ final class MeetingAudioPlayerControllerTests: XCTestCase {
         XCTAssertTrue(player.currentItem?.asset === secondComposition)
     }
 
+    func testLiveEngineRereadsAndAppliesOutputDeviceForEveryPreparation()
+        async throws {
+        let firstID = UUID()
+        let secondID = UUID()
+        let firstComposition = AVMutableComposition()
+        let secondComposition = AVMutableComposition()
+        let preference = SequencedAudioOutputPreference(
+            values: ["selected-output", nil]
+        )
+        let player = AVPlayer()
+        let engine = AVFoundationMeetingAudioPlaybackEngine(
+            player: player,
+            compositionBuilder: { source in
+                source.meetingID == firstID
+                    ? firstComposition
+                    : secondComposition
+            },
+            outputDevicePreference: preference
+        )
+
+        _ = try await engine.prepare(
+            source: makeSource(meetingID: firstID),
+            onPeriodicTime: { _ in },
+            onEnd: {}
+        )
+        XCTAssertEqual(player.audioOutputDeviceUniqueID, "selected-output")
+        XCTAssertTrue(player.currentItem?.asset === firstComposition)
+
+        _ = try await engine.prepare(
+            source: makeSource(meetingID: secondID),
+            onPeriodicTime: { _ in },
+            onEnd: {}
+        )
+        XCTAssertNil(player.audioOutputDeviceUniqueID)
+        XCTAssertTrue(player.currentItem?.asset === secondComposition)
+        let readCount = await preference.readCount()
+        XCTAssertEqual(readCount, 2)
+    }
+
+    func testLiveEngineStalePreferenceReadCannotOverwriteNewRouteOrItem()
+        async throws {
+        let firstID = UUID()
+        let secondID = UUID()
+        let firstComposition = AVMutableComposition()
+        let secondComposition = AVMutableComposition()
+        let preference = ControlledAudioOutputPreference(
+            values: ["old-output", "new-output"]
+        )
+        await preference.blockFirstRead()
+        let player = AVPlayer()
+        let engine = AVFoundationMeetingAudioPlaybackEngine(
+            player: player,
+            compositionBuilder: { source in
+                source.meetingID == firstID
+                    ? firstComposition
+                    : secondComposition
+            },
+            outputDevicePreference: preference
+        )
+
+        let first = Task {
+            try await engine.prepare(
+                source: makeSource(meetingID: firstID),
+                onPeriodicTime: { _ in },
+                onEnd: {}
+            )
+        }
+        await preference.waitUntilFirstReadStarted()
+
+        _ = try await engine.prepare(
+            source: makeSource(meetingID: secondID),
+            onPeriodicTime: { _ in },
+            onEnd: {}
+        )
+        XCTAssertEqual(player.audioOutputDeviceUniqueID, "new-output")
+        XCTAssertTrue(player.currentItem?.asset === secondComposition)
+
+        await preference.resumeFirstRead()
+        do {
+            _ = try await first.value
+            XCTFail("Expected stale preparation cancellation")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        XCTAssertEqual(player.audioOutputDeviceUniqueID, "new-output")
+        XCTAssertTrue(player.currentItem?.asset === secondComposition)
+    }
+
     func testLiveEngineEndObserverFiltersOldItemsAndIsRemovedOnStop() async throws {
         let firstID = UUID()
         let secondID = UUID()
@@ -1036,6 +1125,70 @@ private actor ControlledAudioSourceLoader: MeetingAudioSourceLoading {
 
     func loadCount(for meetingID: UUID) -> Int {
         counts[meetingID, default: 0]
+    }
+}
+
+private actor SequencedAudioOutputPreference:
+    AudioOutputDevicePreferenceReading {
+    private var values: [String?]
+    private var reads = 0
+
+    init(values: [String?]) {
+        self.values = values
+    }
+
+    func preferredOutputDeviceID() async -> String? {
+        reads += 1
+        guard !values.isEmpty else { return nil }
+        return values.removeFirst()
+    }
+
+    func readCount() -> Int {
+        reads
+    }
+}
+
+private actor ControlledAudioOutputPreference:
+    AudioOutputDevicePreferenceReading {
+    private var values: [String?]
+    private var shouldBlockFirstRead = false
+    private var firstReadStarted = false
+    private var firstReadWaiters: [CheckedContinuation<Void, Never>] = []
+    private var firstReadContinuation: CheckedContinuation<Void, Never>?
+    private var readCount = 0
+
+    init(values: [String?]) {
+        self.values = values
+    }
+
+    func blockFirstRead() {
+        shouldBlockFirstRead = true
+    }
+
+    func preferredOutputDeviceID() async -> String? {
+        readCount += 1
+        let index = readCount - 1
+        if index == 0, shouldBlockFirstRead {
+            firstReadStarted = true
+            firstReadWaiters.forEach { $0.resume() }
+            firstReadWaiters.removeAll()
+            await withCheckedContinuation {
+                firstReadContinuation = $0
+            }
+        }
+        guard values.indices.contains(index) else { return nil }
+        return values[index]
+    }
+
+    func waitUntilFirstReadStarted() async {
+        if firstReadStarted { return }
+        await withCheckedContinuation { firstReadWaiters.append($0) }
+    }
+
+    func resumeFirstRead() {
+        shouldBlockFirstRead = false
+        firstReadContinuation?.resume()
+        firstReadContinuation = nil
     }
 }
 

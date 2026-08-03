@@ -59,7 +59,7 @@ final class FluidAudioSpeakerDiarizerResourceTests:
                 converter: DiarizationAdapterTestConverter()
             )
 
-            await assertInferenceFailure {
+            await assertDiarizationFailure(.resultValidationFailed) {
                 try await diarizer.diarize(source: source)
             }
         }
@@ -187,7 +187,7 @@ final class FluidAudioSpeakerDiarizerResourceTests:
             converter: DiarizationAdapterTestConverter()
         )
 
-        await assertInferenceFailure {
+        await assertDiarizationFailure(.resultValidationFailed) {
             try await diarizer.diarize(source: source)
         }
     }
@@ -251,7 +251,111 @@ final class FluidAudioSpeakerDiarizerResourceTests:
             converter: DiarizationAdapterTestConverter()
         )
 
-        await assertInferenceFailure {
+        await assertDiarizationFailure(.resultValidationFailed) {
+            try await diarizer.diarize(source: source)
+        }
+    }
+
+    func testMapsInvalidManifestToInvalidSource() async throws {
+        let root = try makeTemporaryRoot()
+        let valid = try makeSource(
+            root: root,
+            segmentSamples: [[0.25]],
+            segmentStartTimes: [0]
+        )
+        let malformed = MeetingAudioSource(
+            meetingID: valid.meetingID,
+            resolvedSegments: valid.resolvedSegments,
+            segmentFrameCounts: [],
+            sampleRate: valid.sampleRate,
+            channelCount: valid.channelCount,
+            totalFrames: valid.totalFrames,
+            manifestSignature: valid.manifestSignature,
+            identitySignature: valid.identitySignature,
+            segmentStartTimes: valid.segmentStartTimes
+        )
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: malformed
+            ),
+            engine: DiarizationAdapterImmediateEngine(results: [[]]),
+            converter: DiarizationAdapterTestConverter()
+        )
+
+        await assertDiarizationFailure(.invalidSource) {
+            try await diarizer.diarize(source: malformed)
+        }
+    }
+
+    func testMapsTimelineReadFailureToTimelineAssemblyFailed()
+        async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [[0.25]],
+            segmentStartTimes: [0]
+        )
+        try FileManager.default.removeItem(at: source.segmentURLs[0])
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: DiarizationAdapterImmediateEngine(results: [[]]),
+            converter: DiarizationAdapterTestConverter()
+        )
+
+        await assertDiarizationFailure(.timelineAssemblyFailed) {
+            try await diarizer.diarize(source: source)
+        }
+    }
+
+    func testMapsModelPreparationFailureToModelPreparationFailed()
+        async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [[0.25]],
+            segmentStartTimes: [0]
+        )
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: DiarizationAdapterImmediateEngine(
+                results: [[]],
+                preparationFailures: 1
+            ),
+            converter: DiarizationAdapterTestConverter()
+        )
+
+        await assertDiarizationFailure(.modelPreparationFailed) {
+            try await diarizer.diarize(source: source)
+        }
+    }
+
+    func testMapsEngineProcessFailureToInferenceFailed() async throws {
+        let root = try makeTemporaryRoot()
+        let source = try makeSource(
+            root: root,
+            segmentSamples: [[0.25]],
+            segmentStartTimes: [0]
+        )
+        let diarizer = makeDiarizer(
+            root: root,
+            sourceLoader: DiarizationAdapterTestSourceLoader(
+                source: source
+            ),
+            engine: DiarizationAdapterImmediateEngine(
+                results: [],
+                processError: DiarizationAdapterTestError.processing
+            ),
+            converter: DiarizationAdapterTestConverter()
+        )
+
+        await assertDiarizationFailure(.inferenceFailed) {
             try await diarizer.diarize(source: source)
         }
     }
@@ -278,7 +382,7 @@ final class FluidAudioSpeakerDiarizerResourceTests:
             converter: converter
         )
 
-        await assertInferenceFailure {
+        await assertDiarizationFailure(.conversionFailed) {
             try await diarizer.diarize(source: source)
         }
 
@@ -335,6 +439,76 @@ final class FluidAudioSpeakerDiarizerResourceTests:
         XCTAssertTrue(
             try temporaryArtifacts(in: root).isEmpty
         )
+    }
+
+    func testCancellationErrorIsPreservedAtEachAsyncStageBoundary()
+        async throws {
+        let stages: [(
+            loader: (MeetingAudioSource) -> DiarizationAdapterTestSourceLoader,
+            engine: DiarizationAdapterImmediateEngine,
+            converter: DiarizationAdapterTestConverter
+        )] = [
+            (
+                { DiarizationAdapterTestSourceLoader(source: $0) },
+                DiarizationAdapterImmediateEngine(
+                    results: [],
+                    cancelPreparation: true
+                ),
+                DiarizationAdapterTestConverter()
+            ),
+            (
+                {
+                    DiarizationAdapterTestSourceLoader(
+                        source: $0,
+                        cancellingConfirmation: 1
+                    )
+                },
+                DiarizationAdapterImmediateEngine(results: [[]]),
+                DiarizationAdapterTestConverter()
+            ),
+            (
+                { DiarizationAdapterTestSourceLoader(source: $0) },
+                DiarizationAdapterImmediateEngine(results: [[]]),
+                DiarizationAdapterTestConverter(
+                    behavior: .cancelAfterWriting
+                )
+            ),
+            (
+                { DiarizationAdapterTestSourceLoader(source: $0) },
+                DiarizationAdapterImmediateEngine(
+                    results: [],
+                    cancelProcessing: true
+                ),
+                DiarizationAdapterTestConverter()
+            ),
+        ]
+
+        for stage in stages {
+            let root = try makeTemporaryRoot()
+            let source = try makeSource(
+                root: root,
+                segmentSamples: [[0.25]],
+                segmentStartTimes: [0]
+            )
+            let diarizer = makeDiarizer(
+                root: root,
+                sourceLoader: stage.loader(source),
+                engine: stage.engine,
+                converter: stage.converter
+            )
+
+            do {
+                _ = try await diarizer.diarize(source: source)
+                XCTFail("Expected cancellation")
+            } catch is CancellationError {
+                // Expected.
+            } catch {
+                XCTFail(
+                    "Expected CancellationError, received \(type(of: error))"
+                )
+            }
+            XCTAssertTrue(try temporaryArtifacts(in: root).isEmpty)
+        }
     }
 
     private func temporaryArtifacts(

@@ -32,6 +32,24 @@
 6. 结束后在详情页查看转录和书签。自动归档开启时，点击“总结并归档”；关闭时，点击“生成总结”。两种操作都会联系 DeepSeek 并保存本地总结，前者还会继续写入 Notion。
 7. 若已有本地总结，重新开启自动归档并保存设置后，返回会议详情点击“归档到 Notion”。这不会重新生成总结，也不会再次调用 DeepSeek。Notion 归档失败时也可再次点击“归档到 Notion”。
 
+## 音频设备与智能诊断
+
+使用 `⌘,` 打开设置，在“音频设备与智能诊断”中选择并测试设备：
+
+- 输入设备只影响 MeetingNotes：线下会议使用所选麦克风，在线会议的“我”轨也使用所选麦克风。设备断开或不可用时，App 会回退到系统默认或其他可用输入，并保留原选择以便设备重新连接。
+- 输出设备只影响 MeetingNotes 的录音回放与测试音，不会更改 macOS 全局输出设备，也不会改变其他 App 的声音路由。
+- 设置页保持打开时会监听设备接入、断开和系统默认设备变化，并自动合并刷新，避免快速变化时丢失最后一次设备状态。
+- 选择设备后可立即测试；点击“保存设置”后用于后续录音和回放。正式录音进行中，设备测试和智能诊断会暂时禁用。
+
+“开始智能诊断”会先播放 1 秒测试音并询问是否听到，然后分别观察麦克风和系统音频约 3 秒，总体约 8 秒。请在麦克风阶段正常说话，并在系统音频阶段保持扬声器可播放。测试只在内存中计算帧数、信号等级、采样率和声道数，不保存测试音频、不进入转录流程。
+
+本地结论会先显示，并列出待发送 JSON。只有勾选“我已检查上述数据，同意发送给 DeepSeek”并点击发送，App 才会请求 DeepSeek：
+
+- 发送：所选 DeepSeek 模型、固定诊断提示，以及预览中列出的应用/系统版本、权限状态、经截断和控制字符过滤的设备显示名称与状态、帧数、分桶信号等级、采样率、声道数、测试音结果和本地问题/建议代码。API Key 只用于 HTTPS 授权请求头，不写入诊断 JSON。
+- 不发送：任何录音或测试音频样本、转录、总结、会议标题、书签、Notion 内容或凭据、设备稳定 ID、用户名、文件路径/文件名及原始系统日志。
+
+DeepSeek 不可用时，本地诊断结论仍会保留。macOS 的麦克风与屏幕录制权限由系统隐私机制管理，MeetingNotes 无法替用户绕过或静默修改；设置页的“权限修复”按钮只负责打开对应系统设置。
+
 ## DeepSeek 与 Notion 设置
 
 使用 `⌘,` 打开设置。
@@ -119,7 +137,11 @@ file .deriveddata/Build/Products/Release/MeetingNotes.app/Contents/MacOS/Meeting
 lipo -archs .deriveddata/Build/Products/Release/MeetingNotes.app/Contents/MacOS/MeetingNotes
 ```
 
-## 验收证据（2026-07-17）
+## 验收证据（更新至 2026-08-01）
+
+- 完整 arm64 单元测试：662/662 通过，0 失败；结果包为 `.deriveddata-audio-diagnostics-final/Logs/Test/Test-MeetingNotes-2026.08.01_23-41-24-+0800.xcresult`。
+- 最近一次成功进入用例的完整 `MeetingFlowUITests`：9/9 通过，0 失败；包括音频设备、测试、智能诊断预览、同意发送和取消流程。结果包为 `~/Library/Developer/Xcode/DerivedData/MeetingNotes-aadthspcjnfjcacraljrzxdobzyr/Logs/Test/Test-MeetingNotes-2026.08.01_23-07-39-+0800.xcresult`。最终重跑被 macOS XCTest 在执行用例前以 `Timed out while enabling automation mode` 阻塞，结果包为同目录下 `Test-MeetingNotes-2026.08.01_23-41-56-+0800.xcresult`，不属于产品测试断言失败。
+- 真机音频采集、物理设备切换与真实 DeepSeek 诊断仍需按检查表手动确认；自动化测试不替代 macOS 权限与硬件验收。
 
 - 全新 `/tmp/meetingnotes-task12-unit-20260717-115107` 构建目录中的 clean arm64 单元测试：276/276 通过，0 失败；结果包为 `/tmp/meetingnotes-task12-unit-20260717-115107/Logs/Test/Run-MeetingNotes-2026.07.17_11-53-49-+0800.xcresult`。
 - 全新 `/tmp/meetingnotes-task12-ui-20260717-115107` 构建目录中的本机临时签名测试：完整 UI 流程 8/8、长录音 harness 1/1 通过，0 失败；结果包为 `/tmp/meetingnotes-task12-ui-20260717-115107/Logs/Test/Test-MeetingNotes-2026.07.17_11-55-10-+0800.xcresult`。
@@ -147,8 +169,8 @@ lipo -archs .deriveddata/Build/Products/Release/MeetingNotes.app/Contents/MacOS/
 | 8 | DeepSeek 结构化总结，失败保留本地会议 | 客户端、解析、用例与失败恢复测试通过 | 待真实 Key |
 | 9 | Notion 单页面幂等归档全部内容 | blocks、批次检查点、失败重试测试通过 | 待真实 Token/页面 |
 | 10 | Key/Token 存入 Keychain，重启仍可用 | Keychain 保存/替换/删除测试通过 | 待重启验证 |
-| 11 | 两个测试连接按钮给出成功或具体错误 | SettingsViewModel 与 UI 场景通过 | 自动化通过，待真实服务 |
-| 12 | 日志不含凭据、完整转录和音频 | 网络与日志脱敏测试通过 | 待真机日志/崩溃日志审计 |
-| 13 | 自动化与 Apple Silicon 真机端到端通过 | 276 项单元测试、8 项 UI 流程与 1 项长录音 harness 通过 | 自动化通过，真实录音/系统音频/外部服务清单待用户确认 |
+| 11 | 连接、音频设备测试和智能诊断给出成功或具体错误 | SettingsViewModel、设备路由、诊断与 UI 场景通过 | 自动化通过，待真实硬件/服务 |
+| 12 | 日志与诊断请求不含凭据、完整转录和音频 | 网络日志脱敏、诊断白名单与禁止字段测试通过 | 待真机日志/崩溃日志审计 |
+| 13 | 自动化与 Apple Silicon 真机端到端通过 | 662 项单元测试、9 项完整 UI 流程通过，包含一小时等价 harness | 自动化通过，真实录音/系统音频/外部服务清单待用户确认 |
 
 任何标记为“待验证”的项目都不是已通过项。完整操作记录在[真机检查表](docs/testing/manual-apple-silicon-checklist.md)。

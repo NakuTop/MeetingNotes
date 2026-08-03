@@ -11,6 +11,10 @@ final class SummaryRecord {
     var bookmarkInsightsData: Data
     var model: String
     var createdAt: Date
+    var contentRevisionBacking: Int?
+    var archiveStateRawValue: String?
+    var archivedContentRevision: Int?
+    var lastArchiveErrorCode: String?
     var meeting: MeetingRecord?
 
     var keyPoints: [String] { Self.decodeStrings(keyPointsData) }
@@ -26,6 +30,20 @@ final class SummaryRecord {
     var actionItems: [String] { actionItemRecords.map(\.task) }
     var bookmarkInsights: [String] { Self.decodeStrings(bookmarkInsightsData) }
 
+    var contentRevision: Int {
+        get { max(0, contentRevisionBacking ?? 0) }
+        set { contentRevisionBacking = max(0, newValue) }
+    }
+
+    var archiveState: MeetingDocumentArchiveState {
+        get {
+            archiveStateRawValue
+                .flatMap(MeetingDocumentArchiveState.init(rawValue:))
+                ?? .localOnly
+        }
+        set { archiveStateRawValue = newValue.rawValue }
+    }
+
     init(
         id: UUID = UUID(),
         overview: String,
@@ -45,6 +63,10 @@ final class SummaryRecord {
         bookmarkInsightsData = Self.encode(bookmarkInsights)
         self.model = model
         self.createdAt = createdAt
+        contentRevisionBacking = 1
+        archiveStateRawValue = MeetingDocumentArchiveState.localOnly.rawValue
+        archivedContentRevision = nil
+        lastArchiveErrorCode = nil
         self.meeting = meeting
     }
 
@@ -67,6 +89,10 @@ final class SummaryRecord {
         bookmarkInsightsData = Self.encode(bookmarkInsights)
         self.model = model
         self.createdAt = createdAt
+        contentRevisionBacking = 1
+        archiveStateRawValue = MeetingDocumentArchiveState.localOnly.rawValue
+        archivedContentRevision = nil
+        lastArchiveErrorCode = nil
         self.meeting = meeting
     }
 
@@ -78,7 +104,10 @@ final class SummaryRecord {
         bookmarkInsights: [String],
         model: String,
         createdAt: Date
-    ) {
+    ) throws {
+        let nextRevision = try MeetingDocumentRevision.next(
+            after: contentRevision
+        )
         self.overview = overview
         keyPointsData = Self.encode(keyPoints)
         decisionsData = Self.encode(decisions)
@@ -86,6 +115,7 @@ final class SummaryRecord {
         bookmarkInsightsData = Self.encode(bookmarkInsights)
         self.model = model
         self.createdAt = createdAt
+        markRegenerated(contentRevision: nextRevision)
     }
 
     func update(
@@ -96,7 +126,10 @@ final class SummaryRecord {
         bookmarkInsights: [String],
         model: String,
         createdAt: Date
-    ) {
+    ) throws {
+        let nextRevision = try MeetingDocumentRevision.next(
+            after: contentRevision
+        )
         self.overview = overview
         keyPointsData = Self.encode(keyPoints)
         decisionsData = Self.encode(decisions)
@@ -104,6 +137,14 @@ final class SummaryRecord {
         bookmarkInsightsData = Self.encode(bookmarkInsights)
         self.model = model
         self.createdAt = createdAt
+        markRegenerated(contentRevision: nextRevision)
+    }
+
+    private func markRegenerated(contentRevision: Int) {
+        self.contentRevision = contentRevision
+        archiveState = .localOnly
+        archivedContentRevision = nil
+        lastArchiveErrorCode = nil
     }
 
     private static func encode<Value: Encodable>(_ value: Value) -> Data {

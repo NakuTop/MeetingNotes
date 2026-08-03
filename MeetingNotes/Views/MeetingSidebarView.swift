@@ -85,7 +85,7 @@ struct MeetingSidebarView: View {
             }
             .accessibilityIdentifier("meeting.delete.cancel")
         } message: {
-            Text("本地录音、转录和总结将被永久删除，Notion 页面不会被删除。")
+            Text("若会议仍在录音将立即停止；本地录音、转录和总结会被永久删除，已有 Notion 页面不会被删除。")
         }
     }
 
@@ -129,6 +129,12 @@ private struct MeetingSidebarRow: View {
     let meeting: MeetingRecord
 
     var body: some View {
+        let archiveDisplayState = MeetingNotionArchiveDisplayState.resolve(
+            summary: meeting.summary?.archiveState,
+            detailedMinutes: meeting.detailedMinutes?.archiveState,
+            legacyMeetingState: meeting.state,
+            hasNotionPage: hasNotionPage
+        )
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 if meeting.isPinned {
@@ -158,15 +164,9 @@ private struct MeetingSidebarRow: View {
                     systemImage: "clock"
                 )
                 Spacer(minLength: 0)
-                Image(systemName: meeting.state == .archived
-                    ? "checkmark.icloud.fill"
-                    : "icloud.slash")
-                    .foregroundStyle(
-                        meeting.state == .archived ? .green : .secondary
-                    )
-                    .accessibilityLabel(
-                        meeting.state == .archived ? "已归档" : "未归档"
-                    )
+                Image(systemName: archiveDisplayState.symbolName)
+                    .foregroundStyle(color(for: archiveDisplayState))
+                    .accessibilityLabel(archiveDisplayState.accessibilityLabel)
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
@@ -174,11 +174,26 @@ private struct MeetingSidebarRow: View {
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
-            "\(meeting.title)，\(meeting.isPinned ? "已置顶" : "未置顶")，\(meeting.mode == .offline ? "线下会议" : "在线会议")，\(MeetingDisplayFormat.duration(meeting.activeDuration))，\(meeting.state == .archived ? "已归档" : "未归档")"
+            "\(meeting.title)，\(meeting.isPinned ? "已置顶" : "未置顶")，\(meeting.mode == .offline ? "线下会议" : "在线会议")，\(MeetingDisplayFormat.duration(meeting.activeDuration))，\(archiveDisplayState.accessibilityLabel)"
         )
         .accessibilityValue(
             meeting.isPinned ? "已置顶" : "未置顶"
         )
         .accessibilityIdentifier("meeting.historyRow")
+    }
+
+    private var hasNotionPage: Bool {
+        meeting.notionPageID?.isEmpty == false
+            || meeting.notionPageURL?.isEmpty == false
+    }
+
+    private func color(
+        for state: MeetingNotionArchiveDisplayState
+    ) -> Color {
+        switch state {
+        case .none: .secondary
+        case .partial: .blue
+        case .complete: .green
+        }
     }
 }

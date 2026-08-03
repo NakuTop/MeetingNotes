@@ -40,11 +40,17 @@ final class MeetingRecord {
     @Relationship(deleteRule: .cascade, inverse: \TranscriptRecord.meeting)
     var transcripts: [TranscriptRecord] = []
 
+    @Relationship(deleteRule: .cascade, inverse: \SpeakerNameRecord.meeting)
+    var speakerNames: [SpeakerNameRecord] = []
+
     @Relationship(deleteRule: .cascade, inverse: \BookmarkRecord.meeting)
     var bookmarks: [BookmarkRecord] = []
 
     @Relationship(deleteRule: .cascade, inverse: \SummaryRecord.meeting)
     var summary: SummaryRecord?
+
+    @Relationship(deleteRule: .cascade, inverse: \DetailedMinutesRecord.meeting)
+    var detailedMinutes: DetailedMinutesRecord?
 
     @Relationship(deleteRule: .cascade, inverse: \ArchiveCheckpointRecord.meeting)
     var archiveCheckpoint: ArchiveCheckpointRecord?
@@ -76,6 +82,19 @@ final class MeetingRecord {
         set {
             speakerProcessingStateRawValue = newValue.rawValue
         }
+    }
+
+    var speakerDisplayNames: [String: String] {
+        speakerNames
+            .sorted {
+                if $0.updatedAt != $1.updatedAt {
+                    return $0.updatedAt < $1.updatedAt
+                }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            .reduce(into: [:]) { result, record in
+                result[record.speakerID] = record.displayName
+            }
     }
 
     init(

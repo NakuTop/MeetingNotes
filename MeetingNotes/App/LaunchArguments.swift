@@ -10,6 +10,10 @@ enum LaunchArguments {
         "MEETING_NOTES_UI_AUDIO_PLAYER_MEETING_ID"
     static let uiTestingAudioPlayerLifecycleTriggerEnvironment =
         "MEETING_NOTES_UI_AUDIO_PLAYER_LIFECYCLE_TRIGGER"
+    static let uiTestingDocumentsEnvironment =
+        "MEETING_NOTES_UI_DOCUMENTS"
+    static let uiTestingSpeakerArchiveEnvironment =
+        "MEETING_NOTES_UI_SPEAKER_ARCHIVE"
 
     static func isUITesting(
         _ arguments: [String] = ProcessInfo.processInfo.arguments
@@ -27,6 +31,18 @@ enum LaunchArguments {
         _ environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Bool {
         environment[uiTestingAudioPlayerEnvironment] == "1"
+    }
+
+    static func usesDocumentsUITestFixture(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        environment[uiTestingDocumentsEnvironment] == "1"
+    }
+
+    static func usesSpeakerArchiveUITestFixture(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        environment[uiTestingSpeakerArchiveEnvironment] == "1"
     }
 
     static func audioPlayerLifecycleTriggerURL(
@@ -71,6 +87,10 @@ extension AppContainer {
             LaunchArguments.usesSlowRenameUITestFixture()
         let usesAudioPlayerFixture =
             LaunchArguments.usesAudioPlayerUITestFixture()
+        let usesDocumentsFixture =
+            LaunchArguments.usesDocumentsUITestFixture()
+        let usesSpeakerArchiveFixture =
+            LaunchArguments.usesSpeakerArchiveUITestFixture()
         let audioPlayerMeetingID = LaunchArguments.audioPlayerMeetingID()
         let audioPlayerLifecycleTriggerURL =
             LaunchArguments.audioPlayerLifecycleTriggerURL()
@@ -122,6 +142,152 @@ extension AppContainer {
                 title: "录音即将完成会议"
             )
         }
+        if usesDocumentsFixture {
+            let startedAt = Date(timeIntervalSince1970: 4_000)
+            let meetingID = try repository.createMeeting(
+                mode: .online,
+                startedAt: startedAt,
+                title: "双模式会议文档"
+            )
+            try repository.finalizeMeeting(
+                id: meetingID,
+                endedAt: startedAt.addingTimeInterval(600),
+                activeDuration: 600
+            )
+            try repository.appendTranscript(
+                meetingID: meetingID,
+                start: 0,
+                end: 8,
+                text: "我和远端讨论了发布安排。",
+                isFinal: true,
+                speakerID: "me"
+            )
+            try repository.saveGeneratedSummary(
+                meetingID: meetingID,
+                generated: GeneratedMeetingSummary(
+                    suggestedTitle: "双模式会议文档",
+                    overview: "UI 双模式重点总结",
+                    keyPoints: ["确认发布范围"],
+                    decisions: ["本周发布"],
+                    actionItems: [
+                        ActionItem(task: "准备发布", owner: "我", dueDate: "周五")
+                    ],
+                    bookmarkInsights: []
+                ),
+                model: "ui-test-model"
+            )
+            try repository.saveGeneratedDetailedMinutes(
+                meetingID: meetingID,
+                generated: GeneratedDetailedMinutes(
+                    overview: "UI 双模式完整纪要",
+                    sections: [
+                        DetailedMinutesSection(
+                            title: "发布讨论",
+                            timeRange: "00:00–00:08",
+                            speakers: ["我", "远端 1"],
+                            content: "双方确认了发布范围和时间。"
+                        )
+                    ],
+                    decisions: ["本周发布"],
+                    actionItems: [
+                        ActionItem(task: "准备发布", owner: "我", dueDate: "周五")
+                    ],
+                    openQuestions: ["回滚窗口待确认"]
+                ),
+                model: "ui-test-model",
+                promptVersion: 1
+            )
+        }
+        if usesSpeakerArchiveFixture {
+            let startedAt = Date(timeIntervalSince1970: 5_000)
+            let meetingID = try repository.createMeeting(
+                mode: .offline,
+                startedAt: startedAt,
+                title: "说话人标签会议"
+            )
+            try repository.finalizeMeeting(
+                id: meetingID,
+                endedAt: startedAt.addingTimeInterval(30),
+                activeDuration: 30
+            )
+            let transcriptDrafts = [
+                (0.0, 2.0, "先确认议题。", "room-1"),
+                (2.5, 4.0, "再确认时间。", "room-1"),
+                (5.0, 6.0, "我来补充安排。", "room-2"),
+                (12.0, 13.0, "议题已经确认。", "room-1"),
+                (20.0, 21.0, "安排也已确认。", "room-2")
+            ].map { transcript in
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: transcript.0,
+                        endTime: transcript.1,
+                        text: transcript.2
+                    ),
+                    speakerID: transcript.3,
+                    source: .room
+                )
+            }
+            try repository.replaceTranscripts(
+                meetingID: meetingID,
+                drafts: transcriptDrafts,
+                sourceRevision: 1
+            )
+            try repository.setSpeakerDisplayName(
+                meetingID: meetingID,
+                speakerID: "room-1",
+                displayName: "项目经理"
+            )
+            let partialMeetingID = try repository.createMeeting(
+                mode: .online,
+                startedAt: startedAt.addingTimeInterval(100),
+                title: "部分归档会议"
+            )
+            try repository.finalizeMeeting(
+                id: partialMeetingID,
+                endedAt: startedAt.addingTimeInterval(130),
+                activeDuration: 30
+            )
+            try repository.saveGeneratedSummary(
+                meetingID: partialMeetingID,
+                generated: GeneratedMeetingSummary(
+                    suggestedTitle: "部分归档会议",
+                    overview: "用于 UI 验收的重点总结。",
+                    keyPoints: ["确认议题和安排"],
+                    decisions: ["按计划推进"],
+                    actionItems: [],
+                    bookmarkInsights: []
+                ),
+                model: "ui-test-model"
+            )
+            try repository.saveGeneratedDetailedMinutes(
+                meetingID: partialMeetingID,
+                generated: GeneratedDetailedMinutes(
+                    overview: "用于 UI 验收的完整纪要。",
+                    sections: [
+                        DetailedMinutesSection(
+                            title: "议题确认",
+                            timeRange: "00:00–00:21",
+                            speakers: ["项目经理", "说话人 2"],
+                            content: "参会者确认了议题和安排。"
+                        )
+                    ],
+                    decisions: ["按计划推进"],
+                    actionItems: [],
+                    openQuestions: []
+                ),
+                model: "ui-test-model",
+                promptVersion: 1
+            )
+            try repository.completeDocumentArchive(
+                meetingID: partialMeetingID,
+                kind: .detailedMinutes
+            )
+            try repository.setNotionPage(
+                meetingID: partialMeetingID,
+                pageID: "ui-test-partial-archive-page",
+                pageURL: "https://www.notion.so/ui-test-partial-archive-page"
+            )
+        }
         let fileStore = MeetingFileStore(rootURL: recordingsURL)
         let credentials = EphemeralCredentialStore(
             deepSeekAPIKey: "ui-deepseek-key",
@@ -136,6 +302,9 @@ extension AppContainer {
         settings.isSpeakerDiarizationEnabled = speakerDiarizationEnabled
         settings.notionParentPageURL =
             "https://www.notion.so/UI-Parent-1234567890abcdef1234567890abcdef"
+        if usesSpeakerArchiveFixture {
+            settings.frequentSpeakerNames = ["张三", "李四"]
+        }
         let onboarding = OnboardingState(defaults: defaults)
         onboarding.completePrivacyAndConsent()
 
@@ -143,7 +312,10 @@ extension AppContainer {
             repository: repository,
             fileStore: fileStore,
             recordingsURL: recordingsURL,
-            coordinatorDependencies: { panel, speakerPreference in
+            coordinatorDependencies: {
+                panel,
+                speakerPreference,
+                recordingPresentation in
                 MeetingCoordinatorDependencies(
                     permissions: UITestPermissionAuthorizer(),
                     captureFactory: UITestCaptureFactory(),
@@ -154,7 +326,8 @@ extension AppContainer {
                     ),
                     speakerDiarizationPreference: speakerPreference,
                     panel: panel,
-                    clock: UITestClock()
+                    clock: UITestClock(),
+                    recordingPresentation: recordingPresentation
                 )
             },
             modelPreparer: UITestModelPreparer(),
@@ -163,12 +336,19 @@ extension AppContainer {
             deepSeekTester: UITestDeepSeekTester(),
             notionTester: UITestNotionTester(),
             summaryGenerator: UITestSummaryGenerator(),
+            detailedMinutesGenerator: UITestDetailedMinutesGenerator(),
             notionArchiver: UITestNotionArchiver(repository: repository),
             notionTitleUpdater: usesSlowRenameFixture
                 ? UITestDelayedNotionTitleUpdater()
                 : NoopMeetingNotionTitleUpdater(),
             onboardingState: onboarding,
-            systemRequirements: UITestSystemRequirements()
+            systemRequirements: UITestSystemRequirements(),
+            audioDeviceCatalog: UITestAudioDeviceCatalog(),
+            audioInputTester: UITestAudioInputTester(),
+            audioOutputTester: UITestAudioOutputTester(),
+            audioDiagnosticCoordinatorFactory:
+                UITestAudioDiagnosticCoordinatorFactory(),
+            audioDiagnosticExplainer: UITestAudioDiagnosticExplainer()
         )
         if let triggerURL = audioPlayerLifecycleTriggerURL,
            let meetingID = audioPlayerMeetingID {
@@ -338,6 +518,12 @@ private actor UITestTranscriptionQueue: MeetingTranscriptionQueueing {
         continuation?.yield(draft)
     }
 
+    func cancel() async {
+        drafts.removeAll(keepingCapacity: false)
+        continuation?.finish()
+        continuation = nil
+    }
+
     func drain() async {}
     func transcripts() async -> [TranscriptDraft] { drafts }
 
@@ -354,15 +540,12 @@ private actor UITestTranscriptionQueue: MeetingTranscriptionQueueing {
 }
 
 private actor UITestClock: MeetingClock {
-    private var monotonicTime: TimeInterval = 100
-
     func now() async -> Date {
-        Date(timeIntervalSince1970: 1_000 + monotonicTime)
+        .now
     }
 
     func monotonicNow() async -> TimeInterval {
-        defer { monotonicTime += 1 }
-        return monotonicTime
+        ProcessInfo.processInfo.systemUptime
     }
 }
 
@@ -375,6 +558,151 @@ private struct UITestDeepSeekTester: DeepSeekConnectionTesting {
         _ = apiKey
         return ["deepseek-chat", "deepseek-reasoner"]
     }
+}
+
+private struct UITestAudioDeviceCatalog: AudioDeviceDiscovering {
+    func snapshot() async throws -> AudioDeviceSnapshot {
+        AudioDeviceSnapshot(
+            inputs: [
+                AudioInputDevice(
+                    id: "ui-built-in-microphone",
+                    name: "UI 测试麦克风",
+                    manufacturer: "MeetingNotes",
+                    isConnected: true,
+                    isSuspended: false,
+                    isInUseByAnotherApplication: false,
+                    isSystemDefault: true
+                )
+            ],
+            outputs: [
+                AudioOutputDevice(
+                    id: "ui-built-in-output",
+                    name: "UI 测试扬声器",
+                    isConnected: true,
+                    isSystemDefault: true
+                )
+            ]
+        )
+    }
+}
+
+private actor UITestAudioInputTester: AudioDiagnosticSignalTesting {
+    private var continuation:
+        CheckedContinuation<AudioSignalMetrics, Error>?
+
+    func testSignal(duration: TimeInterval) async throws
+        -> AudioSignalMetrics {
+        try await testSignal(duration: duration) { _ in }
+    }
+
+    func testSignal(
+        duration: TimeInterval,
+        onMetrics: @escaping @Sendable (AudioSignalMetrics) async -> Void
+    ) async throws -> AudioSignalMetrics {
+        _ = duration
+        let metrics = uiTestAudioMetrics()
+        await onMetrics(metrics)
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func cancel() async {
+        continuation?.resume(throwing: CancellationError())
+        continuation = nil
+    }
+}
+
+private struct UITestAudioOutputTester: AudioOutputTesting {
+    func playTestTone(
+        duration: TimeInterval
+    ) async throws -> AudioOutputTestResult {
+        AudioOutputTestResult(
+            wasScheduled: true,
+            duration: duration,
+            outputDeviceID: nil
+        )
+    }
+
+    func stop() async {}
+}
+
+private struct UITestAudioDiagnosticCoordinatorFactory:
+    AudioDiagnosticCoordinatorCreating {
+    func makeCoordinator() async -> any AudioDiagnosticCoordinating {
+        UITestAudioDiagnosticCoordinator()
+    }
+}
+
+private actor UITestAudioDiagnosticCoordinator:
+    AudioDiagnosticCoordinating {
+    private var state: AudioDiagnosticCoordinatorState = .idle
+
+    func prepare() async throws {
+        state = .awaitingOutputConfirmation
+    }
+
+    func continueAfterOutputConfirmation(
+        heardTone: Bool
+    ) async throws {
+        state = .readyForUpload(
+            AudioDiagnosticReport(
+                primaryIssue: heardTone
+                    ? .captureHealthy
+                    : .outputNotAudible,
+                supportingIssues: [],
+                facts: AudioDiagnosticFacts(
+                    microphonePermission: .authorized,
+                    screenPermission: .authorized,
+                    inputDeviceAvailable: true,
+                    outputToneWasScheduled: true,
+                    userHeardOutputTone: heardTone,
+                    microphoneMetrics: uiTestAudioMetrics(),
+                    systemAudioMetrics: uiTestAudioMetrics(),
+                    historicalPlaybackFailed: false
+                )
+            )
+        )
+    }
+
+    func cancel() async {
+        state = .idle
+    }
+
+    func currentState() async -> AudioDiagnosticCoordinatorState {
+        state
+    }
+}
+
+private struct UITestAudioDiagnosticExplainer:
+    AudioDiagnosticExplanationRequesting {
+    func requestExplanation(
+        apiKey: String,
+        report: AudioDiagnosticReport,
+        metadata: AudioDiagnosticUploadMetadata,
+        model: String
+    ) async throws -> AudioDiagnosticExplanation {
+        _ = apiKey
+        _ = metadata
+        _ = model
+        return AudioDiagnosticExplanation(
+            issue: report.localIssue,
+            solution: report.localSolution,
+            source: .deepSeek
+        )
+    }
+}
+
+private func uiTestAudioMetrics() -> AudioSignalMetrics {
+    AudioSignalMetrics(
+        sampleCount: 144_000,
+        rms: 0.1,
+        peak: 0.2,
+        observationDuration: 3,
+        sampleRate: 48_000,
+        channelCount: 1,
+        level: .audible
+    )
 }
 
 private struct UITestNotionTester: NotionConnectionTesting {
@@ -418,6 +746,34 @@ private struct UITestSummaryGenerator: MeetingSummaryGenerating {
                 )
             ],
             bookmarkInsights: ["已记录关键节点"]
+        )
+    }
+}
+
+private struct UITestDetailedMinutesGenerator:
+    MeetingDetailedMinutesGenerating {
+    func detailedMinutes(
+        apiKey: String,
+        input: MeetingSummaryInput,
+        model: String
+    ) async throws -> GeneratedDetailedMinutes {
+        _ = apiKey
+        _ = input
+        _ = model
+        try await Task.sleep(for: .milliseconds(1_500))
+        return GeneratedDetailedMinutes(
+            overview: "UI 生成的完整纪要",
+            sections: [
+                DetailedMinutesSection(
+                    title: "讨论",
+                    timeRange: "00:00–00:08",
+                    speakers: ["我", "远端 1"],
+                    content: "已整理会议讨论。"
+                )
+            ],
+            decisions: ["继续执行"],
+            actionItems: [],
+            openQuestions: []
         )
     }
 }

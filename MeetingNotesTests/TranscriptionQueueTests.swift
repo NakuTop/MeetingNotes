@@ -2,6 +2,52 @@ import XCTest
 @testable import MeetingNotes
 
 final class TranscriptionQueueTests: XCTestCase {
+    func testFactoryCapturesQualityModeOncePerQueue() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "TranscriptionQueueFactoryTests-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: root) }
+        let preference = MutableTranscriptionQualityPreference(.balanced)
+        let serviceFactory = QueueModelServiceFactory()
+        let controller = TranscriptionModelController(
+            storage: TranscriptionModelStorage(
+                modelsRoot: root,
+                legacyModelFolder: nil
+            )
+        ) { request in
+            await serviceFactory.makeService(for: request)
+        }
+        let factory = LiveMeetingTranscriptionQueueFactory(
+            modelController: controller,
+            qualityPreference: preference
+        )
+
+        let balancedQueue = try await factory.makeQueue()
+        await preference.setMode(.highAccuracy)
+        await balancedQueue.enqueue(samples: [1], startingAt: 0)
+        await balancedQueue.drain()
+
+        let balancedTranscripts = await balancedQueue.transcripts()
+        let balancedText = balancedTranscripts.first?.text
+        let balancedService = await balancedQueue.fixedTranscriptionService()
+        let selectedModes = await serviceFactory.selectedModes()
+        XCTAssertEqual(balancedText, "balanced")
+        XCTAssertNotNil(balancedService)
+        XCTAssertEqual(selectedModes, [.balanced])
+
+        let highAccuracyQueue = try await factory.makeQueue()
+        await highAccuracyQueue.enqueue(samples: [1], startingAt: 1)
+        await highAccuracyQueue.drain()
+
+        let highAccuracyTranscripts = await highAccuracyQueue.transcripts()
+        let highAccuracyText = highAccuracyTranscripts.first?.text
+        let updatedModes = await serviceFactory.selectedModes()
+        XCTAssertEqual(highAccuracyText, "highAccuracy")
+        XCTAssertEqual(updatedModes, [.balanced, .highAccuracy])
+    }
+
     func testProcessesChunksInOrderAndDrainWaitsForCompletion() async throws {
         let service = RecordingTranscriptionService()
         let queue = TranscriptionQueue(service: service)
@@ -125,6 +171,96 @@ final class TranscriptionQueueTests: XCTestCase {
         )
         await queue.finishUpdates()
     }
+
+    func testCancelDropsActiveWaitingAndFutureWorkWithoutPublishing() async {
+        let service = SuspendedTranscriptionService()
+        let queue = TranscriptionQueue(service: service)
+        let updates = await queue.updates()
+        let firstUpdate = Task { () -> TranscriptDraft? in
+            for await update in updates {
+                return update
+            }
+            return nil
+        }
+
+        await queue.enqueue(samples: [0.5], startingAt: 4)
+        for _ in 0..<100 where !(await service.hasStarted()) {
+            await Task.yield()
+        }
+        await queue.enqueue(samples: [0.7], startingAt: 8)
+
+        await queue.cancel()
+        await service.resume()
+        await queue.drain()
+        await queue.enqueue(samples: [0.9], startingAt: 12)
+        await queue.retryFailed()
+        await queue.drain()
+
+        let publishedUpdate = await firstUpdate.value
+        let transcripts = await queue.transcripts()
+        let snapshot = await queue.snapshot()
+        let transcribedStarts = await service.transcribedStarts()
+        XCTAssertNil(publishedUpdate)
+        XCTAssertTrue(transcripts.isEmpty)
+        XCTAssertEqual(snapshot, .idle)
+        XCTAssertEqual(transcribedStarts, [4])
+    }
+}
+
+private actor MutableTranscriptionQualityPreference:
+    TranscriptionQualityPreferenceReading {
+    private var mode: TranscriptionQualityMode
+
+    init(_ mode: TranscriptionQualityMode) {
+        self.mode = mode
+    }
+
+    func transcriptionQualityMode() -> TranscriptionQualityMode {
+        mode
+    }
+
+    func setMode(_ mode: TranscriptionQualityMode) {
+        self.mode = mode
+    }
+}
+
+private actor QueueModelServiceFactory {
+    private var modes: [TranscriptionQualityMode] = []
+
+    func makeService(
+        for request: TranscriptionModelLoadRequest
+    ) -> any TranscriptionService {
+        modes.append(request.descriptor.mode)
+        return QueueModelService(mode: request.descriptor.mode)
+    }
+
+    func selectedModes() -> [TranscriptionQualityMode] {
+        modes
+    }
+}
+
+private actor QueueModelService: TranscriptionService {
+    private let mode: TranscriptionQualityMode
+
+    init(mode: TranscriptionQualityMode) {
+        self.mode = mode
+    }
+
+    func prepare() async throws {}
+
+    func transcribe(
+        samples: [Float],
+        startingAt: TimeInterval
+    ) async throws -> [TranscriptDraft] {
+        _ = samples
+        return [
+            TranscriptDraft(
+                startTime: startingAt,
+                endTime: startingAt + 1,
+                text: mode.rawValue
+            )
+        ]
+    }
 }
 
 private actor RecordingTranscriptionService: TranscriptionService {
@@ -153,6 +289,7 @@ private actor RecordingTranscriptionService: TranscriptionService {
 
 private actor SuspendedTranscriptionService: TranscriptionService {
     private var started = false
+    private var starts: [TimeInterval] = []
     private var continuation: CheckedContinuation<Void, Never>?
 
     func prepare() async throws {}
@@ -162,6 +299,7 @@ private actor SuspendedTranscriptionService: TranscriptionService {
         startingAt: TimeInterval
     ) async throws -> [TranscriptDraft] {
         started = true
+        starts.append(startingAt)
         await withCheckedContinuation { continuation = $0 }
         return [
             TranscriptDraft(
@@ -179,6 +317,10 @@ private actor SuspendedTranscriptionService: TranscriptionService {
     func resume() {
         continuation?.resume()
         continuation = nil
+    }
+
+    func transcribedStarts() -> [TimeInterval] {
+        starts
     }
 }
 

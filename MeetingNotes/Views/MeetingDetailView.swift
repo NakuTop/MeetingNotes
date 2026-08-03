@@ -30,7 +30,7 @@ private struct TranscriptDisclosureContext: Equatable {
 
     init(meeting: MeetingRecord) {
         meetingID = meeting.id
-        hasSummary = meeting.summary != nil
+        hasSummary = meeting.summary != nil || meeting.detailedMinutes != nil
     }
 }
 
@@ -39,6 +39,8 @@ struct MeetingDetailView: View {
     @State private var isEditingTitle = false
     @State private var titleDraft = ""
     @State private var renameTask: Task<Void, Never>?
+    @State private var documentOperationTask: Task<Void, Never>?
+    @State private var speakerDiarizationTask: Task<Void, Never>?
     @State private var renameGeneration = 0
     @State private var transcriptMeetingID: UUID?
     @State private var transcriptIsExpanded = true
@@ -88,6 +90,8 @@ struct MeetingDetailView: View {
         }
         .onDisappear {
             invalidateRenameTask()
+            invalidateDocumentOperationTask()
+            invalidateSpeakerDiarizationTask()
         }
     }
 
@@ -109,7 +113,30 @@ struct MeetingDetailView: View {
                     ) {
                         TranscriptView(
                             transcripts: meeting.transcripts,
-                            bookmarks: meeting.bookmarks
+                            bookmarks: meeting.bookmarks,
+                            customSpeakerNames: meeting.speakerDisplayNames,
+                            frequentSpeakerNames: viewModel
+                                .frequentSpeakerNames,
+                            speakerNameErrorMessage: viewModel
+                                .speakerNameErrorMessage,
+                            onBeginSpeakerEditing: {
+                                viewModel.dismissSpeakerNameError()
+                            },
+                            onRenameSpeaker: { speakerID, name in
+                                let succeeded = viewModel.renameSpeaker(
+                                    speakerID,
+                                    to: name
+                                )
+                                if succeeded { onMeetingChanged() }
+                                return succeeded
+                            },
+                            onClearSpeakerName: { speakerID in
+                                let succeeded = viewModel.clearSpeakerName(
+                                    speakerID
+                                )
+                                if succeeded { onMeetingChanged() }
+                                return succeeded
+                            }
                         )
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 8)
@@ -117,6 +144,9 @@ struct MeetingDetailView: View {
                         Text("完整转录内容")
                             .font(.headline)
                     }
+                    .accessibilityIdentifier(
+                        "meeting.transcripts.disclosure"
+                    )
                 }
 
                 GroupBox("书签") {
@@ -222,10 +252,7 @@ struct MeetingDetailView: View {
                         ? "person.2.fill"
                         : "display"
                 )
-                Label(
-                    MeetingDisplayFormat.duration(meeting.activeDuration),
-                    systemImage: "clock"
-                )
+                liveMetadataDurationLabel
             }
             .font(.callout)
             .foregroundStyle(.secondary)
@@ -291,6 +318,8 @@ struct MeetingDetailView: View {
                     Image(systemName: "pencil")
                 }
                 .buttonStyle(.borderless)
+                .frame(minWidth: 28, minHeight: 28)
+                .contentShape(Rectangle())
                 .disabled(!canRename(meeting) || viewModel.isRenaming)
                 .accessibilityLabel("重命名会议")
                 .accessibilityIdentifier("meeting.detail.rename")
@@ -304,6 +333,8 @@ struct MeetingDetailView: View {
 
     private func canRename(_ meeting: MeetingRecord) -> Bool {
         !viewModel.isPerforming
+            && !viewModel.isRetryingSpeakerDiarization
+            && !viewModel.isDocumentOperationInProgress
             && meeting.state != .summarizing
             && meeting.state != .archiving
     }
@@ -387,16 +418,32 @@ struct MeetingDetailView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Text(
-                            MeetingDisplayFormat.duration(
-                                meeting.activeDuration
-                            )
-                        )
-                        .font(.body.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        liveDurationLabel
                     }
                 }
             }
+        }
+    }
+
+    private var liveDurationText: String {
+        MeetingDisplayFormat.duration(
+            viewModel.displayedActiveDuration(
+                at: ProcessInfo.processInfo.systemUptime
+            )
+        )
+    }
+
+    private var liveDurationLabel: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            Text(liveDurationText)
+                .font(.body.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var liveMetadataDurationLabel: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            Label(liveDurationText, systemImage: "clock")
         }
     }
 
@@ -406,25 +453,23 @@ struct MeetingDetailView: View {
                 Text("总结与归档")
                     .font(.headline)
 
-                if let summary = meeting.summary {
-                    Text(summary.overview)
-                        .textSelection(.enabled)
-                    summaryList(title: "关键结论", items: summary.keyPoints)
-                    summaryList(title: "决定事项", items: summary.decisions)
-                    summaryList(
-                        title: "行动项",
-                        items: summary.actionItemRecords.map(actionItemText)
-                    )
-                } else {
-                    Text(
-                        viewModel.isNotionArchivingEnabled
-                            ? "会议结束并完成转录后，可生成总结并归档到 Notion。"
-                            : "会议结束并完成转录后，可生成总结并保存在本软件中。"
-                    )
-                        .foregroundStyle(.secondary)
-                }
+                MeetingDocumentModeSlider(
+                    selection: Binding(
+                        get: { viewModel.selectedDocumentKind },
+                        set: { viewModel.selectedDocumentKind = $0 }
+                    ),
+                    isDisabled: viewModel.isDocumentOperationInProgress
+                        || viewModel.isPerforming
+                        || viewModel.isRenaming
+                        || viewModel.isRetryingSpeakerDiarization
+                        || isEditingTitle
+                )
 
-                if let errorMessage = viewModel.errorMessage {
+                selectedDocumentContent(meeting)
+
+                if let errorMessage = viewModel.documentErrorMessage(
+                    for: viewModel.selectedDocumentKind
+                ) {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
@@ -433,49 +478,231 @@ struct MeetingDetailView: View {
                             .foregroundStyle(.secondary)
                         Spacer()
                         Button("关闭") {
-                            viewModel.dismissError()
+                            viewModel.dismissDocumentError(
+                                for: viewModel.selectedDocumentKind
+                            )
                         }
                         .buttonStyle(.plain)
                     }
                 }
 
                 HStack(spacing: 12) {
-                    let action = viewModel.primaryAction
-                    Button(action.title, systemImage: action.symbolName) {
-                        Task {
-                            await viewModel.performPrimaryAction()
-                        }
+                    Button(
+                        selectedGenerateButtonTitle(meeting),
+                        systemImage: "sparkles"
+                    ) {
+                        beginGenerateSelectedDocument()
                     }
                     .adaptivePrimaryButtonStyle()
                     .disabled(
-                        !action.isEnabled
-                            || viewModel.isPerforming
+                        !viewModel.canGenerateSelectedDocument
                             || isEditingTitle
-                            || viewModel.isRenaming
                     )
-                    .accessibilityIdentifier("meeting.summarizeArchive")
+                    .accessibilityIdentifier("meeting.documents.generate")
 
-                    if action == .summarizing || action == .archiving {
+                    if selectedDocumentOperationIsActive {
                         ProgressView()
                             .controlSize(.small)
                     }
 
-                    if let urlString = meeting.notionPageURL,
+                    if hasSelectedDocument(meeting) {
+                        Text(selectedArchiveStatusTitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier(
+                                "meeting.documents.archiveStatus"
+                            )
+                    }
+
+                    if let archiveButtonTitle = viewModel
+                        .selectedDocumentArchiveButtonTitle {
+                        Button(archiveButtonTitle) {
+                            beginArchiveSelectedDocumentToNotion()
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(
+                            !viewModel.canArchiveSelectedDocumentToNotion
+                        )
+                        .accessibilityIdentifier(
+                            "meeting.documents.retryArchive"
+                        )
+                    }
+
+                    if viewModel.archiveStatus(
+                        for: viewModel.selectedDocumentKind
+                    ) == .archived,
+                       let urlString = meeting.notionPageURL,
                        let url = URL(string: urlString) {
                         Link("在 Notion 中打开", destination: url)
-                    } else if meeting.summary != nil,
-                              !viewModel.isNotionArchivingEnabled {
-                        Text("已保存在本机")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("尚未归档到 Notion")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private func selectedDocumentContent(_ meeting: MeetingRecord) -> some View {
+        switch viewModel.selectedDocumentKind {
+        case .summary:
+            if let summary = meeting.summary {
+                Text(summary.overview)
+                    .textSelection(.enabled)
+                summaryList(title: "关键结论", items: summary.keyPoints)
+                summaryList(title: "决定事项", items: summary.decisions)
+                summaryList(
+                    title: "行动项",
+                    items: summary.actionItemRecords.map(actionItemText)
+                )
+            } else {
+                emptyDocumentMessage(kind: .summary)
+            }
+        case .detailedMinutes:
+            if let minutes = meeting.detailedMinutes {
+                decodedDetailedMinutesContent(minutes)
+            } else {
+                emptyDocumentMessage(kind: .detailedMinutes)
+            }
+        }
+    }
+
+    private func emptyDocumentMessage(kind: MeetingDocumentKind) -> some View {
+        Text(
+            kind == .summary
+                ? "生成提炼后的关键结论、决定事项和行动项。"
+                : "生成更完整但经过整理提炼的议题纪要、决定和待确认问题。"
+        )
+        .foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder
+    private func decodedDetailedMinutesContent(
+        _ minutes: DetailedMinutesRecord
+    ) -> some View {
+        let result: Result<GeneratedDetailedMinutes, Error> = Result {
+            try GeneratedDetailedMinutes(
+                overview: minutes.overview,
+                sections: minutes.sections,
+                decisions: minutes.decisions,
+                actionItems: minutes.actionItems,
+                openQuestions: minutes.openQuestions
+            )
+        }
+        switch result {
+        case let .success(decoded):
+            Text(decoded.overview)
+                .textSelection(.enabled)
+            detailedMinutesSections(decoded.sections)
+            summaryList(title: "决定事项", items: decoded.decisions)
+            summaryList(
+                title: "行动项",
+                items: decoded.actionItems.map(actionItemText)
+            )
+            summaryList(title: "待确认问题", items: decoded.openQuestions)
+        case .failure:
+            Label(
+                "完整纪要读取失败，请重新生成。",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .foregroundStyle(.orange)
+        }
+    }
+
+    @ViewBuilder
+    private func detailedMinutesSections(
+        _ sections: [DetailedMinutesSection]
+    ) -> some View {
+        if !sections.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("议题记录")
+                    .font(.headline)
+                ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(section.title)
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            if let timeRange = section.timeRange,
+                               !timeRange.isEmpty {
+                                Text(timeRange)
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        if !section.speakers.isEmpty {
+                            Text("发言人：\(section.speakers.joined(separator: "、"))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(section.content)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
+        }
+    }
+
+    private func selectedGenerateButtonTitle(_ meeting: MeetingRecord) -> String {
+        let prefix = hasSelectedDocument(meeting) ? "重新生成" : "生成"
+        return prefix + (viewModel.selectedDocumentKind == .summary
+            ? "重点总结"
+            : "完整纪要")
+    }
+
+    private func beginGenerateSelectedDocument() {
+        invalidateDocumentOperationTask()
+        // The detail view owns this workflow so navigation cancellation reaches
+        // the view model and its use case instead of continuing off-screen.
+        documentOperationTask = Task { @MainActor [viewModel] in
+            await viewModel.generateSelectedDocument()
+        }
+    }
+
+    private func beginArchiveSelectedDocumentToNotion() {
+        invalidateDocumentOperationTask()
+        documentOperationTask = Task { @MainActor [viewModel] in
+            await viewModel.archiveSelectedDocumentToNotion()
+        }
+    }
+
+    private func invalidateDocumentOperationTask() {
+        documentOperationTask?.cancel()
+        documentOperationTask = nil
+    }
+
+    private func invalidateSpeakerDiarizationTask() {
+        speakerDiarizationTask?.cancel()
+        speakerDiarizationTask = nil
+    }
+
+    private func hasSelectedDocument(_ meeting: MeetingRecord) -> Bool {
+        switch viewModel.selectedDocumentKind {
+        case .summary: meeting.summary != nil
+        case .detailedMinutes: meeting.detailedMinutes != nil
+        }
+    }
+
+    private var selectedDocumentOperationIsActive: Bool {
+        switch viewModel.documentOperation {
+        case let .generating(kind), let .archiving(kind):
+            kind == viewModel.selectedDocumentKind
+        case .idle:
+            false
+        }
+    }
+
+    private var selectedArchiveStatusTitle: String {
+        if case let .archiving(kind) = viewModel.documentOperation,
+           kind == viewModel.selectedDocumentKind {
+            return "正在归档"
+        }
+        return switch viewModel.archiveStatus(
+            for: viewModel.selectedDocumentKind
+        ) {
+        case .localOnly: "仅本地"
+        case .archiving: "正在归档"
+        case .archived: "已归档"
+        case .failed: "归档失败"
         }
     }
 
@@ -500,10 +727,22 @@ struct MeetingDetailView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("关闭") {
-                    viewModel.dismissSpeakerProcessingWarning()
+                if viewModel.shouldShowSpeakerDiarizationRetryAction {
+                    Button("重新分离说话人") {
+                        invalidateSpeakerDiarizationTask()
+                        speakerDiarizationTask = Task { @MainActor [viewModel] in
+                            await viewModel.retrySpeakerDiarization()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(
+                        !viewModel.canRetrySpeakerDiarization
+                            || isEditingTitle
+                    )
+                    .accessibilityIdentifier(
+                        "meeting.speakerDiarization.retry"
+                    )
                 }
-                .buttonStyle(.plain)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
@@ -512,6 +751,16 @@ struct MeetingDetailView: View {
                 in: RoundedRectangle(cornerRadius: 9)
             )
             .accessibilityIdentifier("meeting.speakerProcessingWarning")
+        }
+
+        if let retryError =
+            viewModel.speakerDiarizationRetryErrorMessage {
+            Text(retryError)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .accessibilityIdentifier(
+                    "meeting.speakerDiarization.retryError"
+                )
         }
     }
 

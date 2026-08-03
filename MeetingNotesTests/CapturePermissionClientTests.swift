@@ -154,17 +154,86 @@ final class CapturePermissionClientTests: XCTestCase {
         XCTAssertEqual(calls.screenRequestCount, 1)
     }
 
-    func testNonPermissionProbeFailureDoesNotBecomePermissionDenial() async {
+    func testScreenStatusReportsUnavailableProbeInfrastructure() async {
+        let calls = PermissionInvocationRecorder()
         let system = LiveCapturePermissionSystem(
             microphoneStatus: { .authorized },
             microphoneRequest: { true },
-            screenPreflight: { false },
-            screenRequest: { false },
-            screenProbe: { .unavailable }
+            screenPreflight: {
+                calls.recordScreenPreflight()
+                return false
+            },
+            screenRequest: {
+                calls.recordScreenRequest()
+                return false
+            },
+            screenProbe: {
+                calls.recordScreenProbe()
+                return .unavailable
+            }
+        )
+
+        let status = await system.status(for: .screenRecording)
+
+        XCTAssertEqual(status, .unavailable)
+        XCTAssertEqual(calls.screenProbeCount, 1)
+        XCTAssertEqual(calls.screenPreflightCount, 0)
+        XCTAssertEqual(calls.screenRequestCount, 0)
+    }
+
+    func testScreenRequestReturnsInitialUnavailableWithoutOpeningPrompt() async {
+        let calls = PermissionInvocationRecorder()
+        let system = LiveCapturePermissionSystem(
+            microphoneStatus: { .authorized },
+            microphoneRequest: { true },
+            screenPreflight: {
+                calls.recordScreenPreflight()
+                return false
+            },
+            screenRequest: {
+                calls.recordScreenRequest()
+                return false
+            },
+            screenProbe: {
+                calls.recordScreenProbe()
+                return .unavailable
+            }
         )
 
         let status = await system.requestAccess(for: .screenRecording)
-        XCTAssertEqual(status, .authorized)
+
+        XCTAssertEqual(status, .unavailable)
+        XCTAssertEqual(calls.screenProbeCount, 1)
+        XCTAssertEqual(calls.screenPreflightCount, 0)
+        XCTAssertEqual(calls.screenRequestCount, 0)
+    }
+
+    func testScreenRequestReturnsUnavailableFromFinalPostRequestProbe() async {
+        let calls = PermissionInvocationRecorder()
+        let probes = SequencedProbe(values: [.denied, .unavailable])
+        let system = LiveCapturePermissionSystem(
+            microphoneStatus: { .authorized },
+            microphoneRequest: { true },
+            screenPreflight: {
+                calls.recordScreenPreflight()
+                return false
+            },
+            screenRequest: {
+                calls.recordScreenRequest()
+                return false
+            },
+            screenProbe: {
+                calls.recordScreenProbe()
+                return probes.next()
+            }
+        )
+
+        let status = await system.requestAccess(for: .screenRecording)
+
+        XCTAssertEqual(status, .unavailable)
+        XCTAssertEqual(calls.screenProbeCount, 2)
+        XCTAssertEqual(calls.screenPreflightCount, 1)
+        XCTAssertEqual(calls.screenRequestCount, 1)
     }
 
     func testClassifiesOnlyScreenCaptureUserDeclinedAsDenied() {
