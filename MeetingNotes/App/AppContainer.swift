@@ -159,6 +159,7 @@ final class AppContainer {
             permissionSystem: permissionSystem,
             panel: panelPresenter,
             recordingPresentation: recordingPresentationStore,
+            captureInterruptionReporter: controlRouter,
             sourceLoader: sourceLoader,
             transcriptionModelController: transcriptionModelController,
             transcriptionQualityPreference:
@@ -173,11 +174,22 @@ final class AppContainer {
         let credentialStore = credentialStore ?? KeychainCredentialStore()
         let operationGate = MeetingOperationGate()
         self.operationGate = operationGate
+        let onlineTranscriptRebuilder = OnlineMeetingTranscriptRebuilder(
+            reader: MeetingTrackAudioReader(sourceLoader: sourceLoader),
+            sourceLoader: sourceLoader,
+            diarizer: speakerDiarizer
+        )
         let speakerDiarizationRetryer = SpeakerDiarizationRetryUseCase(
             repository: repository,
             sourceLoader: sourceLoader,
             diarizer: speakerDiarizer,
-            operationGate: operationGate
+            operationGate: operationGate,
+            onlineRebuilder: onlineTranscriptRebuilder,
+            transcriptionServiceProvider:
+                PreferredTranscriptionServiceProvider(
+                    controller: transcriptionModelController,
+                    preference: transcriptionQualityPreference
+                )
         )
         self.speakerDiarizationRetryer = speakerDiarizationRetryer
         let titleUpdater = MeetingTitleUpdateUseCase(
@@ -196,6 +208,10 @@ final class AppContainer {
             )
         )
         self.audioPlayerController = audioPlayerController
+        let recoveryService = MeetingRecoveryService(
+            repository: repository,
+            fileStore: fileStore
+        )
         let libraryViewModel = MeetingLibraryViewModel(
             repository: repository,
             fileDeleter: fileStore,
@@ -204,6 +220,7 @@ final class AppContainer {
             operationGate: operationGate,
             playbackStopper: audioPlayerController,
             deletionPreparer: coordinator,
+            recovery: recoveryService,
             systemRequirements: systemRequirements ?? SystemRequirements(),
             recordingsURL: recordingsURL
         )
@@ -347,7 +364,8 @@ final class AppContainer {
 }
 
 @MainActor
-private final class MeetingControlRouter {
+private final class MeetingControlRouter:
+    MeetingCaptureInterruptionReporting {
     private var coordinator: MeetingCoordinator?
     private weak var panelController: FloatingPanelController?
     private weak var libraryViewModel: MeetingLibraryViewModel?
@@ -391,4 +409,9 @@ private final class MeetingControlRouter {
         }
     }
 
+    func captureInterrupted(meetingID: UUID) async {
+        libraryViewModel?.load()
+        libraryViewModel?.select(meetingID)
+        libraryViewModel?.reportCaptureInterruption()
+    }
 }

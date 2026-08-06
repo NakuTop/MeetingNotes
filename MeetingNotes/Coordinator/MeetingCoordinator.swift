@@ -97,6 +97,7 @@ actor MeetingCoordinator {
     private var captureHealthTask: Task<Void, Never>?
     private var captureHealthGeneration: UInt64 = 0
     private var captureHealthPipelineFailed = false
+    private var captureInterruptionFinalizationScheduled = false
     private var lifecycleOperationInProgress = false
     private var discardRequestedMeetingIDs: Set<UUID> = []
     private var lifecycleCompletionWaiters:
@@ -434,6 +435,10 @@ actor MeetingCoordinator {
     }
 
     func stop() async throws {
+        if captureInterruptionFinalizationScheduled {
+            await finalizeInterruptedCaptureIfNeeded()
+            return
+        }
         try beginLifecycleOperation()
         defer { endLifecycleOperation() }
         var finalizingMachine = stateMachine
@@ -586,7 +591,7 @@ actor MeetingCoordinator {
                     try await self?.consume(packet)
                 }
             } catch {
-                await self?.handleCaptureFailure()
+                await self?.handleCaptureFailure(error)
             }
         }
     }
@@ -854,11 +859,73 @@ actor MeetingCoordinator {
         }
     }
 
-    private func handleCaptureFailure() async {
+    private func handleCaptureFailure(_ error: Error) async {
+        _ = error
         captureFailed = true
-        if let capture {
-            await capture.stop()
+        guard !captureInterruptionFinalizationScheduled else {
+            return
         }
+        captureInterruptionFinalizationScheduled = true
+        Task { [weak self] in
+            await self?.finalizeInterruptedCaptureIfNeeded()
+        }
+    }
+
+    private func finalizeInterruptedCaptureIfNeeded() async {
+        await waitForLifecycleCompletion()
+        guard captureFailed,
+              stateMachine.state == .recording
+                || stateMachine.state == .paused,
+              let meetingID,
+              let capture,
+              let masterWriter,
+              let transcriber,
+              let timeline else {
+            captureInterruptionFinalizationScheduled = false
+            return
+        }
+
+        do {
+            try beginLifecycleOperation()
+        } catch {
+            captureInterruptionFinalizationScheduled = false
+            return
+        }
+        defer { endLifecycleOperation() }
+
+        let stoppedAt = await dependencies.clock.monotonicNow()
+        let activeDuration = timeline.activeTime(at: stoppedAt)
+        finalActiveDuration = activeDuration
+        invalidateCaptureHealthMonitoring()
+        try? await dependencies.repository.updateState(
+            meetingID: meetingID,
+            state: .finalizing
+        )
+        await dependencies.recordingPresentation.finish(
+            meetingID: meetingID,
+            activeDuration: activeDuration
+        )
+        await dependencies.panel.hide()
+        await capture.stop()
+        await finishSurvivingSourceWriters(meetingID: meetingID)
+        _ = try? await masterWriter.finish()
+        await enqueueRemainingTranscriptionSamples(using: transcriber)
+        await transcriber.drain()
+        await transcriber.finishUpdates()
+        _ = await transcriptPersistenceTask?.value
+
+        let endedAt = await dependencies.clock.now()
+        try? await dependencies.repository.finalizeInterruptedMeeting(
+            meetingID: meetingID,
+            endedAt: endedAt,
+            activeDuration: activeDuration,
+            lastErrorCode: "capture_interrupted"
+        )
+        await dependencies.captureInterruptionReporter.captureInterrupted(
+            meetingID: meetingID
+        )
+
+        resetAfterFailedStart()
     }
 
     private func prepareCaptureHealthMonitoring(for mode: MeetingMode) {
@@ -1003,10 +1070,9 @@ actor MeetingCoordinator {
         retainCaptureHealthCode(code, isPipelineFailure: true)
         guard !captureHealthPipelineFailed else { return }
         captureHealthPipelineFailed = true
-        captureFailed = true
-        if let capture {
-            await capture.stop()
-        }
+        await handleCaptureFailure(
+            MeetingCoordinatorError.capturePipelineFailed
+        )
     }
 
     private func retainCaptureHealthCode(
@@ -1098,6 +1164,7 @@ actor MeetingCoordinator {
         captureHealthCode = nil
         captureHealthMonitors.removeAll(keepingCapacity: true)
         captureHealthPipelineFailed = false
+        captureInterruptionFinalizationScheduled = false
         invalidateCaptureHealthMonitoring()
     }
 
@@ -1129,6 +1196,7 @@ actor MeetingCoordinator {
         captureHealthCode = nil
         captureHealthMonitors.removeAll(keepingCapacity: true)
         captureHealthPipelineFailed = false
+        captureInterruptionFinalizationScheduled = false
         invalidateCaptureHealthMonitoring()
     }
 

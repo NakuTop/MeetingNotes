@@ -63,10 +63,50 @@ final class MeetingRecoveryService {
             throw MeetingRecoveryError.meetingNotInterrupted(meetingID)
         }
 
-        var manifest = try await manifestOrEmpty(meetingID: meetingID)
-        manifest.segments.removeAll { !$0.isComplete }
-        try await fileStore.saveManifest(manifest, meetingID: meetingID)
-        try repository.updateMeetingState(id: meetingID, state: targetState)
+        let tracks: [AudioTrack] = meeting.mode == .online
+            ? [.master, .microphone, .system]
+            : [.master]
+        var durations: [AudioTrack: TimeInterval] = [:]
+        for track in tracks {
+            if let duration = try await repairManifest(
+                meetingID: meetingID,
+                track: track
+            ) {
+                durations[track] = duration
+            }
+        }
+
+        if targetState == .ready {
+            let activeDuration = durations[.master]
+                ?? durations.values.max()
+                ?? 0
+            try repository.finalizeInterruptedMeeting(
+                id: meetingID,
+                endedAt: meeting.startedAt.addingTimeInterval(
+                    activeDuration
+                ),
+                activeDuration: activeDuration,
+                lastErrorCode: "capture_interrupted_recovered"
+            )
+        } else {
+            try repository.updateMeetingState(
+                id: meetingID,
+                state: targetState
+            )
+        }
+    }
+
+    func recoverAllInterruptedMeetings() async throws -> [UUID] {
+        let candidates = try await scan()
+        var recovered: [UUID] = []
+        for candidate in candidates {
+            try await recover(
+                meetingID: candidate.meetingID,
+                targetState: .ready
+            )
+            recovered.append(candidate.meetingID)
+        }
+        return recovered
     }
 
     private func manifestOrEmpty(
@@ -78,6 +118,31 @@ final class MeetingRecoveryService {
             where missingID == meetingID {
             return AudioSegmentManifest()
         }
+    }
+
+    private func repairManifest(
+        meetingID: UUID,
+        track: AudioTrack
+    ) async throws -> TimeInterval? {
+        let manifest: AudioSegmentManifest
+        do {
+            manifest = try await fileStore.loadManifest(
+                meetingID: meetingID,
+                track: track
+            )
+        } catch MeetingFileStoreError.manifestNotFound(let missingID)
+            where missingID == meetingID {
+            return nil
+        }
+
+        var repaired = manifest
+        repaired.segments.removeAll { !$0.isComplete }
+        try await fileStore.saveManifest(
+            repaired,
+            meetingID: meetingID,
+            track: track
+        )
+        return repaired.segments.map(\.endTime).max() ?? 0
     }
 
     private static let interruptedStates: Set<RecordingState> = [

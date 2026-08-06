@@ -14,9 +14,29 @@ protocol MeetingSpeakerDiarizationRetrying: AnyObject {
     func retry(meetingID: UUID) async throws
 }
 
+protocol PreferredTranscriptionServiceProviding: Sendable {
+    func service() async throws -> any TranscriptionService
+}
+
+struct PreferredTranscriptionServiceProvider:
+    PreferredTranscriptionServiceProviding {
+    let controller: any TranscriptionModelControlling
+    let preference: any TranscriptionQualityPreferenceReading
+
+    func service() async throws -> any TranscriptionService {
+        let mode = await preference.transcriptionQualityMode()
+        return try await controller.service(mode: mode)
+    }
+}
+
 @MainActor
 final class SpeakerDiarizationRetryUseCase:
     MeetingSpeakerDiarizationRetrying {
+    private struct RetryReplacement {
+        let drafts: [AttributedTranscriptDraft]
+        let degradationErrorCode: String?
+    }
+
     private static let logger = Logger(
         subsystem: "MeetingNotes",
         category: "SpeakerDiarizationRetry"
@@ -36,6 +56,10 @@ final class SpeakerDiarizationRetryUseCase:
     private let intervalAssigner: SpeakerIntervalAssigner
     private let assembler: SpeakerTranscriptAssembler
     private let nameRemapper: SpeakerNameRemapper
+    private let onlineRebuilder:
+        (any OnlineMeetingTranscriptRebuilding)?
+    private let transcriptionServiceProvider:
+        (any PreferredTranscriptionServiceProviding)?
 
     init(
         repository: MeetingRepository,
@@ -44,7 +68,11 @@ final class SpeakerDiarizationRetryUseCase:
         operationGate: MeetingOperationGate,
         intervalAssigner: SpeakerIntervalAssigner = SpeakerIntervalAssigner(),
         assembler: SpeakerTranscriptAssembler = SpeakerTranscriptAssembler(),
-        nameRemapper: SpeakerNameRemapper = SpeakerNameRemapper()
+        nameRemapper: SpeakerNameRemapper = SpeakerNameRemapper(),
+        onlineRebuilder:
+            (any OnlineMeetingTranscriptRebuilding)? = nil,
+        transcriptionServiceProvider:
+            (any PreferredTranscriptionServiceProviding)? = nil
     ) {
         self.repository = repository
         self.sourceLoader = sourceLoader
@@ -53,6 +81,8 @@ final class SpeakerDiarizationRetryUseCase:
         self.intervalAssigner = intervalAssigner
         self.assembler = assembler
         self.nameRemapper = nameRemapper
+        self.onlineRebuilder = onlineRebuilder
+        self.transcriptionServiceProvider = transcriptionServiceProvider
     }
 
     func retry(meetingID: UUID) async throws {
@@ -90,7 +120,7 @@ final class SpeakerDiarizationRetryUseCase:
             let finalTranscripts = try repository.transcripts(
                 meetingID: meetingID
             ).filter(\.isFinal)
-            guard !finalTranscripts.isEmpty else {
+            guard meeting.mode == .online || !finalTranscripts.isEmpty else {
                 throw SpeakerDiarizationRetryError.noFinalTranscript
             }
             let sourceRevision = Self.nextSourceRevision(
@@ -100,12 +130,15 @@ final class SpeakerDiarizationRetryUseCase:
                 transcripts: finalTranscripts,
                 displayNames: meeting.speakerDisplayNames
             )
-            let replacement: [AttributedTranscriptDraft]
+            let replacement: RetryReplacement
             switch meeting.mode {
             case .offline:
-                replacement = try await retryOffline(
-                    meetingID: meetingID,
-                    transcripts: finalTranscripts
+                replacement = RetryReplacement(
+                    drafts: try await retryOffline(
+                        meetingID: meetingID,
+                        transcripts: finalTranscripts
+                    ),
+                    degradationErrorCode: nil
                 )
             case .online:
                 replacement = try await retryOnline(
@@ -116,14 +149,16 @@ final class SpeakerDiarizationRetryUseCase:
             try Task.checkCancellation()
             let remappedNames = nameRemapper.remap(
                 oldNamedSpeakers: nameEvidence,
-                newDrafts: replacement
+                newDrafts: replacement.drafts
             )
             do {
                 try repository.completeSpeakerDiarizationRetry(
                     meetingID: meetingID,
-                    drafts: replacement,
+                    drafts: replacement.drafts,
                     sourceRevision: sourceRevision,
-                    speakerDisplayNames: remappedNames
+                    speakerDisplayNames: remappedNames,
+                    degradationErrorCode:
+                        replacement.degradationErrorCode
                 )
             } catch {
                 throw SpeakerDiarizationRetryError.failed(
@@ -188,7 +223,7 @@ final class SpeakerDiarizationRetryUseCase:
     private func retryOnline(
         meetingID: UUID,
         transcripts: [TranscriptRecord]
-    ) async throws -> [AttributedTranscriptDraft] {
+    ) async throws -> RetryReplacement {
         let tagged = transcripts.compactMap { transcript -> (
             TranscriptRecord,
             TranscriptAudioSource
@@ -200,10 +235,26 @@ final class SpeakerDiarizationRetryUseCase:
             }
             return (transcript, source)
         }
-        guard tagged.count == transcripts.count,
-              tagged.contains(where: { $0.1 == .system }) else {
-            throw SpeakerDiarizationRetryError.sourceUnavailable
+        if tagged.count == transcripts.count,
+           tagged.contains(where: { $0.1 == .system }) {
+            return RetryReplacement(
+                drafts: try await reattributeTaggedOnlineTranscripts(
+                    meetingID: meetingID,
+                    tagged: tagged
+                ),
+                degradationErrorCode: nil
+            )
         }
+
+        return try await rebuildUntaggedOnlineTranscripts(
+            meetingID: meetingID
+        )
+    }
+
+    private func reattributeTaggedOnlineTranscripts(
+        meetingID: UUID,
+        tagged: [(TranscriptRecord, TranscriptAudioSource)]
+    ) async throws -> [AttributedTranscriptDraft] {
 
         let systemSource: MeetingAudioSource
         do {
@@ -247,6 +298,68 @@ final class SpeakerDiarizationRetryUseCase:
         return assembler.assemble(
             microphoneDrafts + attributedSystemDrafts
         )
+    }
+
+    private func rebuildUntaggedOnlineTranscripts(
+        meetingID: UUID
+    ) async throws -> RetryReplacement {
+        guard let onlineRebuilder,
+              let transcriptionServiceProvider else {
+            throw SpeakerDiarizationRetryError.sourceUnavailable
+        }
+
+        for track in [AudioTrack.microphone, .system] {
+            do {
+                _ = try await sourceLoader.load(
+                    meetingID: meetingID,
+                    track: track
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw SpeakerDiarizationRetryError.sourceUnavailable
+            }
+        }
+        try Task.checkCancellation()
+
+        let service = try await transcriptionServiceProvider.service()
+        try Task.checkCancellation()
+        let outcome = await onlineRebuilder.rebuild(
+            meetingID: meetingID,
+            diarizationRequested: true,
+            transcriptionService: service
+        )
+        try Task.checkCancellation()
+
+        switch outcome {
+        case let .replacement(drafts, _):
+            guard !drafts.isEmpty else {
+                throw SpeakerDiarizationRetryError.noFinalTranscript
+            }
+            return RetryReplacement(
+                drafts: drafts,
+                degradationErrorCode: nil
+            )
+        case let .degraded(replacement?, _, errorCode):
+            guard !replacement.isEmpty else {
+                throw SpeakerDiarizationRetryError.failed(
+                    errorCode: errorCode
+                )
+            }
+            return RetryReplacement(
+                drafts: replacement,
+                degradationErrorCode: errorCode
+            )
+        case let .degraded(nil, _, errorCode):
+            throw SpeakerDiarizationRetryError.failed(
+                errorCode: errorCode
+            )
+        case .unchanged:
+            throw SpeakerDiarizationRetryError.failed(
+                errorCode: SpeakerAwareTranscriptFinalizer
+                    .diarizationFailedCode
+            )
+        }
     }
 
     private func persistFailure(

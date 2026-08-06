@@ -201,6 +201,12 @@ protocol MeetingLifecycleRepository: Sendable {
         activeDuration: TimeInterval,
         sourceDegradationErrorCode: String?
     ) async throws
+    func finalizeInterruptedMeeting(
+        meetingID: UUID,
+        endedAt: Date,
+        activeDuration: TimeInterval,
+        lastErrorCode: String
+    ) async throws
     func deleteMeeting(meetingID: UUID) async throws
 }
 
@@ -212,6 +218,17 @@ protocol RecordingPanelPresenting: Sendable {
 protocol MeetingClock: Sendable {
     func now() async -> Date
     func monotonicNow() async -> TimeInterval
+}
+
+protocol MeetingCaptureInterruptionReporting: Sendable {
+    func captureInterrupted(meetingID: UUID) async
+}
+
+struct NoopMeetingCaptureInterruptionReporter:
+    MeetingCaptureInterruptionReporting {
+    func captureInterrupted(meetingID: UUID) async {
+        _ = meetingID
+    }
 }
 
 struct MeetingCoordinatorDependencies: Sendable {
@@ -228,6 +245,8 @@ struct MeetingCoordinatorDependencies: Sendable {
     let captureHealthScheduler: any CaptureHealthCheckScheduling
     let recordingPresentation:
         any RecordingSessionPresentationUpdating
+    let captureInterruptionReporter:
+        any MeetingCaptureInterruptionReporting
 
     init(
         permissions: any MeetingPermissionAuthorizing,
@@ -245,7 +264,10 @@ struct MeetingCoordinatorDependencies: Sendable {
             ContinuousCaptureHealthCheckScheduler(),
         recordingPresentation:
             any RecordingSessionPresentationUpdating =
-            NoopRecordingSessionPresentationUpdater()
+            NoopRecordingSessionPresentationUpdater(),
+        captureInterruptionReporter:
+            any MeetingCaptureInterruptionReporting =
+            NoopMeetingCaptureInterruptionReporter()
     ) {
         self.permissions = permissions
         self.captureFactory = captureFactory
@@ -258,6 +280,7 @@ struct MeetingCoordinatorDependencies: Sendable {
         self.clock = clock
         self.captureHealthScheduler = captureHealthScheduler
         self.recordingPresentation = recordingPresentation
+        self.captureInterruptionReporter = captureInterruptionReporter
     }
 }
 
@@ -508,6 +531,20 @@ final class MeetingRepositoryLifecycleAdapter: MeetingLifecycleRepository {
         )
     }
 
+    func finalizeInterruptedMeeting(
+        meetingID: UUID,
+        endedAt: Date,
+        activeDuration: TimeInterval,
+        lastErrorCode: String
+    ) async throws {
+        try repository.finalizeInterruptedMeeting(
+            id: meetingID,
+            endedAt: endedAt,
+            activeDuration: activeDuration,
+            lastErrorCode: lastErrorCode
+        )
+    }
+
     func deleteMeeting(meetingID: UUID) async throws {
         try repository.deleteMeeting(id: meetingID)
     }
@@ -542,6 +579,9 @@ extension MeetingCoordinatorDependencies {
         recordingPresentation:
             any RecordingSessionPresentationUpdating =
             NoopRecordingSessionPresentationUpdater(),
+        captureInterruptionReporter:
+            any MeetingCaptureInterruptionReporting =
+            NoopMeetingCaptureInterruptionReporter(),
         sourceLoader: MeetingAudioSourceLoader? = nil,
         transcriptionModelController: any TranscriptionModelControlling,
         transcriptionQualityPreference:
@@ -572,7 +612,8 @@ extension MeetingCoordinatorDependencies {
             ),
             panel: panel,
             clock: SystemMeetingClock(),
-            recordingPresentation: recordingPresentation
+            recordingPresentation: recordingPresentation,
+            captureInterruptionReporter: captureInterruptionReporter
         )
     }
 }

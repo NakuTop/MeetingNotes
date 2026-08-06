@@ -1324,6 +1324,35 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(meeting.updatedAt, endedAt)
     }
 
+    func testInterruptedFinalizationPersistsRecoveryMarkersAtomically() throws {
+        let repository = try MeetingRepository.inMemory()
+        let id = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 100),
+            speakerDiarizationRequested: true
+        )
+        try repository.updateMeetingState(id: id, state: .recording)
+        let endedAt = Date(timeIntervalSince1970: 145)
+
+        try repository.finalizeInterruptedMeeting(
+            id: id,
+            endedAt: endedAt,
+            activeDuration: 31,
+            lastErrorCode: "capture_interrupted"
+        )
+
+        let meeting = try repository.meeting(id: id)
+        XCTAssertEqual(meeting.state, .ready)
+        XCTAssertEqual(meeting.endedAt, endedAt)
+        XCTAssertEqual(meeting.activeDuration, 31, accuracy: 0.001)
+        XCTAssertEqual(meeting.lastErrorCode, "capture_interrupted")
+        XCTAssertEqual(meeting.speakerProcessingState, .degraded)
+        XCTAssertEqual(
+            meeting.speakerProcessingErrorCode,
+            "speaker_diarization_capture_interrupted"
+        )
+    }
+
     func testFinalizingMeetingAtomicallyPersistsSourceDegradation() throws {
         let repository = try MeetingRepository.inMemory()
         let id = try repository.createMeeting(

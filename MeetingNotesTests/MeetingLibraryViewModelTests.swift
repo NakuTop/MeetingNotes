@@ -5,6 +5,33 @@ import XCTest
 
 @MainActor
 final class MeetingLibraryViewModelTests: XCTestCase {
+    func testStartupRecoveryReloadsLibraryAndShowsSavedContentBanner()
+        async {
+        let meeting = makeMeeting(
+            seconds: 100,
+            title: "恢复会议",
+            state: .ready
+        )
+        let repository = LibraryRepositorySpy(meetings: [meeting])
+        let recovery = MeetingRecoverySpy(recoveredIDs: [meeting.id])
+        let viewModel = makeViewModel(
+            repository: repository,
+            recovery: recovery
+        )
+
+        await viewModel.recoverInterruptedMeetings()
+
+        XCTAssertEqual(viewModel.meetings.map(\.id), [meeting.id])
+        XCTAssertEqual(
+            viewModel.errorMessage,
+            "已恢复上次意外中断的会议，并保留所有已写入本地的录音。"
+        )
+        XCTAssertEqual(recovery.callCount, 1)
+
+        await viewModel.recoverInterruptedMeetings()
+        XCTAssertEqual(recovery.callCount, 1)
+    }
+
     func testLoadPreservesRepositoryOrderAndKeepsSelectionWhenPossible() {
         let mostRecentlyPinned = makeMeeting(
             seconds: 100,
@@ -883,6 +910,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         playbackStopper: any MeetingPlaybackStopping = PlaybackStopperSpy(),
         deletionPreparer: any MeetingDeletionPreparing =
             NoopMeetingDeletionPreparer(),
+        recovery: (any MeetingRecovering)? = nil,
         systemRequirements: any SystemRequirementChecking =
             SystemRequirementsStub.supported
     ) -> MeetingLibraryViewModel {
@@ -894,6 +922,7 @@ final class MeetingLibraryViewModelTests: XCTestCase {
             operationGate: operationGate,
             playbackStopper: playbackStopper,
             deletionPreparer: deletionPreparer,
+            recovery: recovery,
             systemRequirements: systemRequirements,
             recordingsURL: FileManager.default.temporaryDirectory
         )
@@ -966,6 +995,21 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         }
         try file.write(from: buffer)
         file.close()
+    }
+}
+
+@MainActor
+private final class MeetingRecoverySpy: MeetingRecovering {
+    private let recoveredIDs: [UUID]
+    private(set) var callCount = 0
+
+    init(recoveredIDs: [UUID]) {
+        self.recoveredIDs = recoveredIDs
+    }
+
+    func recoverAllInterruptedMeetings() async throws -> [UUID] {
+        callCount += 1
+        return recoveredIDs
     }
 }
 

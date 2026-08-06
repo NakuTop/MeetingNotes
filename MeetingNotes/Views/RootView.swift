@@ -149,7 +149,7 @@ struct RootView: View {
             AppWindowGlassBackground()
         }
         .task {
-            viewModel.load()
+            await viewModel.recoverInterruptedMeetings()
             await transcriptionModelViewModel.refreshStatuses()
             await transcriptionModelViewModel.prepareBalancedIfNeeded()
         }

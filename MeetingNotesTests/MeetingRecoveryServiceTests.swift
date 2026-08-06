@@ -103,6 +103,86 @@ final class MeetingRecoveryServiceTests: XCTestCase {
         XCTAssertTrue(manifest.segments.allSatisfy(\.isComplete))
     }
 
+    func testOnlineRecoveryRepairsEveryTrackAndPersistsInterruptionMetadata()
+        async throws {
+        let fixture = try makeFixture()
+        let startedAt = Date(timeIntervalSince1970: 100)
+        let meetingID = try fixture.repository.createMeeting(
+            mode: .online,
+            startedAt: startedAt,
+            speakerDiarizationRequested: true
+        )
+        try fixture.repository.updateMeetingState(
+            id: meetingID,
+            state: .finalizing
+        )
+        for track in [AudioTrack.master, .microphone, .system] {
+            try await fixture.fileStore.saveManifest(
+                manifestWithCompleteAndIncompleteTail(),
+                meetingID: meetingID,
+                track: track
+            )
+        }
+
+        try await fixture.service.recover(
+            meetingID: meetingID,
+            targetState: .ready
+        )
+
+        for track in [AudioTrack.master, .microphone, .system] {
+            let manifest = try await fixture.fileStore.loadManifest(
+                meetingID: meetingID,
+                track: track
+            )
+            XCTAssertEqual(manifest.segments, [completeSegment()])
+        }
+        let meeting = try fixture.repository.meeting(id: meetingID)
+        XCTAssertEqual(meeting.state, .ready)
+        XCTAssertEqual(meeting.activeDuration, 1, accuracy: 0.001)
+        XCTAssertEqual(
+            meeting.endedAt,
+            startedAt.addingTimeInterval(1)
+        )
+        XCTAssertEqual(
+            meeting.lastErrorCode,
+            "capture_interrupted_recovered"
+        )
+        XCTAssertEqual(meeting.speakerProcessingState, .degraded)
+    }
+
+    func testRecoverAllReturnsEveryRecoveredMeetingID() async throws {
+        let fixture = try makeFixture()
+        let offlineID = try fixture.repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try fixture.repository.updateMeetingState(
+            id: offlineID,
+            state: .recording
+        )
+        let onlineID = try fixture.repository.createMeeting(
+            mode: .online,
+            startedAt: .now
+        )
+        try fixture.repository.updateMeetingState(
+            id: onlineID,
+            state: .paused
+        )
+
+        let recovered = try await fixture.service
+            .recoverAllInterruptedMeetings()
+
+        XCTAssertEqual(Set(recovered), Set([offlineID, onlineID]))
+        XCTAssertEqual(
+            try fixture.repository.meeting(id: offlineID).state,
+            .ready
+        )
+        XCTAssertEqual(
+            try fixture.repository.meeting(id: onlineID).state,
+            .ready
+        )
+    }
+
     func testRecoveryMayResolveToReadyButNeverToAnActiveCaptureState() async throws {
         let fixture = try makeFixture()
         let meetingID = try fixture.repository.createMeeting(

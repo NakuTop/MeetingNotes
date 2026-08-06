@@ -1005,7 +1005,8 @@ final class MeetingRepository {
         meetingID: UUID,
         drafts: [AttributedTranscriptDraft],
         sourceRevision: Int,
-        speakerDisplayNames: [String: String] = [:]
+        speakerDisplayNames: [String: String] = [:],
+        degradationErrorCode: String? = nil
     ) throws {
         let transactionContext = ModelContext(container)
         transactionContext.autosaveEnabled = false
@@ -1062,8 +1063,10 @@ final class MeetingRepository {
         replacementSpeakerNames.forEach(transactionContext.insert)
         meeting.transcripts = replacements
         meeting.speakerNames = replacementSpeakerNames
-        meeting.speakerProcessingState = .completed
-        meeting.speakerProcessingErrorCode = nil
+        meeting.speakerProcessingState = degradationErrorCode == nil
+            ? .completed
+            : .degraded
+        meeting.speakerProcessingErrorCode = degradationErrorCode
         meeting.updatedAt = .now
         previousTranscripts.forEach(transactionContext.delete)
         previousSpeakerNames.forEach(transactionContext.delete)
@@ -1141,6 +1144,50 @@ final class MeetingRepository {
             meeting.stateRawValue = previousStateRawValue
             meeting.endedAt = previousEndedAt
             meeting.activeDuration = previousActiveDuration
+            meeting.updatedAt = previousUpdatedAt
+            meeting.speakerProcessingStateRawValue =
+                previousSpeakerProcessingStateRawValue
+            meeting.speakerProcessingErrorCode =
+                previousSpeakerProcessingErrorCode
+            throw error
+        }
+    }
+
+    func finalizeInterruptedMeeting(
+        id: UUID,
+        endedAt: Date,
+        activeDuration: TimeInterval,
+        lastErrorCode: String
+    ) throws {
+        let meeting = try meeting(id: id)
+        let previousStateRawValue = meeting.stateRawValue
+        let previousEndedAt = meeting.endedAt
+        let previousActiveDuration = meeting.activeDuration
+        let previousLastErrorCode = meeting.lastErrorCode
+        let previousUpdatedAt = meeting.updatedAt
+        let previousSpeakerProcessingStateRawValue =
+            meeting.speakerProcessingStateRawValue
+        let previousSpeakerProcessingErrorCode =
+            meeting.speakerProcessingErrorCode
+
+        meeting.state = .ready
+        meeting.endedAt = endedAt
+        meeting.activeDuration = max(0, activeDuration)
+        meeting.lastErrorCode = lastErrorCode
+        meeting.updatedAt = endedAt
+        if meeting.speakerDiarizationRequested {
+            meeting.speakerProcessingState = .degraded
+            meeting.speakerProcessingErrorCode =
+                "speaker_diarization_capture_interrupted"
+        }
+
+        do {
+            try saveContext()
+        } catch {
+            meeting.stateRawValue = previousStateRawValue
+            meeting.endedAt = previousEndedAt
+            meeting.activeDuration = previousActiveDuration
+            meeting.lastErrorCode = previousLastErrorCode
             meeting.updatedAt = previousUpdatedAt
             meeting.speakerProcessingStateRawValue =
                 previousSpeakerProcessingStateRawValue

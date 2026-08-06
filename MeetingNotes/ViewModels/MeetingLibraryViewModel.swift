@@ -42,6 +42,13 @@ struct NoopMeetingDeletionPreparer: MeetingDeletionPreparing {
 }
 
 @MainActor
+protocol MeetingRecovering: AnyObject {
+    func recoverAllInterruptedMeetings() async throws -> [UUID]
+}
+
+extension MeetingRecoveryService: MeetingRecovering {}
+
+@MainActor
 @Observable
 final class MeetingLibraryViewModel {
     private struct ErrorPresentation: Equatable {
@@ -57,6 +64,7 @@ final class MeetingLibraryViewModel {
     private let operationGate: MeetingOperationGate
     private let playbackStopper: any MeetingPlaybackStopping
     private let deletionPreparer: any MeetingDeletionPreparing
+    private let recovery: (any MeetingRecovering)?
     private let systemRequirements: any SystemRequirementChecking
     private let recordingsURL: URL
 
@@ -67,6 +75,7 @@ final class MeetingLibraryViewModel {
     private(set) var pinningMeetingIDs: Set<UUID> = []
     private(set) var renamingMeetingIDs: Set<UUID> = []
     private var errorPresentation = ErrorPresentation()
+    private var didAttemptInterruptedMeetingRecovery = false
     private(set) var systemRequirementsSnapshot: SystemRequirementsSnapshot
 
     var errorMessage: String? { errorPresentation.message }
@@ -86,6 +95,7 @@ final class MeetingLibraryViewModel {
         playbackStopper: any MeetingPlaybackStopping,
         deletionPreparer: any MeetingDeletionPreparing =
             NoopMeetingDeletionPreparer(),
+        recovery: (any MeetingRecovering)? = nil,
         systemRequirements: any SystemRequirementChecking = SystemRequirements(),
         recordingsURL: URL = FileManager.default.temporaryDirectory
     ) {
@@ -96,6 +106,7 @@ final class MeetingLibraryViewModel {
         self.operationGate = operationGate
         self.playbackStopper = playbackStopper
         self.deletionPreparer = deletionPreparer
+        self.recovery = recovery
         self.systemRequirements = systemRequirements
         self.recordingsURL = recordingsURL
         systemRequirementsSnapshot = systemRequirements.snapshot(
@@ -119,6 +130,31 @@ final class MeetingLibraryViewModel {
             setErrorPresentation()
         } catch {
             setErrorPresentation(message: "无法加载会议记录，请重试。")
+        }
+    }
+
+    func recoverInterruptedMeetings() async {
+        guard !didAttemptInterruptedMeetingRecovery else { return }
+        didAttemptInterruptedMeetingRecovery = true
+        guard let recovery else {
+            load()
+            return
+        }
+
+        do {
+            let recoveredIDs = try await recovery
+                .recoverAllInterruptedMeetings()
+            load()
+            if !recoveredIDs.isEmpty {
+                setErrorPresentation(
+                    message: "已恢复上次意外中断的会议，并保留所有已写入本地的录音。"
+                )
+            }
+        } catch {
+            load()
+            setErrorPresentation(
+                message: "发现上次未完成的会议，但自动恢复失败。原始本地文件未被删除。"
+            )
         }
     }
 
@@ -309,6 +345,12 @@ final class MeetingLibraryViewModel {
     func reportControlFailure(_ error: Error) {
         setErrorPresentation(
             message: Self.message(for: error, operation: .control)
+        )
+    }
+
+    func reportCaptureInterruption() {
+        setErrorPresentation(
+            message: "录音意外中断，已保存中断前的内容。请检查会议内容后重新开始录音。"
         )
     }
 
