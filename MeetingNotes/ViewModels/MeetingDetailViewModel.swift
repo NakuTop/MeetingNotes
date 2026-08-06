@@ -348,10 +348,16 @@ final class MeetingDetailViewModel {
         }
         let errorCode = meeting?.speakerProcessingErrorCode
         if errorCode == SpeakerDiarizationRetryUseCase.sourceUnavailableCode {
-            return "该旧会议缺少可用的分轨标记，无法重新分离说话人。"
+            if meeting?.mode == .online {
+                return "原始分轨录音仍可用于重建，请重新分离说话人。"
+            }
+            return "该会议缺少可用录音，无法重新分离说话人。"
         }
         if errorCode == SpeakerDiarizationRetryUseCase
             .transcriptUnavailableCode {
+            if meeting?.mode == .online {
+                return "没有现成转录，可从原始分轨重新生成并分离说话人。"
+            }
             return "该会议没有可用的最终转录，无法重新分离说话人。"
         }
         if isInterruptedSpeakerDiarizationRetry {
@@ -402,11 +408,12 @@ final class MeetingDetailViewModel {
             return false
         }
         let errorCode = meeting?.speakerProcessingErrorCode
-        guard errorCode != SpeakerDiarizationRetryUseCase
-            .sourceUnavailableCode,
-            errorCode != SpeakerDiarizationRetryUseCase
-                .transcriptUnavailableCode else {
-            return false
+        if errorCode == SpeakerDiarizationRetryUseCase
+            .sourceUnavailableCode
+            || errorCode == SpeakerDiarizationRetryUseCase
+                .transcriptUnavailableCode {
+            return meeting?.mode == .online
+                && speakerProcessingState == .degraded
         }
         return speakerProcessingState == .degraded
             || isInterruptedSpeakerDiarizationRetry

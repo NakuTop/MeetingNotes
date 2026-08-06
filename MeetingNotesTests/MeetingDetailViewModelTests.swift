@@ -285,7 +285,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
             ),
             (
                 "speaker_diarization_source_unavailable",
-                "该旧会议缺少可用的分轨标记，无法重新分离说话人。"
+                "原始分轨录音仍可用于重建，请重新分离说话人。"
             ),
             (
                 "speaker_transcript_replacement_failed",
@@ -327,7 +327,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         }
     }
 
-    func testPermanentSpeakerRetryErrorsKeepWarningWithoutRetryAction()
+    func testLegacyOnlineSpeakerErrorsOfferPhysicalTrackRebuild()
         throws {
         let cases = [
             SpeakerDiarizationRetryUseCase.sourceUnavailableCode,
@@ -355,11 +355,36 @@ final class MeetingDetailViewModelTests: XCTestCase {
             )
 
             XCTAssertNotNil(viewModel.speakerProcessingWarningMessage)
-            XCTAssertFalse(
+            XCTAssertTrue(
                 viewModel.shouldShowSpeakerDiarizationRetryAction
             )
-            XCTAssertFalse(viewModel.canRetrySpeakerDiarization)
+            XCTAssertTrue(viewModel.canRetrySpeakerDiarization)
         }
+    }
+
+    func testOfflineMissingTranscriptRemainsNonRetryable() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now,
+            speakerDiarizationRequested: true
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        meeting.speakerProcessingState = .degraded
+        meeting.speakerProcessingErrorCode =
+            SpeakerDiarizationRetryUseCase.transcriptUnavailableCode
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy(),
+            speakerDiarizationRetryer: DetailSpeakerRetrySpy()
+        )
+
+        XCTAssertFalse(viewModel.shouldShowSpeakerDiarizationRetryAction)
+        XCTAssertFalse(viewModel.canRetrySpeakerDiarization)
     }
 
     func testSpeakerProcessingWarningCanBeDismissedWithoutBlockingActions()
