@@ -169,3 +169,4 @@ macOS 首次麦克风和屏幕录制授权由系统隐私机制控制。MeetingN
 | 2026-08-06 | 线上分轨重建与中断恢复定向回归 | 通过 | 6 个相关测试组 159/159、0 失败；`/tmp/MeetingNotes-online-recovery-focused-20260806-1653.xcresult` |
 | 2026-08-06 | 完整 arm64 单元回归 | 通过 | `MeetingNotesTests` 900/900、0 失败；`/tmp/MeetingNotes-online-recovery-all-20260806-1654.xcresult` |
 | 2026-08-06 | arm64 Debug 构建与差异检查 | 通过 | `xcodebuild build` 退出码 0；`git diff --check` 无错误 |
+| 2026-08-06 | 真实分轨 CAF 部分读取修复 | 通过 | 生产读取器完整读取最新两场线上会议的麦克风/系统共 440 个 CAF 分段；定向回归 73/73，完整单元回归 901/901，0 失败；`/tmp/MeetingNotes-partial-read-focused-20260806-2315.xcresult` 与 `/tmp/MeetingNotes-partial-read-all-20260806-2315.xcresult` |

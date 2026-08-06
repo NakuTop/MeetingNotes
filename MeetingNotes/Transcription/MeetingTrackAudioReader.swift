@@ -493,7 +493,8 @@ private actor MeetingTrackAudioReadState {
             let samples = try segmentReader.read(
                 maximumFrameCount: requestedFrameCount
             )
-            guard samples.count == requestedFrameCount else {
+            guard !samples.isEmpty,
+                  samples.count <= requestedFrameCount else {
                 throw MeetingTrackAudioReaderError.shortRead(
                     index: segmentIndex,
                     expected: requestedFrameCount,

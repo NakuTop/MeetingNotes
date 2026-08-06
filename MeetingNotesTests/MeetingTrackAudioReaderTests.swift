@@ -450,40 +450,99 @@ final class MeetingTrackAudioReaderTests: XCTestCase {
         }
     }
 
-    func testShortOrZeroReadBeforeDeclaredFramesThrowsTypedError()
+    func testPositivePartialReadContinuesUntilDeclaredFramesAreConsumed()
         async throws {
-        for actualCount in [2_399, 0] {
-            let fixture = try await makeSingleSegmentFixture()
-            let segmentReader = FakeTrackSegmentReader(
-                format: .init(
-                    sampleRate: 48_000,
-                    channelCount: 1,
-                    isFloat32: true
+        let fixture = try await makeSingleSegmentFixture()
+        let firstPart = Array(repeating: Float(0.25), count: 2_399)
+        let secondPart = Array(repeating: Float(0.25), count: 2_401)
+        let segmentReader = FakeTrackSegmentReader(
+            format: .init(
+                sampleRate: 48_000,
+                channelCount: 1,
+                isFloat32: true
+            ),
+            declaredFrameCount: 4_800,
+            reads: [firstPart, secondPart]
+        )
+        let output = Array(repeating: Float(0.5), count: 1_600)
+        let converter = ScriptedTrackPCMConverter(
+            segmentScripts: [[
+                .init(
+                    samples: [],
+                    inputFramesConsumed: 0,
+                    needsInput: true,
+                    isEndOfStream: false
                 ),
-                declaredFrameCount: 4_800,
-                reads: [Array(repeating: 0.25, count: actualCount)]
-            )
-            let reader = MeetingTrackAudioReader(
-                sourceLoader: MeetingAudioSourceLoader(
-                    fileStore: fixture.fileStore
+                .init(
+                    samples: [],
+                    inputFramesConsumed: firstPart.count,
+                    needsInput: true,
+                    isEndOfStream: false
                 ),
-                segmentReaderFactory: FakeTrackSegmentReaderFactory(
-                    readers: [segmentReader]
-                )
-            )
+                .init(
+                    samples: output,
+                    inputFramesConsumed: secondPart.count,
+                    needsInput: false,
+                    isEndOfStream: true
+                ),
+            ]]
+        )
+        let reader = MeetingTrackAudioReader(
+            sourceLoader: MeetingAudioSourceLoader(
+                fileStore: fixture.fileStore
+            ),
+            segmentReaderFactory: FakeTrackSegmentReaderFactory(
+                readers: [segmentReader]
+            ),
+            converter: converter
+        )
 
-            await assertReaderError(
-                try await reader.chunks(
-                    meetingID: fixture.meetingID,
-                    track: .microphone
-                ),
-                equals: .shortRead(
-                    index: 0,
-                    expected: 4_800,
-                    actual: actualCount
-                )
+        let chunks = try await collect(
+            reader.chunks(
+                meetingID: fixture.meetingID,
+                track: .microphone
             )
-        }
+        )
+
+        XCTAssertEqual(chunks.flatMap(\.samples), output)
+        XCTAssertEqual(
+            converter.appendedSampleCounts(),
+            [firstPart.count, secondPart.count]
+        )
+    }
+
+    func testZeroReadBeforeDeclaredFramesThrowsTypedError()
+        async throws {
+        let fixture = try await makeSingleSegmentFixture()
+        let segmentReader = FakeTrackSegmentReader(
+            format: .init(
+                sampleRate: 48_000,
+                channelCount: 1,
+                isFloat32: true
+            ),
+            declaredFrameCount: 4_800,
+            reads: [[]]
+        )
+        let reader = MeetingTrackAudioReader(
+            sourceLoader: MeetingAudioSourceLoader(
+                fileStore: fixture.fileStore
+            ),
+            segmentReaderFactory: FakeTrackSegmentReaderFactory(
+                readers: [segmentReader]
+            )
+        )
+
+        await assertReaderError(
+            try await reader.chunks(
+                meetingID: fixture.meetingID,
+                track: .microphone
+            ),
+            equals: .shortRead(
+                index: 0,
+                expected: 4_800,
+                actual: 0
+            )
+        )
     }
 
     func testSampleChunksAreSinglePass() async throws {
