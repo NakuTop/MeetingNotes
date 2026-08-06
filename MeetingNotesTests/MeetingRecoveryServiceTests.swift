@@ -3,6 +3,31 @@ import XCTest
 
 @MainActor
 final class MeetingRecoveryServiceTests: XCTestCase {
+    func testScanIgnoresRecordingStartedAfterLaunchCutoff() async throws {
+        let cutoff = Date(timeIntervalSince1970: 200)
+        let fixture = try makeFixture(recoveryCutoff: cutoff)
+        let interruptedID = try fixture.repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+        try fixture.repository.updateMeetingState(
+            id: interruptedID,
+            state: .recording
+        )
+        let liveID = try fixture.repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 300)
+        )
+        try fixture.repository.updateMeetingState(
+            id: liveID,
+            state: .recording
+        )
+
+        let candidates = try await fixture.service.scan()
+
+        XCTAssertEqual(candidates.map(\.meetingID), [interruptedID])
+    }
+
     func testScanIncludesOnlyInterruptedMeetingsAndDescribesRecoverableData() async throws {
         let fixture = try makeFixture()
         let recordingID = try fixture.repository.createMeeting(
@@ -210,7 +235,9 @@ final class MeetingRecoveryServiceTests: XCTestCase {
         XCTAssertEqual(try fixture.repository.meeting(id: meetingID).state, .paused)
     }
 
-    private func makeFixture() throws -> RecoveryFixture {
+    private func makeFixture(
+        recoveryCutoff: Date = .distantFuture
+    ) throws -> RecoveryFixture {
         let repository = try MeetingRepository.inMemory()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("MeetingRecoveryServiceTests-\(UUID().uuidString)")
@@ -227,7 +254,8 @@ final class MeetingRecoveryServiceTests: XCTestCase {
             fileStore: fileStore,
             service: MeetingRecoveryService(
                 repository: repository,
-                fileStore: fileStore
+                fileStore: fileStore,
+                recoveryCutoff: recoveryCutoff
             )
         )
     }

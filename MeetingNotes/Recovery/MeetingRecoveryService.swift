@@ -18,20 +18,26 @@ enum MeetingRecoveryError: Error, Equatable, Sendable {
 final class MeetingRecoveryService {
     private let repository: MeetingRepository
     private let fileStore: MeetingFileStore
+    private let recoveryCutoff: Date
 
     init(
         repository: MeetingRepository,
-        fileStore: MeetingFileStore
+        fileStore: MeetingFileStore,
+        recoveryCutoff: Date = .now
     ) {
         self.repository = repository
         self.fileStore = fileStore
+        self.recoveryCutoff = recoveryCutoff
     }
 
     func scan() async throws -> [RecoveryCandidate] {
         var candidates: [RecoveryCandidate] = []
 
-        for meeting in try repository.meetings()
-        where Self.interruptedStates.contains(meeting.state) {
+        for meeting in try repository.meetings() {
+            guard Self.interruptedStates.contains(meeting.state),
+                  meeting.startedAt <= recoveryCutoff else {
+                continue
+            }
             let manifest = try await manifestOrEmpty(meetingID: meeting.id)
             candidates.append(
                 RecoveryCandidate(

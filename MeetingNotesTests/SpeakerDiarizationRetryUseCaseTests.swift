@@ -159,21 +159,68 @@ final class SpeakerDiarizationRetryUseCaseTests: XCTestCase {
         let reloaded = try repository.meeting(id: meeting.id)
         XCTAssertEqual(reloaded.speakerProcessingState, .completed)
         XCTAssertNil(reloaded.speakerProcessingErrorCode)
+        let transcripts = try repository.transcripts(meetingID: meeting.id)
         XCTAssertEqual(
-            reloaded.transcripts.map(\.text),
+            transcripts.map(\.text),
             ["我方内容", "远端内容"]
         )
         XCTAssertEqual(
-            reloaded.transcripts.map(\.source),
+            transcripts.map(\.source),
             [.microphone, .system]
         )
         XCTAssertEqual(
-            reloaded.transcripts.map(\.speakerID),
+            transcripts.map(\.speakerID),
             ["me", "remote-1"]
         )
-        XCTAssertEqual(reloaded.transcripts.map(\.sourceRevision), [1, 1])
+        XCTAssertEqual(transcripts.map(\.sourceRevision), [1, 1])
         let rebuildCallCount = await rebuilder.callCount()
         XCTAssertEqual(rebuildCallCount, 1)
+    }
+
+    func testOldOnlineMeetingPersistsCoarseRebuildWhenDiarizationDegrades()
+        async throws {
+        let repository = try makeRetryableMeeting(mode: .online)
+        let meeting = try XCTUnwrap(repository.meetings().first)
+        try repository.appendTranscript(
+            meetingID: meeting.id,
+            start: 0,
+            end: 1,
+            text: "legacy mixed transcript"
+        )
+        let degradationCode = SpeakerAwareTranscriptFinalizer
+            .diarizationInferenceFailedCode
+        let rebuilder = RetryOnlineTranscriptRebuilder(
+            outcome: .degraded(
+                replacement: [
+                    draft(0, 1, "我方内容", "me", .microphone),
+                    draft(1, 2, "远端内容", "remote", .system),
+                ],
+                sourceRevision: 1,
+                errorCode: degradationCode
+            )
+        )
+        let useCase = SpeakerDiarizationRetryUseCase(
+            repository: repository,
+            sourceLoader: RetryAudioSourceLoader(meetingID: meeting.id),
+            diarizer: RetrySpeakerDiarizer(result: .success([])),
+            operationGate: MeetingOperationGate(),
+            onlineRebuilder: rebuilder,
+            transcriptionServiceProvider:
+                RetryPreferredTranscriptionServiceProvider()
+        )
+
+        try await useCase.retry(meetingID: meeting.id)
+
+        let reloaded = try repository.meeting(id: meeting.id)
+        XCTAssertEqual(reloaded.speakerProcessingState, .degraded)
+        XCTAssertEqual(
+            reloaded.speakerProcessingErrorCode,
+            degradationCode
+        )
+        let transcripts = try repository.transcripts(meetingID: meeting.id)
+        XCTAssertEqual(transcripts.map(\.text), ["我方内容", "远端内容"])
+        XCTAssertEqual(transcripts.map(\.source), [.microphone, .system])
+        XCTAssertEqual(transcripts.map(\.sourceRevision), [1, 1])
     }
 
     func testOnlineMeetingWithoutFinalTranscriptRebuildsPhysicalTracks()
