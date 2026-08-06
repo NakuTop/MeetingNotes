@@ -48,27 +48,17 @@ extension MeetingSpeakerFinalizing {
     }
 }
 
-struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
-    static let coarseSourceRevision = 1
-    static let diarizationUnavailableCode =
-        "speaker_diarization_unavailable"
-    static let diarizationModelPreparationFailedCode =
-        "speaker_diarization_model_preparation_failed"
-    static let diarizationInvalidSourceCode =
-        "speaker_diarization_invalid_source"
-    static let diarizationTimelineAssemblyFailedCode =
-        "speaker_diarization_timeline_assembly_failed"
-    static let diarizationConversionFailedCode =
-        "speaker_diarization_conversion_failed"
-    static let diarizationInferenceFailedCode =
-        "speaker_diarization_inference_failed"
-    static let diarizationResultValidationFailedCode =
-        "speaker_diarization_result_validation_failed"
-    static let diarizationFailedCode =
-        "speaker_diarization_failed"
+protocol OnlineMeetingTranscriptRebuilding: Sendable {
+    func rebuild(
+        meetingID: UUID,
+        diarizationRequested: Bool,
+        transcriptionService: any TranscriptionService
+    ) async -> SpeakerFinalizationOutcome
+}
 
+struct OnlineMeetingTranscriptRebuilder:
+    OnlineMeetingTranscriptRebuilding {
     private let reader: any MeetingTrackAudioReading
-    private let transcriptionService: (any TranscriptionService)?
     private let sourceLoader: (any MeetingTrackAudioSourceLoading)?
     private let diarizer: (any SpeakerDiarizing)?
     private let merger: TranscriptMerger
@@ -77,7 +67,6 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
 
     init(
         reader: any MeetingTrackAudioReading,
-        transcriptionService: (any TranscriptionService)? = nil,
         sourceLoader: (any MeetingTrackAudioSourceLoading)? = nil,
         diarizer: (any SpeakerDiarizing)? = nil,
         merger: TranscriptMerger = TranscriptMerger(),
@@ -87,7 +76,6 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
             SpeakerIntervalAssigner()
     ) {
         self.reader = reader
-        self.transcriptionService = transcriptionService
         self.sourceLoader = sourceLoader
         self.diarizer = diarizer
         self.merger = merger
@@ -95,55 +83,7 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
         self.intervalAssigner = intervalAssigner
     }
 
-    func finalize(
-        meetingID: UUID,
-        mode: MeetingMode,
-        diarizationRequested: Bool,
-        provisional: [TranscriptDraft]
-    ) async -> SpeakerFinalizationOutcome {
-        guard mode == .online else {
-            return await finalizeOffline(
-                meetingID: meetingID,
-                diarizationRequested: diarizationRequested,
-                provisional: provisional
-            )
-        }
-        guard let transcriptionService else {
-            return .degraded(
-                replacement: nil,
-                sourceRevision: nil,
-                errorCode: "source_track_transcription_failed_microphone"
-            )
-        }
-        return await finalizeOnline(
-            meetingID: meetingID,
-            diarizationRequested: diarizationRequested,
-            transcriptionService: transcriptionService
-        )
-    }
-
-    func finalize(
-        meetingID: UUID,
-        mode: MeetingMode,
-        diarizationRequested: Bool,
-        provisional: [TranscriptDraft],
-        transcriptionService: any TranscriptionService
-    ) async -> SpeakerFinalizationOutcome {
-        guard mode == .online else {
-            return await finalizeOffline(
-                meetingID: meetingID,
-                diarizationRequested: diarizationRequested,
-                provisional: provisional
-            )
-        }
-        return await finalizeOnline(
-            meetingID: meetingID,
-            diarizationRequested: diarizationRequested,
-            transcriptionService: transcriptionService
-        )
-    }
-
-    private func finalizeOnline(
+    func rebuild(
         meetingID: UUID,
         diarizationRequested: Bool,
         transcriptionService: any TranscriptionService
@@ -193,14 +133,17 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
         guard diarizationRequested else {
             return .replacement(
                 coarseReplacement,
-                sourceRevision: Self.coarseSourceRevision
+                sourceRevision:
+                    SpeakerAwareTranscriptFinalizer.coarseSourceRevision
             )
         }
         guard let sourceLoader, let diarizer else {
             return .degraded(
                 replacement: coarseReplacement,
-                sourceRevision: Self.coarseSourceRevision,
-                errorCode: Self.diarizationUnavailableCode
+                sourceRevision:
+                    SpeakerAwareTranscriptFinalizer.coarseSourceRevision,
+                errorCode: SpeakerAwareTranscriptFinalizer
+                    .diarizationUnavailableCode
             )
         }
 
@@ -213,8 +156,10 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
         } catch {
             return .degraded(
                 replacement: coarseReplacement,
-                sourceRevision: Self.coarseSourceRevision,
-                errorCode: Self.diarizationInvalidSourceCode
+                sourceRevision:
+                    SpeakerAwareTranscriptFinalizer.coarseSourceRevision,
+                errorCode: SpeakerAwareTranscriptFinalizer
+                    .diarizationInvalidSourceCode
             )
         }
 
@@ -238,15 +183,135 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
                 assembler.assemble(
                     microphoneDrafts + diarizedSystemDrafts
                 ),
-                sourceRevision: Self.coarseSourceRevision
+                sourceRevision:
+                    SpeakerAwareTranscriptFinalizer.coarseSourceRevision
             )
         } catch {
             return .degraded(
                 replacement: coarseReplacement,
-                sourceRevision: Self.coarseSourceRevision,
-                errorCode: Self.diarizationErrorCode(for: error)
+                sourceRevision:
+                    SpeakerAwareTranscriptFinalizer.coarseSourceRevision,
+                errorCode: SpeakerAwareTranscriptFinalizer
+                    .diarizationErrorCode(for: error)
             )
         }
+    }
+
+    private static func coarseIdentity(
+        for track: AudioTrack
+    ) -> (speakerID: String, source: TranscriptAudioSource) {
+        switch track {
+        case .microphone:
+            ("me", .microphone)
+        case .system:
+            ("remote", .system)
+        case .master:
+            preconditionFailure("Master is not a coarse speaker source")
+        }
+    }
+}
+
+struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
+    static let coarseSourceRevision = 1
+    static let diarizationUnavailableCode =
+        "speaker_diarization_unavailable"
+    static let diarizationModelPreparationFailedCode =
+        "speaker_diarization_model_preparation_failed"
+    static let diarizationInvalidSourceCode =
+        "speaker_diarization_invalid_source"
+    static let diarizationTimelineAssemblyFailedCode =
+        "speaker_diarization_timeline_assembly_failed"
+    static let diarizationConversionFailedCode =
+        "speaker_diarization_conversion_failed"
+    static let diarizationInferenceFailedCode =
+        "speaker_diarization_inference_failed"
+    static let diarizationResultValidationFailedCode =
+        "speaker_diarization_result_validation_failed"
+    static let diarizationFailedCode =
+        "speaker_diarization_failed"
+
+    private let transcriptionService: (any TranscriptionService)?
+    private let sourceLoader: (any MeetingTrackAudioSourceLoading)?
+    private let diarizer: (any SpeakerDiarizing)?
+    private let assembler: SpeakerTranscriptAssembler
+    private let intervalAssigner: SpeakerIntervalAssigner
+    private let onlineRebuilder: any OnlineMeetingTranscriptRebuilding
+
+    init(
+        reader: any MeetingTrackAudioReading,
+        transcriptionService: (any TranscriptionService)? = nil,
+        sourceLoader: (any MeetingTrackAudioSourceLoading)? = nil,
+        diarizer: (any SpeakerDiarizing)? = nil,
+        merger: TranscriptMerger = TranscriptMerger(),
+        assembler: SpeakerTranscriptAssembler =
+            SpeakerTranscriptAssembler(),
+        intervalAssigner: SpeakerIntervalAssigner =
+            SpeakerIntervalAssigner(),
+        onlineRebuilder:
+            (any OnlineMeetingTranscriptRebuilding)? = nil
+    ) {
+        self.transcriptionService = transcriptionService
+        self.sourceLoader = sourceLoader
+        self.diarizer = diarizer
+        self.assembler = assembler
+        self.intervalAssigner = intervalAssigner
+        self.onlineRebuilder = onlineRebuilder
+            ?? OnlineMeetingTranscriptRebuilder(
+                reader: reader,
+                sourceLoader: sourceLoader,
+                diarizer: diarizer,
+                merger: merger,
+                assembler: assembler,
+                intervalAssigner: intervalAssigner
+            )
+    }
+
+    func finalize(
+        meetingID: UUID,
+        mode: MeetingMode,
+        diarizationRequested: Bool,
+        provisional: [TranscriptDraft]
+    ) async -> SpeakerFinalizationOutcome {
+        guard mode == .online else {
+            return await finalizeOffline(
+                meetingID: meetingID,
+                diarizationRequested: diarizationRequested,
+                provisional: provisional
+            )
+        }
+        guard let transcriptionService else {
+            return .degraded(
+                replacement: nil,
+                sourceRevision: nil,
+                errorCode: "source_track_transcription_failed_microphone"
+            )
+        }
+        return await onlineRebuilder.rebuild(
+            meetingID: meetingID,
+            diarizationRequested: diarizationRequested,
+            transcriptionService: transcriptionService
+        )
+    }
+
+    func finalize(
+        meetingID: UUID,
+        mode: MeetingMode,
+        diarizationRequested: Bool,
+        provisional: [TranscriptDraft],
+        transcriptionService: any TranscriptionService
+    ) async -> SpeakerFinalizationOutcome {
+        guard mode == .online else {
+            return await finalizeOffline(
+                meetingID: meetingID,
+                diarizationRequested: diarizationRequested,
+                provisional: provisional
+            )
+        }
+        return await onlineRebuilder.rebuild(
+            meetingID: meetingID,
+            diarizationRequested: diarizationRequested,
+            transcriptionService: transcriptionService
+        )
     }
 
     private func finalizeOffline(
@@ -327,16 +392,4 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
         }
     }
 
-    private static func coarseIdentity(
-        for track: AudioTrack
-    ) -> (speakerID: String, source: TranscriptAudioSource) {
-        switch track {
-        case .microphone:
-            ("me", .microphone)
-        case .system:
-            ("remote", .system)
-        case .master:
-            preconditionFailure("Master is not a coarse speaker source")
-        }
-    }
 }

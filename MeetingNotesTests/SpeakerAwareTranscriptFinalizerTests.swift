@@ -2,6 +2,43 @@ import XCTest
 @testable import MeetingNotes
 
 final class SpeakerAwareTranscriptFinalizerTests: XCTestCase {
+    func testOnlineFinalizationDelegatesTrackReconstruction() async {
+        let meetingID = UUID()
+        let expected = SpeakerFinalizationOutcome.replacement(
+            [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 0,
+                        endTime: 1,
+                        text: "rebuilt"
+                    ),
+                    speakerID: "me",
+                    source: .microphone
+                ),
+            ],
+            sourceRevision: 1
+        )
+        let rebuilder = OnlineTranscriptRebuilderSpy(outcome: expected)
+        let finalizer = SpeakerAwareTranscriptFinalizer(
+            reader: FakeMeetingTrackAudioReader(chunksByTrack: [:]),
+            onlineRebuilder: rebuilder
+        )
+
+        let result = await finalizer.finalize(
+            meetingID: meetingID,
+            mode: .online,
+            diarizationRequested: true,
+            provisional: [],
+            transcriptionService:
+                FakeSpeakerFinalizationTranscriptionService(responses: [:])
+        )
+
+        XCTAssertEqual(result, expected)
+        let requests = await rebuilder.recordedRequests()
+        XCTAssertEqual(requests.map(\.meetingID), [meetingID])
+        XCTAssertEqual(requests.map(\.diarizationRequested), [true])
+    }
+
     func testOnlineFinalizationMergesAttributedTracksChronologically()
         async throws {
         let reader = FakeMeetingTrackAudioReader(
@@ -562,6 +599,40 @@ final class SpeakerAwareTranscriptFinalizerTests: XCTestCase {
 private enum SpeakerFinalizerTestError: Error {
     case read
     case transcribe
+}
+
+private actor OnlineTranscriptRebuilderSpy:
+    OnlineMeetingTranscriptRebuilding {
+    struct Request: Equatable {
+        let meetingID: UUID
+        let diarizationRequested: Bool
+    }
+
+    private let outcome: SpeakerFinalizationOutcome
+    private var requests: [Request] = []
+
+    init(outcome: SpeakerFinalizationOutcome) {
+        self.outcome = outcome
+    }
+
+    func rebuild(
+        meetingID: UUID,
+        diarizationRequested: Bool,
+        transcriptionService: any TranscriptionService
+    ) async -> SpeakerFinalizationOutcome {
+        _ = transcriptionService
+        requests.append(
+            Request(
+                meetingID: meetingID,
+                diarizationRequested: diarizationRequested
+            )
+        )
+        return outcome
+    }
+
+    func recordedRequests() -> [Request] {
+        requests
+    }
 }
 
 private struct FakeMeetingTrackAudioReader: MeetingTrackAudioReading {
