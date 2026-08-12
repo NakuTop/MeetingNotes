@@ -1,4 +1,8 @@
 name: MeetingNotes
+configs:
+  Debug: debug
+  Release: release
+  Beta: release
 options:
   deploymentTarget:
     macOS: "15.0"
@@ -9,6 +13,7 @@ settings:
     EXCLUDED_ARCHS: x86_64
     MACOSX_DEPLOYMENT_TARGET: "15.0"
     MARKETING_VERSION: 1.1.1
+    MEETINGNOTES_DISPLAY_NAME: 会议记录
     SWIFT_STRICT_CONCURRENCY: complete
     SWIFT_VERSION: "6.0"
 packages:
@@ -33,6 +38,12 @@ targets:
           ENABLE_DEBUG_DYLIB: false
           ENABLE_TESTABILITY: true
           OTHER_CODE_SIGN_FLAGS: "--requirements=$(SRCROOT)/Configuration/MeetingNotesRequirements.req"
+        Beta:
+          PRODUCT_BUNDLE_IDENTIFIER: com.shenminghao.MeetingNotes.beta
+          PRODUCT_NAME: MeetingNotesBeta
+          MEETINGNOTES_DISPLAY_NAME: 会议记录 Beta
+          MARKETING_VERSION: 1.2.0
+          CURRENT_PROJECT_VERSION: 5
     entitlements:
       path: Configuration/MeetingNotes.entitlements
     dependencies:

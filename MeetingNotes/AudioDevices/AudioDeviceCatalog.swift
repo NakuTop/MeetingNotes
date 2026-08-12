@@ -1,4 +1,5 @@
-import AVFoundation
+@preconcurrency import AppKit
+@preconcurrency import AVFoundation
 import CoreAudio
 import Foundation
 
@@ -18,8 +19,22 @@ final class CoreAudioDeviceChangeObserver: AudioDeviceChangeObserving {
     private let callbackQueue = DispatchQueue(
         label: "MeetingNotes.audio-device-changes"
     )
+    private let notificationCenter: NotificationCenter
+    private let isAudioCaptureDevice: @Sendable (Any?) -> Bool
     private var listener: AudioObjectPropertyListenerBlock?
     private var registeredAddresses: [AudioObjectPropertyAddress] = []
+    private var notificationTokens: [NSObjectProtocol] = []
+
+    init(
+        notificationCenter: NotificationCenter = .default,
+        isAudioCaptureDevice:
+            @escaping @Sendable (Any?) -> Bool = {
+                ($0 as? AVCaptureDevice)?.hasMediaType(.audio) == true
+            }
+    ) {
+        self.notificationCenter = notificationCenter
+        self.isAudioCaptureDevice = isAudioCaptureDevice
+    }
 
     func start(handler: @escaping @Sendable () -> Void) {
         stop()
@@ -41,6 +56,42 @@ final class CoreAudioDeviceChangeObserver: AudioDeviceChangeObserving {
         }
         self.listener = listener
         self.registeredAddresses = registeredAddresses
+        notificationTokens = [
+            notificationCenter.addObserver(
+                forName: AVCaptureDevice.wasConnectedNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] notification in
+                guard let self,
+                      self.isAudioCaptureDevice(
+                          notification.object
+                      ) else {
+                    return
+                }
+                handler()
+            },
+            notificationCenter.addObserver(
+                forName: AVCaptureDevice.wasDisconnectedNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] notification in
+                guard let self,
+                      self.isAudioCaptureDevice(
+                          notification.object
+                      ) else {
+                    return
+                }
+                handler()
+            },
+            notificationCenter.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                _ = self
+                handler()
+            },
+        ]
     }
 
     func stop() {
@@ -56,6 +107,9 @@ final class CoreAudioDeviceChangeObserver: AudioDeviceChangeObserving {
         }
         self.listener = nil
         registeredAddresses = []
+        let tokens = notificationTokens
+        notificationTokens = []
+        tokens.forEach(notificationCenter.removeObserver)
     }
 
     private static let observedAddresses = [
@@ -128,7 +182,15 @@ struct AudioDeviceCatalog: AudioDeviceDiscovering, Sendable {
                 isSuspended: device.isSuspended,
                 isInUseByAnotherApplication:
                     device.isInUseByAnotherApplication,
-                isSystemDefault: device.isSystemDefault
+                isSystemDefault: device.isSystemDefault,
+                avFoundationUniqueID: device.avFoundationUniqueID,
+                coreAudioUID: device.coreAudioUID,
+                coreAudioDeviceID: device.coreAudioDeviceID,
+                inputChannelCount: device.inputChannelCount,
+                isAVFoundationAvailable:
+                    device.isAVFoundationAvailable,
+                isCoreAudioAvailable:
+                    device.isCoreAudioAvailable
             )
         }
         .sorted {
@@ -190,24 +252,9 @@ struct AudioDeviceCatalog: AudioDeviceDiscovering, Sendable {
     }
 
     private static func discoverLiveInputs() throws -> [AudioInputDevice] {
-        let defaultID = AVCaptureDevice.default(for: .audio)?.uniqueID
-        let discoverySession = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.microphone],
-            mediaType: .audio,
-            position: .unspecified
+        let snapshot = try LiveAudioInputDeviceProvider().discover()
+        return AudioInputDeviceIdentityMatcher.mergedInputs(
+            from: snapshot
         )
-
-        return discoverySession.devices.map { device in
-            AudioInputDevice(
-                id: device.uniqueID,
-                name: device.localizedName,
-                manufacturer: device.manufacturer,
-                isConnected: device.isConnected,
-                isSuspended: device.isSuspended,
-                isInUseByAnotherApplication:
-                    device.isInUseByAnotherApplication,
-                isSystemDefault: device.uniqueID == defaultID
-            )
-        }
     }
 }

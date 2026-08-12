@@ -28,6 +28,8 @@ struct AudioDeviceSettingsView: View {
                         .foregroundStyle(.orange)
                 }
 
+                compatibilityStatus
+
                 permissionRepairButtons
                 Divider()
                 diagnosticWorkflow
@@ -133,6 +135,25 @@ struct AudioDeviceSettingsView: View {
         .disabled(
             viewModel.areAudioControlsDisabled || hasActiveAudioOperation
         )
+    }
+
+    @ViewBuilder
+    private var compatibilityStatus: some View {
+        if viewModel.isMicrophoneRecovering {
+            Label(
+                "正在重新连接麦克风…",
+                systemImage: "arrow.triangle.2.circlepath"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
+        } else if viewModel.isCoreAudioFallbackActive {
+            Label(
+                "已启用兼容录音模式（Core Audio）",
+                systemImage: "waveform.badge.exclamationmark"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
+        }
     }
 
     @ViewBuilder
@@ -427,7 +448,11 @@ struct AudioDeviceSettingsView: View {
     private var missingInputDeviceID: String? {
         guard let selectedID = viewModel.selectedInputDeviceID,
               !viewModel.audioDevices.inputs.contains(
-                where: { $0.id == selectedID }
+                where: {
+                    $0.id == selectedID
+                        || $0.avFoundationUniqueID == selectedID
+                        || $0.coreAudioUID == selectedID
+                }
               ) else {
             return nil
         }
@@ -483,6 +508,16 @@ struct AudioDeviceSettingsView: View {
     private func inputDeviceLabel(_ device: AudioInputDevice) -> String {
         var details: [String] = []
         if device.isSystemDefault { details.append("系统默认") }
+        var backends: [String] = []
+        if device.isAVFoundationAvailable {
+            backends.append("AVFoundation")
+        }
+        if device.isCoreAudioAvailable {
+            backends.append("Core Audio")
+        }
+        if !backends.isEmpty {
+            details.append(backends.joined(separator: " + "))
+        }
         if device.isInUseByAnotherApplication { details.append("正在被使用") }
         if !device.isUsable { details.append("不可用") }
         return details.isEmpty
