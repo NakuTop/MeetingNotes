@@ -197,6 +197,7 @@ final class SettingsViewModel {
     private let diagnosticEnvironment:
         any AudioDiagnosticEnvironmentInfoProviding
     private let diagnosticSanitizer = AudioDiagnosticSanitizer()
+    private let microphoneRuntime: (any MicrophoneRuntimeReporting)?
 
     var deepSeekAPIKeyInput = ""
     var notionTokenInput = ""
@@ -224,8 +225,11 @@ final class SettingsViewModel {
     )
     private(set) var resolvedInputDevice:
         ResolvedAudioDevice<AudioInputDevice> = .unavailable
+    private(set) var resolvedInputCapture: ResolvedMicrophoneCapture?
     private(set) var resolvedOutputDevice:
         ResolvedAudioDevice<AudioOutputDevice> = .unavailable
+    private(set) var microphoneRuntimeSnapshot =
+        MicrophoneRuntimeSnapshot()
     private(set) var audioDeviceMessage: String?
     private(set) var isRefreshingAudioDevices = false
     private(set) var areAudioControlsDisabled = false
@@ -235,6 +239,22 @@ final class SettingsViewModel {
 
     var areTranscriptionControlsDisabled: Bool {
         areAudioControlsDisabled
+    }
+
+    var isCoreAudioFallbackActive: Bool {
+        resolvedInputCapture?.usesCoreAudioFallback == true
+    }
+
+    var isMicrophoneRecovering: Bool {
+        microphoneRuntimeSnapshot.status == .recovering
+    }
+
+    var avFoundationInputCount: Int {
+        audioDevices.inputs.filter(\.isAVFoundationAvailable).count
+    }
+
+    var coreAudioInputCount: Int {
+        audioDevices.inputs.filter(\.isCoreAudioAvailable).count
     }
 
     private var activeDiagnostic: (any AudioDiagnosticCoordinating)?
@@ -268,7 +288,8 @@ final class SettingsViewModel {
             (any AudioDiagnosticExplanationRequesting)? = nil,
         diagnosticEnvironment:
             any AudioDiagnosticEnvironmentInfoProviding =
-                LiveAudioDiagnosticEnvironmentInfoProvider()
+                LiveAudioDiagnosticEnvironmentInfoProvider(),
+        microphoneRuntime: (any MicrophoneRuntimeReporting)? = nil
     ) {
         self.credentialStore = credentialStore
         self.settingsStore = settingsStore
@@ -282,6 +303,7 @@ final class SettingsViewModel {
         self.diagnosticCoordinatorFactory = diagnosticCoordinatorFactory
         self.diagnosticExplainer = diagnosticExplainer
         self.diagnosticEnvironment = diagnosticEnvironment
+        self.microphoneRuntime = microphoneRuntime
     }
 
     func load() {
@@ -356,6 +378,10 @@ final class SettingsViewModel {
                 selectedTranscriptionQualityMode
             settingsStore.preferredInputDeviceID = selectedInputDeviceID
             settingsStore.preferredOutputDeviceID = selectedOutputDeviceID
+            settingsStore.preferredAudioInput = Self.preferredAudioInput(
+                selectedID: selectedInputDeviceID,
+                inputs: audioDevices.inputs
+            )
             notionParentPageURL = settingsStore.notionParentPageURL
             selectedModel = settingsStore.deepSeekModel
             frequentSpeakerNames = settingsStore.frequentSpeakerNames
@@ -408,10 +434,10 @@ final class SettingsViewModel {
                       audioSettingsSessionGeneration == settingsSession else {
                     continue
                 }
-                let inputResolution =
-                    AudioDevicePreferenceResolver.resolveInput(
-                        preferredID: selectedInputDeviceID,
-                        devices: snapshot.inputs
+                let inputResolution = AudioInputDeviceResolver
+                    .resolveCapture(
+                        preferred: settingsStore.preferredAudioInput,
+                        inputs: snapshot.inputs
                     )
                 let outputResolution =
                     AudioDevicePreferenceResolver.resolveOutput(
@@ -420,12 +446,23 @@ final class SettingsViewModel {
                     )
 
                 audioDevices = snapshot
-                resolvedInputDevice = inputResolution
+                resolvedInputCapture = inputResolution
+                resolvedInputDevice = Self.resolvedInputDevice(
+                    from: inputResolution
+                )
                 resolvedOutputDevice = outputResolution
                 audioDeviceMessage = Self.audioDeviceMessage(
-                    input: inputResolution,
-                    output: outputResolution
+                    input: resolvedInputDevice,
+                    output: resolvedOutputDevice,
+                    usesCoreAudioFallback:
+                        inputResolution?.usesCoreAudioFallback == true,
+                    isRecovering:
+                        microphoneRuntimeSnapshot.status == .recovering
                 )
+                if let microphoneRuntime {
+                    microphoneRuntimeSnapshot =
+                        await microphoneRuntime.runtimeSnapshot()
+                }
             } catch {
                 guard isAudioSettingsVisible,
                       audioSettingsSessionGeneration == settingsSession else {
@@ -1067,8 +1104,57 @@ final class SettingsViewModel {
     }
 
     private func applySelectedAudioDevicesForTesting() {
-        settingsStore.preferredInputDeviceID = selectedInputDeviceID
+        settingsStore.preferredAudioInput = Self.preferredAudioInput(
+            selectedID: selectedInputDeviceID,
+            inputs: audioDevices.inputs
+        )
         settingsStore.preferredOutputDeviceID = selectedOutputDeviceID
+    }
+
+    private static func preferredAudioInput(
+        selectedID: String?,
+        inputs: [AudioInputDevice]
+    ) -> PreferredAudioInput {
+        guard let selectedID else {
+            return .automatic
+        }
+        guard let device = inputs.first(where: {
+                  $0.id == selectedID
+                    || $0.avFoundationUniqueID == selectedID
+                    || $0.coreAudioUID == selectedID
+              }) else {
+            return PreferredAudioInput(
+                backend: .automatic,
+                stableID: selectedID,
+                legacyAVFoundationID: selectedID,
+                coreAudioUID: nil
+            )
+        }
+        return PreferredAudioInput(
+            backend: .automatic,
+            stableID: device.stableID,
+            legacyAVFoundationID: device.avFoundationUniqueID,
+            coreAudioUID: device.coreAudioUID
+        )
+    }
+
+    private static func resolvedInputDevice(
+        from resolution: ResolvedMicrophoneCapture?
+    ) -> ResolvedAudioDevice<AudioInputDevice> {
+        guard let resolution else { return .unavailable }
+        switch resolution.kind {
+        case .preferred:
+            return .preferred(resolution.device)
+        case .systemDefault:
+            return .systemDefault(resolution.device)
+        case .firstUsable:
+            return .firstUsable(resolution.device)
+        case let .fallback(unavailablePreferredID):
+            return .fallback(
+                selected: resolution.device,
+                unavailablePreferredID: unavailablePreferredID
+            )
+        }
     }
 
     private static func diagnosticMessage(for error: Error) -> String {
@@ -1098,7 +1184,9 @@ final class SettingsViewModel {
 
     private static func audioDeviceMessage(
         input: ResolvedAudioDevice<AudioInputDevice>,
-        output: ResolvedAudioDevice<AudioOutputDevice>
+        output: ResolvedAudioDevice<AudioOutputDevice>,
+        usesCoreAudioFallback: Bool,
+        isRecovering: Bool
     ) -> String? {
         var messages: [String] = []
 
@@ -1122,6 +1210,13 @@ final class SettingsViewModel {
             messages.append("没有可用的扬声器。")
         default:
             break
+        }
+
+        if usesCoreAudioFallback {
+            messages.append("已启用兼容录音模式（Core Audio）。")
+        }
+        if isRecovering {
+            messages.append("正在重新连接麦克风…")
         }
 
         return messages.isEmpty ? nil : messages.joined(separator: "\n")
