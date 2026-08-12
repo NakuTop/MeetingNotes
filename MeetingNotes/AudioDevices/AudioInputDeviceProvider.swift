@@ -58,9 +58,29 @@ struct LiveAudioInputDeviceProvider: AudioInputDeviceProviding {
     }
 
     func discover() throws -> AudioInputDiscoverySnapshot {
-        AudioInputDiscoverySnapshot(
-            avFoundationInputs: try avFoundationProvider.inputs(),
-            coreAudioInputs: try coreAudioProvider.inputs()
+        var avFoundationInputs: [AVFoundationInputDevice] = []
+        var coreAudioInputs: [CoreAudioInputDevice] = []
+        var failedBackends: Set<AudioInputDiscoveryBackend> = []
+
+        do {
+            avFoundationInputs = try avFoundationProvider.inputs()
+        } catch {
+            failedBackends.insert(.avFoundation)
+        }
+        do {
+            coreAudioInputs = try coreAudioProvider.inputs()
+        } catch {
+            failedBackends.insert(.coreAudio)
+        }
+
+        if failedBackends.count == 2 {
+            throw AudioInputDiscoveryError.allBackendsFailed
+        }
+
+        return AudioInputDiscoverySnapshot(
+            avFoundationInputs: avFoundationInputs,
+            coreAudioInputs: coreAudioInputs,
+            failedBackends: failedBackends
         )
     }
 }

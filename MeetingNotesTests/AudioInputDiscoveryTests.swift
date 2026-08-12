@@ -325,6 +325,200 @@ final class AudioInputDiscoveryTests: XCTestCase {
         )
     }
 
+    func testResolverAllowsCoreAudioBackendAfterAVFoundationFailureOnSamePhysicalDevice() throws {
+        let avf = AVFoundationInputDevice(
+            uniqueID: "same-id",
+            name: "Same Microphone",
+            manufacturer: "Apple",
+            isConnected: true,
+            isSuspended: false,
+            isInUseByAnotherApplication: false,
+            isSystemDefault: true
+        )
+        let coreAudio = CoreAudioInputDevice(
+            deviceID: AudioDeviceID(42),
+            uid: "same-id",
+            name: "Same Microphone",
+            isAlive: true,
+            inputChannelCount: 1,
+            isSystemDefault: true
+        )
+        let merged = AudioInputDeviceIdentityMatcher.mergedInputs(
+            from: AudioInputDiscoverySnapshot(
+                avFoundationInputs: [avf],
+                coreAudioInputs: [coreAudio]
+            )
+        )
+
+        let firstResolution = try XCTUnwrap(
+            AudioInputDeviceResolver.resolveCapture(
+                preferred: .automatic,
+                inputs: merged
+            )
+        )
+        XCTAssertEqual(
+            firstResolution.plan,
+            .avFoundation(deviceID: "same-id")
+        )
+
+        let failedAVF = MicrophoneCaptureAttemptKey(
+            physicalStableID: firstResolution.device.stableID,
+            backend: .avFoundation
+        )
+        let secondResolution = try XCTUnwrap(
+            AudioInputDeviceResolver.resolveCapture(
+                preferred: .automatic,
+                inputs: merged,
+                excludingAttempts: [failedAVF]
+            )
+        )
+
+        XCTAssertEqual(
+            secondResolution.plan,
+            .coreAudio(deviceID: AudioDeviceID(42), uid: "same-id")
+        )
+    }
+
+    func testResolverHonorsExplicitCoreAudioBackendPreference() throws {
+        let avf = AVFoundationInputDevice(
+            uniqueID: "same-id",
+            name: "Same Microphone",
+            manufacturer: "Apple",
+            isConnected: true,
+            isSuspended: false,
+            isInUseByAnotherApplication: false,
+            isSystemDefault: true
+        )
+        let coreAudio = CoreAudioInputDevice(
+            deviceID: AudioDeviceID(42),
+            uid: "same-id",
+            name: "Same Microphone",
+            isAlive: true,
+            inputChannelCount: 1,
+            isSystemDefault: true
+        )
+        let merged = AudioInputDeviceIdentityMatcher.mergedInputs(
+            from: AudioInputDiscoverySnapshot(
+                avFoundationInputs: [avf],
+                coreAudioInputs: [coreAudio]
+            )
+        )
+        let device = try XCTUnwrap(merged.first)
+        let preferred = PreferredAudioInput(
+            backend: .coreAudio,
+            stableID: device.stableID,
+            legacyAVFoundationID: "same-id",
+            coreAudioUID: "same-id"
+        )
+
+        let resolution = try XCTUnwrap(
+            AudioInputDeviceResolver.resolveCapture(
+                preferred: preferred,
+                inputs: merged
+            )
+        )
+
+        XCTAssertEqual(
+            resolution.plan,
+            .coreAudio(deviceID: AudioDeviceID(42), uid: "same-id")
+        )
+    }
+
+    func testDiscoveryPreservesCoreAudioWhenAVFoundationThrows()
+        throws {
+        let builtIn = CoreAudioInputDevice(
+            deviceID: AudioDeviceID(42),
+            uid: "built-in-mic",
+            name: "Built-in",
+            isAlive: true,
+            inputChannelCount: 1,
+            isSystemDefault: true
+        )
+        let provider = LiveAudioInputDeviceProvider(
+            avFoundationProvider:
+                ThrowingAVFoundationInputDeviceProvider(),
+            coreAudioProvider:
+                StaticCoreAudioInputDeviceProvider(
+                    inputsValue: [builtIn]
+                )
+        )
+
+        let snapshot = try provider.discover()
+
+        XCTAssertTrue(snapshot.avFoundationInputs.isEmpty)
+        XCTAssertEqual(snapshot.coreAudioInputs.count, 1)
+        XCTAssertEqual(snapshot.failedBackends, [.avFoundation])
+        XCTAssertTrue(snapshot.avFoundationDiscoveryFailed)
+        XCTAssertFalse(snapshot.coreAudioDiscoveryFailed)
+    }
+
+    func testDiscoveryPreservesAVFoundationWhenCoreAudioThrows()
+        throws {
+        let avf = AVFoundationInputDevice(
+            uniqueID: "built-in-avf",
+            name: "Built-in",
+            manufacturer: "Apple",
+            isConnected: true,
+            isSuspended: false,
+            isInUseByAnotherApplication: false,
+            isSystemDefault: true
+        )
+        let provider = LiveAudioInputDeviceProvider(
+            avFoundationProvider:
+                StaticAVFoundationInputDeviceProvider(
+                    inputsValue: [avf]
+                ),
+            coreAudioProvider:
+                ThrowingCoreAudioInputDeviceProvider()
+        )
+
+        let snapshot = try provider.discover()
+
+        XCTAssertTrue(snapshot.coreAudioInputs.isEmpty)
+        XCTAssertEqual(snapshot.avFoundationInputs.count, 1)
+        XCTAssertEqual(snapshot.failedBackends, [.coreAudio])
+        XCTAssertFalse(snapshot.avFoundationDiscoveryFailed)
+        XCTAssertTrue(snapshot.coreAudioDiscoveryFailed)
+    }
+
+    func testDiscoveryThrowsOnlyWhenBothBackendsFail() {
+        let provider = LiveAudioInputDeviceProvider(
+            avFoundationProvider:
+                ThrowingAVFoundationInputDeviceProvider(),
+            coreAudioProvider:
+                ThrowingCoreAudioInputDeviceProvider()
+        )
+
+        XCTAssertThrowsError(try provider.discover()) { error in
+            XCTAssertEqual(
+                error as? AudioInputDiscoveryError,
+                .allBackendsFailed
+            )
+        }
+    }
+
+    func testSuccessfulEmptyDiscoveryIsNotReportedAsBackendFailure()
+        throws {
+        let provider = LiveAudioInputDeviceProvider(
+            avFoundationProvider:
+                StaticAVFoundationInputDeviceProvider(
+                    inputsValue: []
+                ),
+            coreAudioProvider:
+                StaticCoreAudioInputDeviceProvider(
+                    inputsValue: []
+                )
+        )
+
+        let snapshot = try provider.discover()
+
+        XCTAssertTrue(snapshot.avFoundationInputs.isEmpty)
+        XCTAssertTrue(snapshot.coreAudioInputs.isEmpty)
+        XCTAssertTrue(snapshot.failedBackends.isEmpty)
+        XCTAssertFalse(snapshot.avFoundationDiscoveryFailed)
+        XCTAssertFalse(snapshot.coreAudioDiscoveryFailed)
+    }
+
     private func makeInput(
         id: String,
         name: String,
@@ -395,5 +589,41 @@ private struct StaticAudioInputDiscoveryProvider:
 
     func discover() throws -> AudioInputDiscoverySnapshot {
         snapshotValue
+    }
+}
+
+private enum DiscoveryTestError: Error, Equatable, Sendable {
+    case backendFailed
+}
+
+private struct ThrowingAVFoundationInputDeviceProvider:
+    AVFoundationInputDeviceProviding {
+    func inputs() throws -> [AVFoundationInputDevice] {
+        throw DiscoveryTestError.backendFailed
+    }
+}
+
+private struct ThrowingCoreAudioInputDeviceProvider:
+    CoreAudioInputDeviceProviding {
+    func inputs() throws -> [CoreAudioInputDevice] {
+        throw DiscoveryTestError.backendFailed
+    }
+}
+
+private struct StaticAVFoundationInputDeviceProvider:
+    AVFoundationInputDeviceProviding {
+    let inputsValue: [AVFoundationInputDevice]
+
+    func inputs() throws -> [AVFoundationInputDevice] {
+        inputsValue
+    }
+}
+
+private struct StaticCoreAudioInputDeviceProvider:
+    CoreAudioInputDeviceProviding {
+    let inputsValue: [CoreAudioInputDevice]
+
+    func inputs() throws -> [CoreAudioInputDevice] {
+        inputsValue
     }
 }

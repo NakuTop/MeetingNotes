@@ -1,9 +1,14 @@
 import CoreAudio
 import Foundation
 
-enum MicrophoneCaptureBackend: String, Codable, Sendable, Equatable {
+enum MicrophoneCaptureBackend: String, Codable, Sendable, Equatable, Hashable {
     case avFoundation
     case coreAudioFallback
+}
+
+struct MicrophoneCaptureAttemptKey: Hashable, Sendable {
+    let physicalStableID: String
+    let backend: MicrophoneCaptureBackend
 }
 
 enum MicrophoneCapturePlan: Equatable, Sendable {
@@ -38,12 +43,21 @@ struct ResolvedMicrophoneCapture: Equatable, Sendable {
         }
         return false
     }
+
+    var attemptKey: MicrophoneCaptureAttemptKey {
+        MicrophoneCaptureAttemptKey(
+            physicalStableID: device.stableID,
+            backend: plan.backend
+        )
+    }
 }
 
 enum AudioInputDeviceResolver {
     static func resolveCapture(
         preferred: PreferredAudioInput,
         inputs: [AudioInputDevice],
+        excludingAttempts:
+            Set<MicrophoneCaptureAttemptKey> = [],
         excludingDeviceIDs: Set<String> = [],
         excludingBackend: MicrophoneCaptureBackend? = nil
     ) -> ResolvedMicrophoneCapture? {
@@ -59,57 +73,77 @@ enum AudioInputDeviceResolver {
             }
             return !matches(excluded: excludingDeviceIDs, device: device)
         }
+        let backendOrder = Self.backendOrder(for: preferred)
 
         // 1. User's previously selected device, when still present and usable.
         if let preferredDevice = usable.first(where: {
             matches(preferred: preferred, device: $0)
         }) {
-            return capture(for: preferredDevice, kind: .preferred)
+            if let resolution = capture(
+                for: preferredDevice,
+                backendOrder: backendOrder,
+                excludingAttempts: excludingAttempts,
+                kind: .preferred
+            ) {
+                return resolution
+            }
         }
 
         // 2. AVFoundation system default.
         if let avFoundationDefault = usable.first(where: {
             $0.isAVFoundationCapable && $0.isSystemDefault
         }) {
-            return capture(
+            if let resolution = capture(
                 for: avFoundationDefault,
+                backendOrder: backendOrder,
+                excludingAttempts: excludingAttempts,
                 kind: fallbackKind(
                     hasPreferredID: preferred.hasAnyIdentifier,
                     preferred: preferred,
                     defaultKind: .systemDefault
                 )
-            )
+            ) {
+                return resolution
+            }
         }
 
         // 3. Core Audio system default mapped to its AVFoundation device.
         if let coreAudioDefault = usable.first(where: {
             $0.isCoreAudioAvailable && $0.isSystemDefault
         }), let avFoundationCounterpart = usable.first(where: {
-            $0.isAVFoundationAvailable
+            $0.isAVFoundationCapable
                 && $0.coreAudioUID == coreAudioDefault.coreAudioUID
         }) {
-            return capture(
+            if let resolution = capture(
                 for: avFoundationCounterpart,
+                backendOrder: backendOrder,
+                excludingAttempts: excludingAttempts,
                 kind: fallbackKind(
                     hasPreferredID: preferred.hasAnyIdentifier,
                     preferred: preferred,
                     defaultKind: .systemDefault
                 )
-            )
+            ) {
+                return resolution
+            }
         }
 
         // 4. First valid AVFoundation input.
         if let firstAVFoundation = usable.first(where: {
             $0.isAVFoundationCapable
         }) {
-            return capture(
+            if let resolution = capture(
                 for: firstAVFoundation,
+                backendOrder: backendOrder,
+                excludingAttempts: excludingAttempts,
                 kind: fallbackKind(
                     hasPreferredID: preferred.hasAnyIdentifier,
                     preferred: preferred,
                     defaultKind: .firstUsable
                 )
-            )
+            ) {
+                return resolution
+            }
         }
 
         // 5. Core Audio fallback capture.
@@ -117,55 +151,90 @@ enum AudioInputDeviceResolver {
         if let coreAudioDefault = usable.first(where: {
             $0.isCoreAudioAvailable && $0.isSystemDefault
         }) {
-            return capture(
+            if let resolution = capture(
                 for: coreAudioDefault,
+                backendOrder: backendOrder,
+                excludingAttempts: excludingAttempts,
                 kind: fallbackKind(
                     hasPreferredID: hasPreferredID,
                     preferred: preferred,
                     defaultKind: .systemDefault
                 )
-            )
+            ) {
+                return resolution
+            }
         }
         if let firstCoreAudio = usable.first(where: {
             $0.isCoreAudioAvailable
         }) {
-            return capture(
+            if let resolution = capture(
                 for: firstCoreAudio,
+                backendOrder: backendOrder,
+                excludingAttempts: excludingAttempts,
                 kind: fallbackKind(
                     hasPreferredID: hasPreferredID,
                     preferred: preferred,
                     defaultKind: .firstUsable
                 )
-            )
+            ) {
+                return resolution
+            }
         }
 
         return nil
     }
 
+    private static func backendOrder(
+        for preferred: PreferredAudioInput
+    ) -> [MicrophoneCaptureBackend] {
+        switch preferred.backend {
+        case .coreAudio:
+            return [.coreAudioFallback, .avFoundation]
+        case .automatic, .avFoundation:
+            return [.avFoundation, .coreAudioFallback]
+        }
+    }
+
     private static func capture(
         for device: AudioInputDevice,
+        backendOrder: [MicrophoneCaptureBackend],
+        excludingAttempts: Set<MicrophoneCaptureAttemptKey>,
         kind: MicrophoneResolutionKind
     ) -> ResolvedMicrophoneCapture? {
-        if device.isAVFoundationCapable {
-            return ResolvedMicrophoneCapture(
-                plan: .avFoundation(
-                    deviceID: device.avFoundationUniqueID ?? device.id
-                ),
-                kind: kind,
-                device: device
+        for backend in backendOrder {
+            let attemptKey = MicrophoneCaptureAttemptKey(
+                physicalStableID: device.stableID,
+                backend: backend
             )
-        }
-        if device.isCoreAudioAvailable,
-           let deviceID = device.coreAudioDeviceID,
-           let uid = device.coreAudioUID {
-            return ResolvedMicrophoneCapture(
-                plan: .coreAudio(
-                    deviceID: deviceID,
-                    uid: uid
-                ),
-                kind: kind,
-                device: device
-            )
+            if excludingAttempts.contains(attemptKey) {
+                continue
+            }
+            switch backend {
+            case .avFoundation:
+                if device.isAVFoundationCapable {
+                    return ResolvedMicrophoneCapture(
+                        plan: .avFoundation(
+                            deviceID:
+                                device.avFoundationUniqueID ?? device.id
+                        ),
+                        kind: kind,
+                        device: device
+                    )
+                }
+            case .coreAudioFallback:
+                if device.isCoreAudioAvailable,
+                   let deviceID = device.coreAudioDeviceID,
+                   let uid = device.coreAudioUID {
+                    return ResolvedMicrophoneCapture(
+                        plan: .coreAudio(
+                            deviceID: deviceID,
+                            uid: uid
+                        ),
+                        kind: kind,
+                        device: device
+                    )
+                }
+            }
         }
         return nil
     }

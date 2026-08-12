@@ -28,7 +28,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
     private var continuation: AsyncThrowingStream<CapturedAudioPacket, Error>.Continuation?
     private var isRunning = false
     private var isPaused = false
-    private var firstSampleTime: AVAudioFramePosition?
+    private var firstSampleTimestamp: TimeInterval?
     private var drainQueue: MicrophoneCaptureDrainQueue<MicrophoneCaptureEvent>?
     private var sampleConsumptionTask: Task<Void, Never>?
 
@@ -78,7 +78,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         continuation = streamPair.continuation
         isRunning = true
         isPaused = false
-        firstSampleTime = nil
+        firstSampleTimestamp = nil
 
         let drainQueue = MicrophoneCaptureDrainQueue<MicrophoneCaptureEvent>(
             capacity: drainCapacity,
@@ -153,7 +153,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         isPaused = false
         continuation?.finish()
         continuation = nil
-        firstSampleTime = nil
+        firstSampleTimestamp = nil
         storageConverter.reset()
         transcriptionConverter.reset()
     }
@@ -182,7 +182,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
             throwing: MicrophoneCaptureError.backlogCapacityExceeded
         )
         continuation = nil
-        firstSampleTime = nil
+        firstSampleTimestamp = nil
         storageConverter.reset()
         transcriptionConverter.reset()
         if let draining {
@@ -200,16 +200,21 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         guard isRunning else {
             return
         }
-        if firstSampleTime == nil {
-            firstSampleTime = sample.sampleTime
+        let absoluteTimestamp: TimeInterval
+        if let normalized = sample.timestamp {
+            absoluteTimestamp = normalized
+        } else if sample.sampleRate.isFinite,
+                  sample.sampleRate > 0 {
+            absoluteTimestamp =
+                Double(sample.sampleTime) / sample.sampleRate
+        } else {
+            absoluteTimestamp = 0
         }
-        let origin = firstSampleTime ?? sample.sampleTime
-        let timestamp = sample.sampleRate > 0
-            ? max(
-                0,
-                Double(sample.sampleTime - origin) / sample.sampleRate
-            )
-            : 0
+        if firstSampleTimestamp == nil {
+            firstSampleTimestamp = absoluteTimestamp
+        }
+        let origin = firstSampleTimestamp ?? absoluteTimestamp
+        let timestamp = max(0, absoluteTimestamp - origin)
 
         do {
             let storageFrame = try storageConverter.convert(
@@ -250,7 +255,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         await sampleProvider.stop()
         continuation?.finish(throwing: error)
         continuation = nil
-        firstSampleTime = nil
+        firstSampleTimestamp = nil
         storageConverter.reset()
         transcriptionConverter.reset()
     }
@@ -262,7 +267,7 @@ actor MicrophoneCaptureSource: AudioCaptureSource {
         await sampleProvider.stop()
         continuation?.finish()
         continuation = nil
-        firstSampleTime = nil
+        firstSampleTimestamp = nil
         storageConverter.reset()
         transcriptionConverter.reset()
     }

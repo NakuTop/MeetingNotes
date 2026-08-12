@@ -5,53 +5,140 @@ import XCTest
 @testable import MeetingNotes
 
 final class ScreenAudioCaptureConfigurationTests: XCTestCase {
-    func testSelectedMicrophoneDeviceIDIsAppliedExactly() {
+    func testScreenCaptureKitCapturesSystemAudioOnly() {
         let configuration =
-            ScreenAudioCaptureConfiguration.makeStreamConfiguration(
-                microphoneDeviceID: "external-microphone-id"
-            )
-
-        XCTAssertEqual(
-            configuration.microphoneCaptureDeviceID,
-            "external-microphone-id"
-        )
-    }
-
-    func testNilMicrophoneDeviceIDUsesSystemDefault() {
-        let configuration =
-            ScreenAudioCaptureConfiguration.makeStreamConfiguration(
-                microphoneDeviceID: nil
-            )
-
-        XCTAssertNil(configuration.microphoneCaptureDeviceID)
-    }
-
-    func testCapturesOnlySystemAndMicrophoneAudio() {
-        let configuration =
-            ScreenAudioCaptureConfiguration.makeStreamConfiguration(
-                microphoneDeviceID: nil
-            )
+            ScreenAudioCaptureConfiguration.makeStreamConfiguration()
 
         XCTAssertTrue(configuration.capturesAudio)
-        XCTAssertTrue(configuration.captureMicrophone)
+        XCTAssertFalse(configuration.captureMicrophone)
+        XCTAssertNil(configuration.microphoneCaptureDeviceID)
         XCTAssertTrue(configuration.excludesCurrentProcessAudio)
         XCTAssertEqual(configuration.sampleRate, 48_000)
         XCTAssertEqual(configuration.channelCount, 1)
         XCTAssertEqual(
-            ScreenAudioCaptureConfiguration.eventQueueCapacity,
-            256
-        )
-        XCTAssertEqual(
-            ScreenAudioCaptureConfiguration.packetBufferCapacity,
-            256
-        )
-        XCTAssertEqual(
             ScreenAudioCaptureConfiguration.registeredOutputTypes,
-            [.audio, .microphone]
+            [.audio]
         )
         XCTAssertFalse(
-            ScreenAudioCaptureConfiguration.registeredOutputTypes.contains(.screen)
+            ScreenAudioCaptureConfiguration
+                .registeredOutputTypes
+                .contains(.microphone)
         )
+        XCTAssertFalse(
+            ScreenAudioCaptureConfiguration
+                .registeredOutputTypes
+                .contains(.screen)
+        )
+    }
+
+    func testOnlineConfigurationDoesNotRegisterScreenCaptureKitMicrophone() {
+        XCTAssertEqual(
+            ScreenAudioCaptureConfiguration.registeredOutputTypes,
+            [.audio]
+        )
+        let configuration =
+            ScreenAudioCaptureConfiguration.makeStreamConfiguration()
+        XCTAssertFalse(configuration.captureMicrophone)
+        XCTAssertNil(configuration.microphoneCaptureDeviceID)
+    }
+
+    func testSynchronizerMapsMicrophoneNormalizedTimestampOntoAnchor() {
+        var synchronizer = ScreenAudioFrameSynchronizer(
+            sessionStartedAt: 100
+        )
+        let microphoneStartedAt: TimeInterval = 200
+        let frames = synchronizer.ingest(
+            frame(timestamp: 20, sample: 0.1),
+            source: .microphone,
+            receivedAt: microphoneStartedAt + 20
+        )
+
+        XCTAssertEqual(frames.count, 1)
+        XCTAssertEqual(frames[0].timestamp, 120, accuracy: 0.000_001)
+    }
+
+    func testMicrophoneFailureClosesRelayFIFOAfterQueuedFrames()
+        async throws {
+        let recorder = ScreenAudioRelayEventRecorder()
+        let relay = ScreenAudioStreamRelay(
+            decoder: ScreenAudioSampleDecoder(),
+            eventHandler: { event in
+                await recorder.append(event)
+            }
+        )
+        let microphoneFrame = CapturedAudioFrame(
+            timestamp: 0,
+            sampleRate: 48_000,
+            samples: [0.1]
+        )
+
+        XCTAssertTrue(
+            relay.enqueueMicrophoneFrame(
+                microphoneFrame,
+                receivedAt: 1
+            )
+        )
+        relay.closeAfterMicrophoneFailure(
+            ScreenAudioCaptureError.microphoneStreamStopped
+        )
+        await relay.finishAndWait()
+
+        let order = await recorder.order()
+        XCTAssertEqual(order, ["frame", "failure"])
+        let frameCount = await recorder.frameCount()
+        let failureCount = await recorder.failureCount()
+        XCTAssertEqual(frameCount, 1)
+        XCTAssertEqual(failureCount, 1)
+    }
+
+    func testLifecycleCoordinationCoordinatesMicrophoneAndRelay()
+        async throws {
+        let microphone = LifecycleMicrophoneCaptureSource()
+        let relay = ScreenAudioStreamRelay(
+            decoder: ScreenAudioSampleDecoder(),
+            eventHandler: { _ in }
+        )
+        let systemQueue = DispatchQueue(
+            label: "ScreenAudioTests.Lifecycle.System"
+        )
+        let coordination = ScreenAudioMicrophoneLifecycleCoordination(
+            microphoneCaptureSource: microphone,
+            relay: relay,
+            systemQueue: systemQueue
+        )
+
+        try await coordination.pause()
+        var counts = await microphone.counts()
+        XCTAssertEqual(counts.pauseCount, 1)
+        XCTAssertFalse(
+            relay.enqueueMicrophoneFrame(
+                CapturedAudioFrame(
+                    timestamp: 0,
+                    sampleRate: 48_000,
+                    samples: [0.1]
+                ),
+                receivedAt: 0
+            )
+        )
+
+        try await coordination.resume()
+        counts = await microphone.counts()
+        XCTAssertEqual(counts.resumeCount, 1)
+        XCTAssertTrue(
+            relay.enqueueMicrophoneFrame(
+                CapturedAudioFrame(
+                    timestamp: 0,
+                    sampleRate: 48_000,
+                    samples: [0.1]
+                ),
+                receivedAt: 0
+            )
+        )
+
+        await coordination.suspendAndStopMicrophone()
+        counts = await microphone.counts()
+        XCTAssertEqual(counts.stopCount, 1)
+        await relay.finishAndWait()
     }
 
     func testPacketDeliveryFailsExplicitlyAndTerminatesAfterBufferOverflow() async {
@@ -700,5 +787,63 @@ private actor ScreenAudioTestCompletion {
 
     func isCompleted() -> Bool {
         completed
+    }
+}
+
+private actor LifecycleMicrophoneCaptureSource: AudioCaptureSource {
+    private(set) var pauseCount = 0
+    private(set) var resumeCount = 0
+    private(set) var stopCount = 0
+
+    func start() async throws
+        -> AsyncThrowingStream<CapturedAudioPacket, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.finish()
+        }
+    }
+
+    func pause() async throws {
+        pauseCount += 1
+    }
+
+    func resume() async throws {
+        resumeCount += 1
+    }
+
+    func stop() async {
+        stopCount += 1
+    }
+
+    func counts() -> (
+        pauseCount: Int,
+        resumeCount: Int,
+        stopCount: Int
+    ) {
+        (pauseCount, resumeCount, stopCount)
+    }
+}
+
+private actor ScreenAudioRelayEventRecorder {
+    private var recordedOrder: [String] = []
+
+    func append(_ event: ScreenAudioRelayEvent) {
+        switch event {
+        case .frame:
+            recordedOrder.append("frame")
+        case .failure:
+            recordedOrder.append("failure")
+        }
+    }
+
+    func order() -> [String] {
+        recordedOrder
+    }
+
+    func frameCount() -> Int {
+        recordedOrder.filter { $0 == "frame" }.count
+    }
+
+    func failureCount() -> Int {
+        recordedOrder.filter { $0 == "failure" }.count
     }
 }

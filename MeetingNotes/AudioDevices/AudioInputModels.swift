@@ -1,6 +1,15 @@
 import CoreAudio
 import Foundation
 
+enum AudioInputDiscoveryBackend: String, Hashable, Equatable, Sendable {
+    case avFoundation
+    case coreAudio
+}
+
+enum AudioInputDiscoveryError: Error, Equatable, Sendable {
+    case allBackendsFailed
+}
+
 struct AVFoundationInputDevice: Equatable, Sendable, Identifiable {
     let uniqueID: String
     let name: String
@@ -39,13 +48,16 @@ struct CoreAudioInputDevice: Equatable, Sendable, Identifiable {
 struct AudioInputDiscoverySnapshot: Equatable, Sendable {
     let avFoundationInputs: [AVFoundationInputDevice]
     let coreAudioInputs: [CoreAudioInputDevice]
+    let failedBackends: Set<AudioInputDiscoveryBackend>
 
     init(
         avFoundationInputs: [AVFoundationInputDevice] = [],
-        coreAudioInputs: [CoreAudioInputDevice] = []
+        coreAudioInputs: [CoreAudioInputDevice] = [],
+        failedBackends: Set<AudioInputDiscoveryBackend> = []
     ) {
         self.avFoundationInputs = avFoundationInputs
         self.coreAudioInputs = coreAudioInputs
+        self.failedBackends = failedBackends
     }
 
     var avFoundationInputCount: Int {
@@ -62,5 +74,13 @@ struct AudioInputDiscoverySnapshot: Equatable, Sendable {
 
     var coreAudioDefaultAvailable: Bool {
         coreAudioInputs.contains { $0.isSystemDefault && $0.isUsable }
+    }
+
+    var avFoundationDiscoveryFailed: Bool {
+        failedBackends.contains(.avFoundation)
+    }
+
+    var coreAudioDiscoveryFailed: Bool {
+        failedBackends.contains(.coreAudio)
     }
 }

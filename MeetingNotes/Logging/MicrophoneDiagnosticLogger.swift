@@ -2,22 +2,36 @@ import Foundation
 import OSLog
 
 enum MicrophoneDiagnosticLogger {
+    private static let subsystem =
+        resolvedSubsystem(
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        )
     private static let discovery = Logger(
-        subsystem: "com.shenminghao.MeetingNotes",
+        subsystem: subsystem,
         category: "AudioDeviceDiscovery"
     )
     private static let capture = Logger(
-        subsystem: "com.shenminghao.MeetingNotes",
+        subsystem: subsystem,
         category: "MicrophoneCapture"
     )
     private static let recovery = Logger(
-        subsystem: "com.shenminghao.MeetingNotes",
+        subsystem: subsystem,
         category: "MicrophoneRecovery"
     )
     private static let fallback = Logger(
-        subsystem: "com.shenminghao.MeetingNotes",
+        subsystem: subsystem,
         category: "CoreAudioFallback"
     )
+
+    static func resolvedSubsystem(
+        bundleIdentifier: String?
+    ) -> String {
+        guard let bundleIdentifier,
+              !bundleIdentifier.isEmpty else {
+            return "com.shenminghao.MeetingNotes"
+        }
+        return bundleIdentifier
+    }
 
     static func discovery(
         permission: CapturePermissionStatus,
@@ -60,6 +74,14 @@ enum MicrophoneDiagnosticLogger {
     static func captureFailure(category: MicrophoneCaptureErrorCategory?) {
         capture.warning(
             "[MicrophoneCapture] capture failure category=\(category?.rawValue ?? "unknown", privacy: .public)"
+        )
+    }
+
+    static func coreAudioInputOverflow(
+        droppedFrameCount: UInt64
+    ) {
+        fallback.warning(
+            "[CoreAudioFallback] Core Audio input overflow dropped_frames=\(droppedFrameCount, privacy: .public)"
         )
     }
 

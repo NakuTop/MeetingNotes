@@ -242,7 +242,18 @@ final class SettingsViewModel {
     }
 
     var isCoreAudioFallbackActive: Bool {
-        resolvedInputCapture?.usesCoreAudioFallback == true
+        let runtime = microphoneRuntimeSnapshot
+        guard runtime.telemetry.captureStarted,
+              runtime.telemetry.captureBackend
+                == .coreAudioFallback else {
+            return false
+        }
+        switch runtime.status {
+        case .stopped, .failed:
+            return false
+        default:
+            return true
+        }
     }
 
     var isMicrophoneRecovering: Bool {
@@ -451,18 +462,17 @@ final class SettingsViewModel {
                     from: inputResolution
                 )
                 resolvedOutputDevice = outputResolution
-                audioDeviceMessage = Self.audioDeviceMessage(
-                    input: resolvedInputDevice,
-                    output: resolvedOutputDevice,
-                    usesCoreAudioFallback:
-                        inputResolution?.usesCoreAudioFallback == true,
-                    isRecovering:
-                        microphoneRuntimeSnapshot.status == .recovering
-                )
                 if let microphoneRuntime {
                     microphoneRuntimeSnapshot =
                         await microphoneRuntime.runtimeSnapshot()
                 }
+                audioDeviceMessage = Self.audioDeviceMessage(
+                    input: resolvedInputDevice,
+                    output: resolvedOutputDevice,
+                    usesCoreAudioFallback: isCoreAudioFallbackActive,
+                    isRecovering:
+                        microphoneRuntimeSnapshot.status == .recovering
+                )
             } catch {
                 guard isAudioSettingsVisible,
                       audioSettingsSessionGeneration == settingsSession else {
@@ -520,14 +530,17 @@ final class SettingsViewModel {
             }
             guard inputTestGeneration == requestedGeneration else { return }
             audioInputTestState = .completed(metrics)
+            await refreshMicrophoneRuntimeIfCurrent(requestedGeneration)
         } catch is CancellationError {
             guard inputTestGeneration == requestedGeneration else { return }
             audioInputTestState = .idle
+            await refreshMicrophoneRuntimeIfCurrent(requestedGeneration)
         } catch {
             guard inputTestGeneration == requestedGeneration else { return }
             audioInputTestState = .failed(
                 message: "麦克风测试失败，请检查设备连接与权限。"
             )
+            await refreshMicrophoneRuntimeIfCurrent(requestedGeneration)
         }
     }
 
@@ -938,6 +951,17 @@ final class SettingsViewModel {
     ) {
         guard inputTestGeneration == generation else { return }
         audioInputTestState = .testing(metrics)
+    }
+
+    private func refreshMicrophoneRuntimeIfCurrent(
+        _ generation: UInt64
+    ) async {
+        guard inputTestGeneration == generation,
+              let microphoneRuntime else {
+            return
+        }
+        microphoneRuntimeSnapshot =
+            await microphoneRuntime.runtimeSnapshot()
     }
 
     private func monitorDiagnostic(

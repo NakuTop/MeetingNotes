@@ -57,6 +57,7 @@ protocol TranscriptionQualityPreferenceReading: Sendable {
 
 protocol AudioInputDevicePreferenceReading: Sendable {
     func preferredInputDeviceID() async -> String?
+    func preferredAudioInput() async -> PreferredAudioInput
 }
 
 extension AudioInputDevicePreferenceReading {
@@ -119,6 +120,10 @@ final class MainActorAudioInputDevicePreferenceAdapter:
             // default microphone in the online capture path.
             return nil
         }
+    }
+
+    func preferredAudioInput() async -> PreferredAudioInput {
+        settingsStore.preferredAudioInput
     }
 }
 
@@ -314,50 +319,76 @@ private struct UnchangedMeetingSpeakerFinalizer:
 }
 
 struct LiveMeetingCaptureFactory: MeetingCaptureSourceFactory {
-    typealias MicrophoneFactory =
-        @Sendable (String?) -> any AudioCaptureSource
+    typealias MicrophoneProviderFactory =
+        @Sendable (PreferredAudioInput) -> any MicrophoneSampleProviding
+    typealias MicrophoneCaptureFactory =
+        @Sendable (any MicrophoneSampleProviding) -> any AudioCaptureSource
     typealias ScreenFactory =
-        @Sendable (String?) -> any AudioCaptureSource
+        @Sendable (any AudioCaptureSource) -> any AudioCaptureSource
 
     private let audioInputDevicePreference:
         any AudioInputDevicePreferenceReading
-    private let microphoneFactory: MicrophoneFactory
+    private let microphoneProviderFactory: MicrophoneProviderFactory
+    private let microphoneCaptureFactory: MicrophoneCaptureFactory
     private let screenFactory: ScreenFactory
 
     init(
         audioInputDevicePreference:
             any AudioInputDevicePreferenceReading,
-        microphoneFactory:
-            @escaping MicrophoneFactory = { selectedDeviceID in
+        microphoneProviderFactory:
+            @escaping MicrophoneProviderFactory =
+                LiveMeetingCaptureFactory.makeProductionMicrophoneProvider,
+        microphoneCaptureFactory:
+            @escaping MicrophoneCaptureFactory = { provider in
                 MicrophoneCaptureSource(
-                    selectedDeviceID: selectedDeviceID
+                    selectedDeviceID: nil,
+                    sampleProvider: provider
                 )
             },
         screenFactory:
-            @escaping ScreenFactory = { selectedDeviceID in
+            @escaping ScreenFactory = { microphoneCaptureSource in
                 ScreenAudioCaptureSource(
-                    microphoneDeviceID: selectedDeviceID
+                    microphoneCaptureSource:
+                        microphoneCaptureSource
                 )
             }
     ) {
         self.audioInputDevicePreference = audioInputDevicePreference
-        self.microphoneFactory = microphoneFactory
+        self.microphoneProviderFactory = microphoneProviderFactory
+        self.microphoneCaptureFactory = microphoneCaptureFactory
         self.screenFactory = screenFactory
+    }
+
+    static func makeProductionMicrophoneProvider(
+        preferred: PreferredAudioInput
+    ) -> any MicrophoneSampleProviding {
+        AdaptiveMicrophoneSampleProvider(
+            preferredInputProvider: {
+                preferred
+            }
+        )
     }
 
     func makeCapture(for mode: MeetingMode) async throws -> any AudioCaptureSource {
         switch mode {
         case .offline:
-            let selectedDeviceID =
-                await audioInputDevicePreference
-                    .preferredInputDeviceID()
-            return microphoneFactory(selectedDeviceID)
+            let preferred =
+                await audioInputDevicePreference.preferredAudioInput()
+            return makeMicrophoneCapture(preferred: preferred)
         case .online:
-            let selectedDeviceID =
-                await audioInputDevicePreference
-                    .preferredInputDeviceID()
-            return screenFactory(selectedDeviceID)
+            let preferred =
+                await audioInputDevicePreference.preferredAudioInput()
+            let microphoneCapture =
+                makeMicrophoneCapture(preferred: preferred)
+            return screenFactory(microphoneCapture)
         }
+    }
+
+    private func makeMicrophoneCapture(
+        preferred: PreferredAudioInput
+    ) -> any AudioCaptureSource {
+        let provider = microphoneProviderFactory(preferred)
+        return microphoneCaptureFactory(provider)
     }
 }
 
