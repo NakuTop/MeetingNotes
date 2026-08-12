@@ -49,6 +49,14 @@ enum AudioInputDeviceIdentityMatcher {
         // Priority 3: controlled exact name matching, last resort.
         for (avfIndex, avf) in snapshot.avFoundationInputs.enumerated() {
             guard !matchedAVF.contains(avfIndex) else { continue }
+            guard hasUniqueUnmatchedPair(
+                name: avf.name,
+                in: snapshot,
+                matchedAVF: matchedAVF,
+                matchedCoreAudio: matchedCoreAudio
+            ) else {
+                continue
+            }
             if let coreAudioIndex = unmatchedCoreAudioIndex(
                 matchingName: avf.name,
                 isSystemDefaultOnly: false,
@@ -80,6 +88,32 @@ enum AudioInputDeviceIdentityMatcher {
         }
 
         return results
+    }
+
+    private static func hasUniqueUnmatchedPair(
+        name: String,
+        in snapshot: AudioInputDiscoverySnapshot,
+        matchedAVF: Set<Int>,
+        matchedCoreAudio: Set<Int>
+    ) -> Bool {
+        let normalized = normalizedName(name)
+        let avFoundationCount = snapshot.avFoundationInputs.indices
+            .filter {
+                !matchedAVF.contains($0)
+                    && normalizedName(
+                        snapshot.avFoundationInputs[$0].name
+                    ) == normalized
+            }
+            .count
+        let coreAudioCount = snapshot.coreAudioInputs.indices
+            .filter {
+                !matchedCoreAudio.contains($0)
+                    && normalizedName(
+                        snapshot.coreAudioInputs[$0].name
+                    ) == normalized
+            }
+            .count
+        return avFoundationCount == 1 && coreAudioCount == 1
     }
 
     private static func unmatchedCoreAudioIndex(

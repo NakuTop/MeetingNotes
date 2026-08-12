@@ -144,6 +144,36 @@ struct ScreenAudioFrameSynchronizer {
     }
 }
 
+struct ScreenAudioExternalMicrophoneClock: Sendable {
+    private var firstAcceptedSourceTimestamp: TimeInterval?
+    private var firstAcceptedReceivedAt: TimeInterval?
+
+    mutating func reset() {
+        firstAcceptedSourceTimestamp = nil
+        firstAcceptedReceivedAt = nil
+    }
+
+    mutating func candidateReceivedAt(
+        frameTimestamp: TimeInterval,
+        now: TimeInterval
+    ) -> TimeInterval {
+        guard let origin = firstAcceptedSourceTimestamp,
+              let wallOrigin = firstAcceptedReceivedAt else {
+            return now
+        }
+        return wallOrigin + max(0, frameTimestamp - origin)
+    }
+
+    mutating func commitAccepted(
+        frameTimestamp: TimeInterval,
+        receivedAt: TimeInterval
+    ) {
+        guard firstAcceptedSourceTimestamp == nil else { return }
+        firstAcceptedSourceTimestamp = frameTimestamp
+        firstAcceptedReceivedAt = receivedAt
+    }
+}
+
 enum ScreenAudioDecodeDelivery {
     static func deliver<Frame>(
         decode: () throws -> Frame,
@@ -616,8 +646,6 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             throw ScreenAudioCaptureError.streamSetupFailed
         }
 
-        let microphoneStartedAt =
-            ProcessInfo.processInfo.systemUptime
         let microphoneStream:
             AsyncThrowingStream<CapturedAudioPacket, Error>
         do {
@@ -653,16 +681,13 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         }
 
         let relayReference = relay
-        let microphoneAnchor = microphoneStartedAt
         let microphoneTask = Task {
             do {
                 for try await packet in microphoneStream {
                     let frame = packet.master
                     _ = relayReference.enqueueMicrophoneFrame(
                         frame,
-                        receivedAt:
-                            microphoneAnchor
-                            + max(0, frame.timestamp)
+                        now: ProcessInfo.processInfo.systemUptime
                     )
                 }
                 relayReference.closeAfterMicrophoneFailure(
@@ -939,6 +964,8 @@ final class ScreenAudioStreamRelay: NSObject, SCStreamOutput, SCStreamDelegate, 
     private let decoder: ScreenAudioSampleDecoder
     private let events: ScreenAudioEventFIFO<ScreenAudioRelayEvent>
     private let callbackGate = ScreenAudioCallbackGate()
+    private var externalMicrophoneClock =
+        ScreenAudioExternalMicrophoneClock()
 
     init(
         decoder: ScreenAudioSampleDecoder,
@@ -979,15 +1006,26 @@ final class ScreenAudioStreamRelay: NSObject, SCStreamOutput, SCStreamDelegate, 
     @discardableResult
     func enqueueMicrophoneFrame(
         _ frame: CapturedAudioFrame,
-        receivedAt: TimeInterval
+        now: TimeInterval
     ) -> Bool {
-        events.enqueue(
+        let receivedAt = externalMicrophoneClock.candidateReceivedAt(
+            frameTimestamp: frame.timestamp,
+            now: now
+        )
+        guard events.enqueue(
             .frame(
                 frame,
                 source: .microphone,
                 receivedAt: receivedAt
             )
+        ) else {
+            return false
+        }
+        externalMicrophoneClock.commitAccepted(
+            frameTimestamp: frame.timestamp,
+            receivedAt: receivedAt
         )
+        return true
     }
 
     func closeAfterMicrophoneFailure(_ error: Error) {

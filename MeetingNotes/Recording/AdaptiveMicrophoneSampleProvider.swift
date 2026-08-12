@@ -62,42 +62,124 @@ enum MicrophoneHardwareChangePolicy {
             }
         }
 
-        func preferredAvailableInFreshSnapshot() -> Bool {
+        func avFoundationPreferredAvailable(
+            in snapshot: AudioInputDiscoverySnapshot
+        ) -> Bool {
             guard isExplicit else { return false }
             if let legacyID = preferred.legacyAVFoundationID,
-               freshSnapshot.avFoundationInputs.contains(where: {
+               snapshot.avFoundationInputs.contains(where: {
                    $0.uniqueID == legacyID && $0.isUsable
                }) {
                 return true
             }
-            if let stableID = preferred.stableID {
-                if stableID.hasPrefix("avf:"),
-                   freshSnapshot.avFoundationInputs.contains(where: {
-                       "avf:\($0.uniqueID)" == stableID && $0.isUsable
-                   }) {
-                    return true
-                }
-                if stableID.hasPrefix("ca:"),
-                   freshSnapshot.coreAudioInputs.contains(where: {
-                       "ca:\($0.uid)" == stableID && $0.isUsable
-                   }) {
-                    return true
-                }
-            }
-            if let coreAudioUID = preferred.coreAudioUID,
-               freshSnapshot.coreAudioInputs.contains(where: {
-                   $0.uid == coreAudioUID && $0.isUsable
+            if let stableID = preferred.stableID,
+               stableID.hasPrefix("avf:"),
+               snapshot.avFoundationInputs.contains(where: {
+                   "avf:\($0.uniqueID)" == stableID && $0.isUsable
                }) {
                 return true
             }
             return false
         }
 
-        func preferredReappeared() -> Bool {
-            guard currentResolution?.kind != .preferred else {
-                return false
+        func coreAudioPreferredAvailable(
+            in snapshot: AudioInputDiscoverySnapshot
+        ) -> Bool {
+            guard isExplicit else { return false }
+            if let coreAudioUID = preferred.coreAudioUID,
+               snapshot.coreAudioInputs.contains(where: {
+                   $0.uid == coreAudioUID && $0.isUsable
+               }) {
+                return true
             }
-            return preferredAvailableInFreshSnapshot()
+            if let stableID = preferred.stableID,
+               stableID.hasPrefix("ca:"),
+               snapshot.coreAudioInputs.contains(where: {
+                   "ca:\($0.uid)" == stableID && $0.isUsable
+               }) {
+                return true
+            }
+            return false
+        }
+
+        func backendReappeared(
+            _ backend: MicrophoneCaptureBackend
+        ) -> Bool {
+            switch backend {
+            case .avFoundation:
+                return !avFoundationPreferredAvailable(
+                    in: previousSnapshot
+                ) && avFoundationPreferredAvailable(
+                    in: freshSnapshot
+                )
+            case .coreAudioFallback:
+                return !coreAudioPreferredAvailable(
+                    in: previousSnapshot
+                ) && coreAudioPreferredAvailable(
+                    in: freshSnapshot
+                )
+            }
+        }
+
+        func resolvedPreferredPhysicalStableID() -> String? {
+            let freshInputs =
+                AudioInputDeviceIdentityMatcher.mergedInputs(
+                    from: freshSnapshot
+                )
+            return freshInputs.first(where: {
+                matchesPreferred($0)
+            })?.stableID
+        }
+
+        func matchesPreferred(_ device: AudioInputDevice) -> Bool {
+            if let stableID = preferred.stableID,
+               !stableID.isEmpty,
+               device.stableID == stableID {
+                return true
+            }
+            if let legacyID = preferred.legacyAVFoundationID,
+               !legacyID.isEmpty,
+               device.avFoundationUniqueID == legacyID
+                || device.id == legacyID {
+                return true
+            }
+            if let coreAudioUID = preferred.coreAudioUID,
+               !coreAudioUID.isEmpty,
+               device.coreAudioUID == coreAudioUID {
+                return true
+            }
+            return false
+        }
+
+        func clearedKeys(
+            for backend: MicrophoneCaptureBackend
+        ) -> Set<MicrophoneCaptureAttemptKey> {
+            guard let physicalStableID =
+                resolvedPreferredPhysicalStableID() else {
+                return []
+            }
+            return Set(
+                attemptedCaptures.filter {
+                    $0.physicalStableID == physicalStableID
+                        && $0.backend == backend
+                }
+            )
+        }
+
+        func clearedKeysForReappearedBackends()
+            -> Set<MicrophoneCaptureAttemptKey> {
+            var result: Set<MicrophoneCaptureAttemptKey> = []
+            if backendReappeared(.avFoundation) {
+                result.formUnion(
+                    clearedKeys(for: .avFoundation)
+                )
+            }
+            if backendReappeared(.coreAudioFallback) {
+                result.formUnion(
+                    clearedKeys(for: .coreAudioFallback)
+                )
+            }
+            return result
         }
 
         func targetChanged() -> Bool {
@@ -117,36 +199,6 @@ enum MicrophoneHardwareChangePolicy {
             }
         }
 
-        func clearingKeys() -> Set<MicrophoneCaptureAttemptKey> {
-            var result: Set<MicrophoneCaptureAttemptKey> = []
-            if let stableID = preferred.stableID {
-                result.formUnion(
-                    attemptedCaptures.filter {
-                        $0.physicalStableID == stableID
-                    }
-                )
-            }
-            if let legacyID = preferred.legacyAVFoundationID {
-                let avfStableID = "avf:\(legacyID)"
-                result.formUnion(
-                    attemptedCaptures.filter {
-                        $0.physicalStableID == avfStableID
-                            && $0.backend == .avFoundation
-                    }
-                )
-            }
-            if let coreAudioUID = preferred.coreAudioUID {
-                let caStableID = "ca:\(coreAudioUID)"
-                result.formUnion(
-                    attemptedCaptures.filter {
-                        $0.physicalStableID == caStableID
-                            && $0.backend == .coreAudioFallback
-                    }
-                )
-            }
-            return result
-        }
-
         switch event {
         case let .avFoundationDisconnected(uniqueID):
             if case let .avFoundation(deviceID)? =
@@ -161,18 +213,24 @@ enum MicrophoneHardwareChangePolicy {
             let matchesPreferred =
                 preferred.legacyAVFoundationID == uniqueID
                 || preferred.stableID == stableID
-            if isExplicit, matchesPreferred, preferredReappeared() {
-                let cleared = attemptedCaptures.filter {
-                    $0.backend == .avFoundation
-                        && $0.physicalStableID == stableID
-                }
-                return .rediscoverClearing(Set(cleared))
+            if isExplicit, matchesPreferred,
+               backendReappeared(.avFoundation) {
+                return .rediscoverClearing(
+                    clearedKeys(for: .avFoundation)
+                )
             }
             return .ignore
 
         case .coreAudioDeviceListChanged:
-            if preferredReappeared() {
-                return .rediscoverClearing(clearingKeys())
+            if backendReappeared(.coreAudioFallback) {
+                return .rediscoverClearing(
+                    clearedKeys(for: .coreAudioFallback)
+                )
+            }
+            if backendReappeared(.avFoundation) {
+                return .rediscoverClearing(
+                    clearedKeys(for: .avFoundation)
+                )
             }
             if currentBackendAvailable() {
                 return .ignore
@@ -185,8 +243,10 @@ enum MicrophoneHardwareChangePolicy {
                    currentBackendAvailable() {
                     return .ignore
                 }
-                if preferredReappeared() {
-                    return .rediscoverClearing(clearingKeys())
+                let reappeared =
+                    clearedKeysForReappearedBackends()
+                if !reappeared.isEmpty {
+                    return .rediscoverClearing(reappeared)
                 }
                 return .ignore
             }
@@ -196,8 +256,10 @@ enum MicrophoneHardwareChangePolicy {
             if !currentBackendAvailable() {
                 return .rediscover
             }
-            if preferredReappeared() {
-                return .rediscoverClearing(clearingKeys())
+            let reappeared =
+                clearedKeysForReappearedBackends()
+            if !reappeared.isEmpty {
+                return .rediscoverClearing(reappeared)
             }
             if !isExplicit, targetChanged() {
                 return .rediscover
@@ -318,6 +380,8 @@ actor AdaptiveMicrophoneSampleProvider:
     private var activeToken: UUID?
     private var relay: AdaptiveMicrophoneSampleRelay?
     private var runTask: Task<Void, Never>?
+    private var startupContinuation:
+        CheckedContinuation<Void, Error>?
     private var currentProvider: (any MicrophoneSampleProviding)?
     private var isPaused = false
     private var backendFrameCount = 0
@@ -409,11 +473,19 @@ actor AdaptiveMicrophoneSampleProvider:
         lastBackendError = nil
         backendFrameCount = 0
         timelineNormalizer.reset()
-        runTask = Task { [weak self] in
-            await self?.recoveryLoop(
-                token: token,
-                deviceIDOverride: deviceID
-            )
+        do {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                startupContinuation = continuation
+                runTask = Task { [weak self] in
+                    await self?.recoveryLoop(
+                        token: token,
+                        deviceIDOverride: deviceID
+                    )
+                }
+            }
+        } catch {
+            throw error
         }
         return pair.stream
     }
@@ -443,6 +515,10 @@ actor AdaptiveMicrophoneSampleProvider:
         let task = runTask
         runTask = nil
         task?.cancel()
+        if let continuation = startupContinuation {
+            startupContinuation = nil
+            continuation.resume(throwing: CancellationError())
+        }
         let provider = currentProvider
         currentProvider = nil
         await provider?.stop()
@@ -653,6 +729,7 @@ actor AdaptiveMicrophoneSampleProvider:
         do {
             stream = try await provider.start(deviceID: deviceID)
             runtime.telemetry.captureStarted = true
+            signalStartupSuccess(token: token)
             timelineNormalizer.beginBackend()
         } catch {
             changeTask.cancel()
@@ -805,10 +882,25 @@ actor AdaptiveMicrophoneSampleProvider:
         guard activeToken == token else { return }
         activeToken = nil
         runTask = nil
+        if let continuation = startupContinuation {
+            startupContinuation = nil
+            continuation.resume(
+                throwing: error ?? CancellationError()
+            )
+        }
         let relay = self.relay
         self.relay = nil
         relay?.finish(throwing: error)
         runtime.status = error == nil ? .stopped : .failed
+    }
+
+    private func signalStartupSuccess(token: UUID) {
+        guard activeToken == token,
+              let continuation = startupContinuation else {
+            return
+        }
+        startupContinuation = nil
+        continuation.resume()
     }
 
     private func handleTermination(token: UUID) async {
@@ -930,45 +1022,117 @@ private final class AdaptiveMicrophoneSampleRelay:
     }
 }
 
+struct CoreAudioInputHardwareObserverSeams: Sendable {
+    let addCoreAudioListener:
+        @Sendable (
+            AudioObjectPropertyAddress,
+            @escaping AudioObjectPropertyListenerBlock
+        ) -> Bool
+    let removeCoreAudioListener:
+        @Sendable (
+            AudioObjectPropertyAddress,
+            @escaping AudioObjectPropertyListenerBlock
+        ) -> Void
+    let addNotificationObserver:
+        @Sendable (
+            Notification.Name,
+            @escaping @Sendable (Notification) -> Void
+        ) -> NSObjectProtocol
+    let removeNotificationObserver:
+        @Sendable (NSObjectProtocol) -> Void
+
+    static func live(
+        systemObjectID: AudioObjectID,
+        callbackQueue: DispatchQueue
+    ) -> CoreAudioInputHardwareObserverSeams {
+        CoreAudioInputHardwareObserverSeams(
+            addCoreAudioListener: { address, listener in
+                var mutableAddress = address
+                return AudioObjectAddPropertyListenerBlock(
+                    systemObjectID,
+                    &mutableAddress,
+                    callbackQueue,
+                    listener
+                ) == noErr
+            },
+            removeCoreAudioListener: { address, listener in
+                var mutableAddress = address
+                AudioObjectRemovePropertyListenerBlock(
+                    systemObjectID,
+                    &mutableAddress,
+                    callbackQueue,
+                    listener
+                )
+            },
+            addNotificationObserver: { name, handler in
+                NotificationCenter.default.addObserver(
+                    forName: name,
+                    object: nil,
+                    queue: nil,
+                    using: handler
+                )
+            },
+            removeNotificationObserver: { token in
+                NotificationCenter.default.removeObserver(token)
+            }
+        )
+    }
+}
+
 final class LiveCoreAudioInputHardwareObserver:
     CoreAudioInputHardwareObserving,
     @unchecked Sendable {
     private let lock = NSLock()
-    private let callbackQueue = DispatchQueue(
-        label: "MeetingNotes.audio-input-changes"
-    )
-    private let systemObjectID = AudioObjectID(kAudioObjectSystemObject)
+    private let callbackQueue: DispatchQueue
+    private let systemObjectID: AudioObjectID
+    private let seams: CoreAudioInputHardwareObserverSeams
     private var continuations:
         [UUID: AsyncStream<MicrophoneHardwareChangeEvent>.Continuation] =
             [:]
     private var listener: AudioObjectPropertyListenerBlock?
     private var registeredAddresses: [AudioObjectPropertyAddress] = []
     private var notificationTokens: [NSObjectProtocol] = []
-    private var isObserving = false
 
-    deinit {
-        stopObserving()
+    init(
+        seams: CoreAudioInputHardwareObserverSeams? = nil
+    ) {
+        let systemObjectID =
+            AudioObjectID(kAudioObjectSystemObject)
+        let callbackQueue = DispatchQueue(
+            label: "MeetingNotes.audio-input-changes"
+        )
+        self.systemObjectID = systemObjectID
+        self.callbackQueue = callbackQueue
+        self.seams = seams
+            ?? .live(
+                systemObjectID: systemObjectID,
+                callbackQueue: callbackQueue
+            )
     }
 
     func events() -> AsyncStream<MicrophoneHardwareChangeEvent> {
         let id = UUID()
         return AsyncStream { continuation in
             lock.lock()
+            let wasEmpty = continuations.isEmpty
             continuations[id] = continuation
+            if wasEmpty {
+                registerNativeObservationLocked()
+            }
             lock.unlock()
-            startObserving()
             continuation.onTermination = { [weak self] _ in
                 self?.remove(id)
             }
         }
     }
 
-    private func startObserving() {
+    deinit {
         lock.lock()
-        guard !isObserving else {
-            lock.unlock()
-            return
-        }
+        unregisterNativeObservationLocked()
+        lock.unlock()
+    }
+
+    private func registerNativeObservationLocked() {
         let listener: AudioObjectPropertyListenerBlock = {
             [weak self] _, addresses in
             self?.handleCoreAudioChange(
@@ -977,25 +1141,15 @@ final class LiveCoreAudioInputHardwareObserver:
         }
         var registered: [AudioObjectPropertyAddress] = []
         for address in Self.observedAddresses {
-            var mutableAddress = address
-            let status = AudioObjectAddPropertyListenerBlock(
-                systemObjectID,
-                &mutableAddress,
-                callbackQueue,
-                listener
-            )
-            if status == noErr {
+            if seams.addCoreAudioListener(address, listener) {
                 registered.append(address)
             }
         }
         self.listener = listener
         registeredAddresses = registered
-        let notificationCenter = NotificationCenter.default
         notificationTokens = [
-            notificationCenter.addObserver(
-                forName: AVCaptureDevice.wasConnectedNotification,
-                object: nil,
-                queue: nil
+            seams.addNotificationObserver(
+                AVCaptureDevice.wasConnectedNotification
             ) { [weak self] notification in
                 guard let device =
                     notification.object as? AVCaptureDevice,
@@ -1008,10 +1162,8 @@ final class LiveCoreAudioInputHardwareObserver:
                     )
                 )
             },
-            notificationCenter.addObserver(
-                forName: AVCaptureDevice.wasDisconnectedNotification,
-                object: nil,
-                queue: nil
+            seams.addNotificationObserver(
+                AVCaptureDevice.wasDisconnectedNotification
             ) { [weak self] notification in
                 guard let device =
                     notification.object as? AVCaptureDevice,
@@ -1024,50 +1176,34 @@ final class LiveCoreAudioInputHardwareObserver:
                     )
                 )
             },
-            notificationCenter.addObserver(
-                forName: NSApplication.didBecomeActiveNotification,
-                object: nil,
-                queue: nil
+            seams.addNotificationObserver(
+                NSApplication.didBecomeActiveNotification
             ) { [weak self] _ in
                 self?.notify(.applicationBecameActive)
             },
         ]
-        isObserving = !registered.isEmpty || !notificationTokens.isEmpty
-        lock.unlock()
     }
 
     private func remove(_ id: UUID) {
         lock.lock()
         continuations.removeValue(forKey: id)
-        let hasSubscribers = !continuations.isEmpty
-        lock.unlock()
-        if !hasSubscribers {
-            stopObserving()
+        if continuations.isEmpty {
+            unregisterNativeObservationLocked()
         }
+        lock.unlock()
     }
 
-    private func stopObserving() {
-        lock.lock()
-        guard let listener else {
-            lock.unlock()
-            return
+    private func unregisterNativeObservationLocked() {
+        if let listener {
+            for address in registeredAddresses {
+                seams.removeCoreAudioListener(address, listener)
+            }
         }
-        for address in registeredAddresses {
-            var mutableAddress = address
-            AudioObjectRemovePropertyListenerBlock(
-                systemObjectID,
-                &mutableAddress,
-                callbackQueue,
-                listener
-            )
-        }
-        self.listener = nil
+        listener = nil
         registeredAddresses = []
         let tokens = notificationTokens
         notificationTokens = []
-        isObserving = false
-        lock.unlock()
-        tokens.forEach(NotificationCenter.default.removeObserver)
+        tokens.forEach(seams.removeNotificationObserver)
     }
 
     private func handleCoreAudioChange(
