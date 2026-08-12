@@ -75,6 +75,98 @@ final class AudioInputDiscoveryTests: XCTestCase {
         XCTAssertTrue(device.isCoreAudioAvailable)
     }
 
+    func testAmbiguousDuplicateNamesAreNotMergedByEnumerationOrder()
+        throws {
+        let avfA = AVFoundationInputDevice(
+            uniqueID: "avf-a",
+            name: "USB Mic",
+            manufacturer: "Apple",
+            isConnected: true,
+            isSuspended: false,
+            isInUseByAnotherApplication: false,
+            isSystemDefault: false
+        )
+        let avfB = AVFoundationInputDevice(
+            uniqueID: "avf-b",
+            name: "USB Mic",
+            manufacturer: "Apple",
+            isConnected: true,
+            isSuspended: false,
+            isInUseByAnotherApplication: false,
+            isSystemDefault: false
+        )
+        let caA = CoreAudioInputDevice(
+            deviceID: AudioDeviceID(10),
+            uid: "ca-a",
+            name: "USB Mic",
+            isAlive: true,
+            inputChannelCount: 1,
+            isSystemDefault: false
+        )
+        let caB = CoreAudioInputDevice(
+            deviceID: AudioDeviceID(20),
+            uid: "ca-b",
+            name: "USB Mic",
+            isAlive: true,
+            inputChannelCount: 1,
+            isSystemDefault: false
+        )
+
+        let merged = AudioInputDeviceIdentityMatcher.mergedInputs(
+            from: AudioInputDiscoverySnapshot(
+                avFoundationInputs: [avfA, avfB],
+                coreAudioInputs: [caB, caA]
+            )
+        )
+
+        XCTAssertEqual(merged.count, 4)
+        XCTAssertTrue(
+            merged.filter {
+                $0.isAVFoundationAvailable
+                    && $0.isCoreAudioAvailable
+            }.isEmpty
+        )
+        XCTAssertTrue(merged.contains { $0.id == "avf-a" })
+        XCTAssertTrue(merged.contains { $0.id == "avf-b" })
+        XCTAssertTrue(merged.contains { $0.id == "ca:ca-a" })
+        XCTAssertTrue(merged.contains { $0.id == "ca:ca-b" })
+    }
+
+    func testUniqueNameFallbackStillMergesSingleUnambiguousPair()
+        throws {
+        let avf = AVFoundationInputDevice(
+            uniqueID: "avf-unique",
+            name: "Solo Mic",
+            manufacturer: "Apple",
+            isConnected: true,
+            isSuspended: false,
+            isInUseByAnotherApplication: false,
+            isSystemDefault: false
+        )
+        let coreAudio = CoreAudioInputDevice(
+            deviceID: AudioDeviceID(30),
+            uid: "ca-unique",
+            name: "Solo Mic",
+            isAlive: true,
+            inputChannelCount: 1,
+            isSystemDefault: false
+        )
+
+        let merged = AudioInputDeviceIdentityMatcher.mergedInputs(
+            from: AudioInputDiscoverySnapshot(
+                avFoundationInputs: [avf],
+                coreAudioInputs: [coreAudio]
+            )
+        )
+
+        let device = try XCTUnwrap(merged.first)
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertTrue(device.isAVFoundationAvailable)
+        XCTAssertTrue(device.isCoreAudioAvailable)
+        XCTAssertEqual(device.avFoundationUniqueID, "avf-unique")
+        XCTAssertEqual(device.coreAudioUID, "ca-unique")
+    }
+
     func testCoreAudioOnlyDeviceUsesNamespacedStableID() throws {
         let coreAudio = CoreAudioInputDevice(
             deviceID: AudioDeviceID(9),

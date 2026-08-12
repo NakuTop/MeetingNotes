@@ -234,6 +234,10 @@ private enum CoreAudioSessionTestError: Error, Equatable, Sendable {
     case startFailed
 }
 
+private enum FakeAUHALTestError: Error {
+    case maximumFramesReadFailed
+}
+
 private actor FakeCoreAudioMicrophoneSession:
     CoreAudioMicrophoneSessionManaging {
     private var configuredIDs: [AudioDeviceID?] = []
@@ -340,6 +344,7 @@ private final class FakeCoreAudioMicrophoneAudioUnitAPI:
     private let inputFormat: AudioStreamBasicDescription
     private let maximumFramesPerSlice: UInt32
     private var renderStatus: OSStatus
+    private var maximumFramesPerSliceError: Error?
     private let fakeUnit: AudioUnit
 
     init(
@@ -414,8 +419,20 @@ private final class FakeCoreAudioMicrophoneAudioUnitAPI:
     func getMaximumFramesPerSlice(
         unit: AudioUnit
     ) throws -> UInt32 {
+        lock.lock()
+        let error = maximumFramesPerSliceError
+        lock.unlock()
+        if let error {
+            throw error
+        }
         record(.readMaximumFramesPerSlice)
         return maximumFramesPerSlice
+    }
+
+    func setMaximumFramesPerSliceError(_ error: Error?) {
+        lock.lock()
+        maximumFramesPerSliceError = error
+        lock.unlock()
     }
 
     func setInputCallback(
@@ -826,6 +843,49 @@ final class CoreAudioMicrophoneLiveSessionTests: XCTestCase {
         )
         let finalNext = try await iterator.next()
         XCTAssertNotNil(finalNext)
+        await provider.stop()
+    }
+
+    func testLiveSessionUsesConservativeCapacityWhenMaximumFramesPropertyFails()
+        async throws {
+        let api = FakeCoreAudioMicrophoneAudioUnitAPI(
+            sampleRate: 48_000,
+            channelCount: 1
+        )
+        api.setMaximumFramesPerSliceError(
+            FakeAUHALTestError.maximumFramesReadFailed
+        )
+        api.setRenderHandler { _, frames, data in
+            let bufferList = data.pointee
+            guard let mData = bufferList.mBuffers.mData else {
+                return OSStatus(-1)
+            }
+            let floats = mData.assumingMemoryBound(to: Float.self)
+            for index in 0..<Int(frames) {
+                floats[index] = 0.25
+            }
+            return noErr
+        }
+        let session = LiveCoreAudioMicrophoneSession(api: api)
+        let provider = CoreAudioMicrophoneSampleProvider(
+            session: session,
+            resolver: StaticCoreAudioDeviceIDResolver(
+                idsByUID: ["mic": AudioDeviceID(42)],
+                defaultID: AudioDeviceID(42)
+            )
+        )
+        let stream = try await provider.start(deviceID: "mic")
+
+        let status = CoreAudioMicrophoneTestHelper
+            .invokeCapturedCallback(
+                api: api,
+                frames: 8192
+            )
+        XCTAssertEqual(status, noErr)
+
+        var iterator = stream.makeAsyncIterator()
+        let sample = try await iterator.next()
+        XCTAssertEqual(sample?.buffer.frameLength, 8192)
         await provider.stop()
     }
 

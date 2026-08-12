@@ -293,10 +293,8 @@ final class AdaptiveMicrophoneSampleProviderTests: XCTestCase {
             )
         )
 
-        let stream = try await provider.start(deviceID: nil)
-        var iterator = stream.makeAsyncIterator()
         do {
-            _ = try await iterator.next()
+            _ = try await provider.start(deviceID: nil)
             XCTFail("Expected capture failure")
         } catch {
             XCTAssertEqual(
@@ -744,6 +742,340 @@ final class AdaptiveMicrophoneSampleProviderTests: XCTestCase {
         )
     }
 
+    func testAdaptiveStartWaitsUntilConcreteBackendHasStarted()
+        async throws {
+        let avf = BlockingStartMicrophoneProvider()
+        let coreAudio = FakeMicrophoneBackendProvider(
+            mode: .yieldsSamples
+        )
+        let provider = makeProvider(
+            avfProvider: avf,
+            coreAudioProvider: coreAudio,
+            discovery: StaticAudioInputDiscoveryProvider(
+                snapshot: snapshotWithAVFDevices(
+                    defaultID: "A",
+                    ids: ["A"]
+                )
+            )
+        )
+        let returned = ReturnedFlag()
+        let startTask = Task {
+            let stream = try await provider.start(deviceID: nil)
+            returned.mark()
+            return stream
+        }
+
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertFalse(returned.isSet())
+
+        avf.release()
+        _ = try await startTask.value
+
+        XCTAssertTrue(returned.isSet())
+        XCTAssertEqual(avf.startCount(), 1)
+        await provider.stop()
+    }
+
+    func testAdaptiveStartWaitsForCoreAudioFallbackAfterAVFoundationStartFailure()
+        async throws {
+        let avf = FakeMicrophoneBackendProvider(
+            mode: .startFails,
+            startError: MicrophoneCaptureError.unableToStartSession
+        )
+        let coreAudio = BlockingStartMicrophoneProvider()
+        let provider = makeProvider(
+            avfProvider: avf,
+            coreAudioProvider: coreAudio,
+            discovery: StaticAudioInputDiscoveryProvider(
+                snapshot: mergedSameIDSnapshot(
+                    avfIsDefault: true,
+                    coreAudioIsDefault: true
+                )
+            )
+        )
+        let returned = ReturnedFlag()
+        let startTask = Task {
+            let stream = try await provider.start(deviceID: nil)
+            returned.mark()
+            return stream
+        }
+
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertFalse(returned.isSet())
+        let avfStarts = await avf.startCount()
+        XCTAssertEqual(avfStarts, 1)
+
+        coreAudio.release()
+        _ = try await startTask.value
+
+        XCTAssertTrue(returned.isSet())
+        let finalAVFStarts = await avf.startCount()
+        let coreAudioStarts = coreAudio.startCount()
+        XCTAssertEqual(finalAVFStarts, 1)
+        XCTAssertEqual(coreAudioStarts, 1)
+        await provider.stop()
+    }
+
+    func testAdaptiveStartThrowsWhenNoUsableInputExists() async {
+        let avf = FakeMicrophoneBackendProvider(mode: .yieldsSamples)
+        let coreAudio = FakeMicrophoneBackendProvider(
+            mode: .yieldsSamples
+        )
+        let provider = makeProvider(
+            avfProvider: avf,
+            coreAudioProvider: coreAudio,
+            discovery: StaticAudioInputDiscoveryProvider(
+                snapshot: AudioInputDiscoverySnapshot()
+            )
+        )
+
+        do {
+            _ = try await provider.start(deviceID: nil)
+            XCTFail("Expected noUsableInputDevice")
+        } catch {
+            XCTAssertEqual(
+                error as? MicrophoneCaptureError,
+                .noUsableInputDevice
+            )
+        }
+        let avfStarts = await avf.startCount()
+        let coreAudioStarts = await coreAudio.startCount()
+        XCTAssertEqual(avfStarts, 0)
+        XCTAssertEqual(coreAudioStarts, 0)
+    }
+
+    func testAVFoundationReconnectClearsOnlyAVFAttemptForSamePhysicalDevice() {
+        let preferred = PreferredAudioInput(
+            backend: .automatic,
+            stableID: "avf:A",
+            legacyAVFoundationID: "A",
+            coreAudioUID: nil
+        )
+        let current = ResolvedMicrophoneCapture(
+            plan: .avFoundation(deviceID: "B"),
+            kind: .fallback(unavailablePreferredID: "A"),
+            device: AudioInputDevice(
+                id: "B",
+                name: "B",
+                manufacturer: "Test",
+                isConnected: true,
+                isSuspended: false,
+                isInUseByAnotherApplication: false,
+                isSystemDefault: true,
+                avFoundationUniqueID: "B",
+                isAVFoundationAvailable: true
+            )
+        )
+        let attempted: Set<MicrophoneCaptureAttemptKey> = [
+            MicrophoneCaptureAttemptKey(
+                physicalStableID: "avf:A",
+                backend: .avFoundation
+            ),
+            MicrophoneCaptureAttemptKey(
+                physicalStableID: "avf:A",
+                backend: .coreAudioFallback
+            ),
+        ]
+
+        let decision = MicrophoneHardwareChangePolicy.decision(
+            event: .avFoundationConnected(uniqueID: "A"),
+            preferred: preferred,
+            currentResolution: current,
+            previousSnapshot: snapshotWithAVFDevices(
+                defaultID: "B",
+                ids: ["B"]
+            ),
+            freshSnapshot: snapshotWithAVFDevices(
+                defaultID: "A",
+                ids: ["A", "B"]
+            ),
+            attemptedCaptures: attempted
+        )
+
+        XCTAssertEqual(
+            decision,
+            .rediscoverClearing(
+                [
+                    MicrophoneCaptureAttemptKey(
+                        physicalStableID: "avf:A",
+                        backend: .avFoundation
+                    )
+                ]
+            )
+        )
+    }
+
+    func testCoreAudioReconnectClearsOnlyCoreAudioAttemptForMergedPhysicalDevice() {
+        let preferred = PreferredAudioInput(
+            backend: .automatic,
+            stableID: "avf:A",
+            legacyAVFoundationID: "A",
+            coreAudioUID: "A"
+        )
+        let current = ResolvedMicrophoneCapture(
+            plan: .avFoundation(deviceID: "B"),
+            kind: .fallback(unavailablePreferredID: "A"),
+            device: AudioInputDevice(
+                id: "B",
+                name: "B",
+                manufacturer: "Test",
+                isConnected: true,
+                isSuspended: false,
+                isInUseByAnotherApplication: false,
+                isSystemDefault: true,
+                avFoundationUniqueID: "B",
+                isAVFoundationAvailable: true
+            )
+        )
+        let attempted: Set<MicrophoneCaptureAttemptKey> = [
+            MicrophoneCaptureAttemptKey(
+                physicalStableID: "avf:A",
+                backend: .avFoundation
+            ),
+            MicrophoneCaptureAttemptKey(
+                physicalStableID: "avf:A",
+                backend: .coreAudioFallback
+            ),
+        ]
+
+        let decision = MicrophoneHardwareChangePolicy.decision(
+            event: .coreAudioDeviceListChanged,
+            preferred: preferred,
+            currentResolution: current,
+            previousSnapshot: snapshotWithAVFDevices(
+                defaultID: "A",
+                ids: ["A"]
+            ),
+            freshSnapshot: AudioInputDiscoverySnapshot(
+                avFoundationInputs: [
+                    AVFoundationInputDevice(
+                        uniqueID: "A",
+                        name: "A",
+                        manufacturer: "Apple",
+                        isConnected: true,
+                        isSuspended: false,
+                        isInUseByAnotherApplication: false,
+                        isSystemDefault: true
+                    )
+                ],
+                coreAudioInputs: [
+                    CoreAudioInputDevice(
+                        deviceID: AudioDeviceID(42),
+                        uid: "A",
+                        name: "A",
+                        isAlive: true,
+                        inputChannelCount: 1,
+                        isSystemDefault: true
+                    )
+                ]
+            ),
+            attemptedCaptures: attempted
+        )
+
+        XCTAssertEqual(
+            decision,
+            .rediscoverClearing(
+                [
+                    MicrophoneCaptureAttemptKey(
+                        physicalStableID: "avf:A",
+                        backend: .coreAudioFallback
+                    )
+                ]
+            )
+        )
+    }
+
+    func testPreferredDeviceStillPresentIsNotTreatedAsReappeared() {
+        let preferred = PreferredAudioInput(
+            backend: .automatic,
+            stableID: "avf:A",
+            legacyAVFoundationID: "A",
+            coreAudioUID: nil
+        )
+        let current = ResolvedMicrophoneCapture(
+            plan: .avFoundation(deviceID: "B"),
+            kind: .fallback(unavailablePreferredID: "A"),
+            device: AudioInputDevice(
+                id: "B",
+                name: "B",
+                manufacturer: "Test",
+                isConnected: true,
+                isSuspended: false,
+                isInUseByAnotherApplication: false,
+                isSystemDefault: true,
+                avFoundationUniqueID: "B",
+                isAVFoundationAvailable: true
+            )
+        )
+
+        let decision = MicrophoneHardwareChangePolicy.decision(
+            event: .coreAudioDeviceListChanged,
+            preferred: preferred,
+            currentResolution: current,
+            previousSnapshot: snapshotWithAVFDevices(
+                defaultID: "A",
+                ids: ["A", "B"]
+            ),
+            freshSnapshot: snapshotWithAVFDevices(
+                defaultID: "A",
+                ids: ["A", "B"]
+            ),
+            attemptedCaptures: []
+        )
+
+        XCTAssertEqual(decision, .ignore)
+    }
+
+    func testObserverSubscriberReplacementDoesNotLoseNativeObservation()
+        async throws {
+        let recorder = ObserverRegistrationRecorder()
+        let seams = CoreAudioInputHardwareObserverSeams(
+            addCoreAudioListener: { _, _ in
+                recorder.recordCoreAudioAdd()
+            },
+            removeCoreAudioListener: { _, _ in
+                recorder.recordCoreAudioRemove()
+            },
+            addNotificationObserver: { name, handler in
+                recorder.addNotificationObserver(
+                    name: name,
+                    handler: handler
+                )
+            },
+            removeNotificationObserver: { token in
+                recorder.recordNotificationRemove(token)
+            }
+        )
+        let observer = LiveCoreAudioInputHardwareObserver(seams: seams)
+        var streamA: AsyncStream<MicrophoneHardwareChangeEvent>? =
+            observer.events()
+        var iteratorA = streamA?.makeAsyncIterator()
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(recorder.activeCoreAudioRegistrationCount(), 2)
+
+        do {
+            let streamB = observer.events()
+            var iteratorB = streamB.makeAsyncIterator()
+
+            streamA = nil
+            iteratorA = nil
+            try await Task.sleep(for: .milliseconds(50))
+            XCTAssertEqual(
+                recorder.activeCoreAudioRegistrationCount(),
+                2
+            )
+
+            recorder.emit(
+                NSApplication.didBecomeActiveNotification
+            )
+            let event = try await iteratorB.next()
+            XCTAssertEqual(event, .applicationBecameActive)
+        }
+
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(recorder.activeCoreAudioRegistrationCount(), 0)
+    }
+
     private func snapshotWithAVFDevices(
         defaultID: String?,
         ids: [String]
@@ -1163,6 +1495,126 @@ private final class MutablePermissionChecker:
         return statusValue
     }
 }
+
+private final class BlockingStartMicrophoneProvider:
+    MicrophoneSampleProviding,
+    @unchecked Sendable {
+    private let lock = NSLock()
+    private var startContinuation: CheckedContinuation<Void, Never>?
+    private var startedIDs: [String?] = []
+    private var stops = 0
+
+    func start(
+        deviceID: String?
+    ) async throws -> AsyncThrowingStream<MicrophoneSample, Error> {
+        lock.withLock {
+            startedIDs.append(deviceID)
+        }
+        await withCheckedContinuation { continuation in
+            lock.withLock {
+                startContinuation = continuation
+            }
+        }
+        return AsyncThrowingStream { continuation in
+            continuation.finish()
+        }
+    }
+
+    func release() {
+        let continuation = lock.withLock {
+            let value = startContinuation
+            startContinuation = nil
+            return value
+        }
+        continuation?.resume()
+    }
+
+    func pause() async throws {}
+    func resume() async throws {}
+
+    func stop() async {
+        lock.withLock {
+            stops += 1
+        }
+    }
+
+    func startCount() -> Int {
+        lock.withLock { startedIDs.count }
+    }
+
+    func stopCount() -> Int {
+        lock.withLock { stops }
+    }
+}
+
+private final class ReturnedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func mark() {
+        lock.withLock {
+            value = true
+        }
+    }
+
+    func isSet() -> Bool {
+        lock.withLock { value }
+    }
+}
+
+private final class ObserverRegistrationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var coreAudioAdds = 0
+    private var coreAudioRemoves = 0
+    private var handlers:
+        [Notification.Name: @Sendable (Notification) -> Void] = [:]
+
+    func recordCoreAudioAdd() -> Bool {
+        lock.withLock {
+            coreAudioAdds += 1
+            print("DEBUG add count=\(coreAudioAdds)")
+            return true
+        }
+    }
+
+    func recordCoreAudioRemove() {
+        lock.withLock {
+            coreAudioRemoves += 1
+            print("DEBUG remove count=\(coreAudioRemoves)")
+        }
+    }
+
+    func activeCoreAudioRegistrationCount() -> Int {
+        lock.withLock {
+            coreAudioAdds - coreAudioRemoves
+        }
+    }
+
+    func addNotificationObserver(
+        name: Notification.Name,
+        handler: @escaping @Sendable (Notification) -> Void
+    ) -> NSObjectProtocol {
+        lock.withLock {
+            handlers[name] = handler
+            return ObserverToken()
+        }
+    }
+
+    func recordNotificationRemove(_ token: NSObjectProtocol) {
+        lock.withLock {
+            _ = token
+        }
+    }
+
+    func emit(_ name: Notification.Name) {
+        let handler = lock.withLock {
+            handlers[name]
+        }
+        handler?(Notification(name: name))
+    }
+}
+
+private final class ObserverToken: NSObject {}
 
 final class MicrophoneSampleTimelineNormalizerTests: XCTestCase {
     func testTimelineContinuesAcrossUnrelatedBackendSampleTimeOrigins()

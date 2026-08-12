@@ -57,6 +57,52 @@ final class ScreenAudioCaptureConfigurationTests: XCTestCase {
         XCTAssertEqual(frames[0].timestamp, 120, accuracy: 0.000_001)
     }
 
+    func testExternalMicrophoneClockUsesFirstAcceptedFrameAsOrigin() {
+        var clock = ScreenAudioExternalMicrophoneClock()
+
+        let first = clock.candidateReceivedAt(
+            frameTimestamp: 0,
+            now: 200
+        )
+        XCTAssertEqual(first, 200, accuracy: 0.000_001)
+        clock.commitAccepted(
+            frameTimestamp: 0,
+            receivedAt: first
+        )
+
+        let second = clock.candidateReceivedAt(
+            frameTimestamp: 0.01,
+            now: 201
+        )
+        XCTAssertEqual(second, 200.01, accuracy: 0.000_001)
+    }
+
+    func testRejectedPreStartMicrophoneFrameDoesNotEstablishClockOrigin() {
+        var clock = ScreenAudioExternalMicrophoneClock()
+
+        // Pre-start frame is rejected: candidate is not committed.
+        _ = clock.candidateReceivedAt(
+            frameTimestamp: 0,
+            now: 100
+        )
+
+        let firstAccepted = clock.candidateReceivedAt(
+            frameTimestamp: 0.20,
+            now: 300
+        )
+        XCTAssertEqual(firstAccepted, 300, accuracy: 0.000_001)
+        clock.commitAccepted(
+            frameTimestamp: 0.20,
+            receivedAt: firstAccepted
+        )
+
+        let second = clock.candidateReceivedAt(
+            frameTimestamp: 0.21,
+            now: 301
+        )
+        XCTAssertEqual(second, 300.01, accuracy: 0.000_001)
+    }
+
     func testMicrophoneFailureClosesRelayFIFOAfterQueuedFrames()
         async throws {
         let recorder = ScreenAudioRelayEventRecorder()
@@ -75,7 +121,7 @@ final class ScreenAudioCaptureConfigurationTests: XCTestCase {
         XCTAssertTrue(
             relay.enqueueMicrophoneFrame(
                 microphoneFrame,
-                receivedAt: 1
+                now: 1
             )
         )
         relay.closeAfterMicrophoneFailure(
@@ -117,7 +163,7 @@ final class ScreenAudioCaptureConfigurationTests: XCTestCase {
                     sampleRate: 48_000,
                     samples: [0.1]
                 ),
-                receivedAt: 0
+                now: 0
             )
         )
 
@@ -131,7 +177,7 @@ final class ScreenAudioCaptureConfigurationTests: XCTestCase {
                     sampleRate: 48_000,
                     samples: [0.1]
                 ),
-                receivedAt: 0
+                now: 0
             )
         )
 

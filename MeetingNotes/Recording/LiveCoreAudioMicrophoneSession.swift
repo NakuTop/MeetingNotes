@@ -478,8 +478,13 @@ final class LiveCoreAudioMicrophoneSession:
                 unit: unit
             )
 
-            let reportedMaximumFrames =
-                try api.getMaximumFramesPerSlice(unit: unit)
+            let reportedMaximumFrames: UInt32
+            do {
+                reportedMaximumFrames =
+                    try api.getMaximumFramesPerSlice(unit: unit)
+            } catch {
+                reportedMaximumFrames = 0
+            }
             let frameCapacity = max(
                 reportedMaximumFrames,
                 8_192
