@@ -1,4 +1,3 @@
-import AVFoundation
 import CoreAudio
 import Foundation
 
@@ -190,24 +189,9 @@ struct AudioDeviceCatalog: AudioDeviceDiscovering, Sendable {
     }
 
     private static func discoverLiveInputs() throws -> [AudioInputDevice] {
-        let defaultID = AVCaptureDevice.default(for: .audio)?.uniqueID
-        let discoverySession = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.microphone],
-            mediaType: .audio,
-            position: .unspecified
+        let snapshot = try LiveAudioInputDeviceProvider().discover()
+        return AudioInputDeviceIdentityMatcher.mergedInputs(
+            from: snapshot
         )
-
-        return discoverySession.devices.map { device in
-            AudioInputDevice(
-                id: device.uniqueID,
-                name: device.localizedName,
-                manufacturer: device.manufacturer,
-                isConnected: device.isConnected,
-                isSuspended: device.isSuspended,
-                isInUseByAnotherApplication:
-                    device.isInUseByAnotherApplication,
-                isSystemDefault: device.uniqueID == defaultID
-            )
-        }
     }
 }

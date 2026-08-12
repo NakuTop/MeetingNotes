@@ -137,13 +137,33 @@ final class AppSettingsStore {
     var preferredInputDeviceID: String? {
         get {
             access(keyPath: \AppSettingsStore.preferredInputDeviceID)
-            return preferredDeviceID(forKey: Key.preferredInputDeviceID)
+            return preferredAudioInput.legacyDisplayID
         }
         set {
             withMutation(keyPath: \AppSettingsStore.preferredInputDeviceID) {
-                setPreferredDeviceID(
+                let trimmed = newValue?.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                preferredAudioInput = PreferredAudioInput(
+                    backend: .automatic,
+                    stableID: trimmed,
+                    legacyAVFoundationID: trimmed,
+                    coreAudioUID: nil
+                )
+            }
+        }
+    }
+
+    var preferredAudioInput: PreferredAudioInput {
+        get {
+            access(keyPath: \AppSettingsStore.preferredAudioInput)
+            return PreferredAudioInputPersistence.load(defaults: defaults)
+        }
+        set {
+            withMutation(keyPath: \AppSettingsStore.preferredAudioInput) {
+                PreferredAudioInputPersistence.save(
                     newValue,
-                    forKey: Key.preferredInputDeviceID
+                    defaults: defaults
                 )
             }
         }

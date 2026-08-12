@@ -115,6 +115,64 @@ struct CoreAudioBufferListParser {
 }
 
 enum CoreAudioDeviceProvider {
+    static func inputDevices() throws -> [CoreAudioInputDevice] {
+        let systemObjectID = AudioObjectID(kAudioObjectSystemObject)
+        let deviceIDs = try readObjectIDs(
+            objectID: systemObjectID,
+            address: propertyAddress(
+                selector: kAudioHardwarePropertyDevices
+            )
+        )
+        let defaultInputID = try readUInt32(
+            objectID: systemObjectID,
+            address: propertyAddress(
+                selector: kAudioHardwarePropertyDefaultInputDevice
+            )
+        )
+
+        return try deviceIDs.compactMap { deviceID in
+            let streamConfigurationAddress = propertyAddress(
+                selector: kAudioDevicePropertyStreamConfiguration,
+                scope: kAudioObjectPropertyScopeInput
+            )
+            let channels = try channelCount(
+                objectID: deviceID,
+                address: streamConfigurationAddress
+            )
+            guard channels > 0 else {
+                return nil
+            }
+
+            let uid = try readString(
+                objectID: deviceID,
+                address: propertyAddress(
+                    selector: kAudioDevicePropertyDeviceUID
+                )
+            )
+            let name = try readString(
+                objectID: deviceID,
+                address: propertyAddress(
+                    selector: kAudioObjectPropertyName
+                )
+            )
+            let isAlive = try readUInt32(
+                objectID: deviceID,
+                address: propertyAddress(
+                    selector: kAudioDevicePropertyDeviceIsAlive
+                )
+            ) != 0
+
+            return CoreAudioInputDevice(
+                deviceID: deviceID,
+                uid: uid,
+                name: name,
+                isAlive: isAlive,
+                inputChannelCount: channels,
+                isSystemDefault: deviceID == defaultInputID
+            )
+        }
+    }
+
     static func outputDevices() throws -> [AudioOutputDevice] {
         let systemObjectID = AudioObjectID(kAudioObjectSystemObject)
         let deviceIDs = try readObjectIDs(

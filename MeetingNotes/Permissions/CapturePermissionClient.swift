@@ -11,6 +11,7 @@ enum CapturePermission: Equatable, Hashable, Sendable {
 enum CapturePermissionStatus: Equatable, Sendable {
     case authorized
     case denied
+    case restricted
     case notDetermined
     case unavailable
 
@@ -20,8 +21,10 @@ enum CapturePermissionStatus: Equatable, Sendable {
             self = .authorized
         case .notDetermined:
             self = .notDetermined
-        case .denied, .restricted:
+        case .denied:
             self = .denied
+        case .restricted:
+            self = .restricted
         @unknown default:
             self = .denied
         }
