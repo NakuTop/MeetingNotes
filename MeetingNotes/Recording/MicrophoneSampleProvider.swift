@@ -5,15 +5,18 @@ struct MicrophoneSample: @unchecked Sendable {
     let buffer: AVAudioPCMBuffer
     let sampleTime: AVAudioFramePosition
     let sampleRate: Double
+    let timestamp: TimeInterval?
 
     init(
         buffer: AVAudioPCMBuffer,
         sampleTime: AVAudioFramePosition,
-        sampleRate: Double
+        sampleRate: Double,
+        timestamp: TimeInterval? = nil
     ) {
         self.buffer = buffer
         self.sampleTime = sampleTime
         self.sampleRate = sampleRate
+        self.timestamp = timestamp
     }
 }
 

@@ -123,53 +123,81 @@ enum CoreAudioDeviceProvider {
                 selector: kAudioHardwarePropertyDevices
             )
         )
-        let defaultInputID = try readUInt32(
+        let defaultInputID: AudioDeviceID? = try? readUInt32(
             objectID: systemObjectID,
             address: propertyAddress(
                 selector: kAudioHardwarePropertyDefaultInputDevice
             )
         )
 
-        return try deviceIDs.compactMap { deviceID in
-            let streamConfigurationAddress = propertyAddress(
-                selector: kAudioDevicePropertyStreamConfiguration,
-                scope: kAudioObjectPropertyScopeInput
-            )
-            let channels = try channelCount(
-                objectID: deviceID,
-                address: streamConfigurationAddress
-            )
-            guard channels > 0 else {
+        return buildInputDevices(
+            deviceIDs: deviceIDs,
+            defaultInputID: defaultInputID,
+            channelCount: { deviceID in
+                try channelCount(
+                    objectID: deviceID,
+                    address: propertyAddress(
+                        selector:
+                            kAudioDevicePropertyStreamConfiguration,
+                        scope: kAudioObjectPropertyScopeInput
+                    )
+                )
+            },
+            uid: { deviceID in
+                try readString(
+                    objectID: deviceID,
+                    address: propertyAddress(
+                        selector: kAudioDevicePropertyDeviceUID
+                    )
+                )
+            },
+            name: { deviceID in
+                try readString(
+                    objectID: deviceID,
+                    address: propertyAddress(
+                        selector: kAudioObjectPropertyName
+                    )
+                )
+            },
+            isAlive: { deviceID in
+                try readUInt32(
+                    objectID: deviceID,
+                    address: propertyAddress(
+                        selector: kAudioDevicePropertyDeviceIsAlive
+                    )
+                ) != 0
+            }
+        )
+    }
+
+    static func buildInputDevices(
+        deviceIDs: [AudioDeviceID],
+        defaultInputID: AudioDeviceID?,
+        channelCount: (AudioDeviceID) throws -> UInt32,
+        uid: (AudioDeviceID) throws -> String,
+        name: (AudioDeviceID) throws -> String,
+        isAlive: (AudioDeviceID) throws -> Bool
+    ) -> [CoreAudioInputDevice] {
+        deviceIDs.compactMap { deviceID in
+            do {
+                let channels = try channelCount(deviceID)
+                guard channels > 0 else {
+                    return nil
+                }
+                let deviceUID = try uid(deviceID)
+                let deviceName = try name(deviceID)
+                let alive = try isAlive(deviceID)
+                return CoreAudioInputDevice(
+                    deviceID: deviceID,
+                    uid: deviceUID,
+                    name: deviceName,
+                    isAlive: alive,
+                    inputChannelCount: channels,
+                    isSystemDefault: deviceID == defaultInputID
+                )
+            } catch {
                 return nil
             }
-
-            let uid = try readString(
-                objectID: deviceID,
-                address: propertyAddress(
-                    selector: kAudioDevicePropertyDeviceUID
-                )
-            )
-            let name = try readString(
-                objectID: deviceID,
-                address: propertyAddress(
-                    selector: kAudioObjectPropertyName
-                )
-            )
-            let isAlive = try readUInt32(
-                objectID: deviceID,
-                address: propertyAddress(
-                    selector: kAudioDevicePropertyDeviceIsAlive
-                )
-            ) != 0
-
-            return CoreAudioInputDevice(
-                deviceID: deviceID,
-                uid: uid,
-                name: name,
-                isAlive: isAlive,
-                inputChannelCount: channels,
-                isSystemDefault: deviceID == defaultInputID
-            )
         }
     }
 

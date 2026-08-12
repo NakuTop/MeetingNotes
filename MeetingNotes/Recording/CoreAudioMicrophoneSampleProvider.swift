@@ -20,17 +20,41 @@ protocol CoreAudioMicrophoneSessionManaging: Sendable {
 }
 
 protocol CoreAudioDeviceIDResolving: Sendable {
-    func resolve(deviceID: String?) throws -> AudioDeviceID?
+    func resolve(deviceID: String?) throws -> AudioDeviceID
 }
 
 struct LiveCoreAudioDeviceIDResolver: CoreAudioDeviceIDResolving {
-    func resolve(deviceID: String?) throws -> AudioDeviceID? {
-        let inputs = try CoreAudioDeviceProvider.inputDevices()
-        if let deviceID {
-            return inputs.first { $0.uid == deviceID }?.deviceID
+    private let inputsProvider:
+        @Sendable () throws -> [CoreAudioInputDevice]
+
+    init(
+        inputsProvider:
+            @escaping @Sendable () throws -> [CoreAudioInputDevice] = {
+                try CoreAudioDeviceProvider.inputDevices()
+            }
+    ) {
+        self.inputsProvider = inputsProvider
+    }
+
+    func resolve(deviceID: String?) throws -> AudioDeviceID {
+        let inputs = try inputsProvider()
+        if let requestedUID = deviceID {
+            guard let exactMatch = inputs.first(where: {
+                $0.uid == requestedUID && $0.isUsable
+            }) else {
+                throw MicrophoneCaptureError.selectedDeviceUnavailable
+            }
+            return exactMatch.deviceID
         }
-        return inputs.first { $0.isSystemDefault && $0.isUsable }?.deviceID
-            ?? inputs.first(where: \.isUsable)?.deviceID
+        if let systemDefault = inputs.first(where: {
+            $0.isSystemDefault && $0.isUsable
+        }) {
+            return systemDefault.deviceID
+        }
+        if let firstUsable = inputs.first(where: \.isUsable) {
+            return firstUsable.deviceID
+        }
+        throw MicrophoneCaptureError.noUsableInputDevice
     }
 }
 

@@ -1,3 +1,4 @@
+import CoreAudio
 import Foundation
 import XCTest
 @testable import MeetingNotes
@@ -1149,6 +1150,106 @@ final class SettingsViewModelTests: XCTestCase {
         XCTAssertEqual(fixture.settings.frequentSpeakerNames, ["李四"])
     }
 
+    func testRefreshAudioDevicesUsesFreshRuntimeSnapshotForRecoveringMessage()
+        async throws {
+        let runtime = SettingsMicrophoneRuntimeStub(
+            snapshot: MicrophoneRuntimeSnapshot(
+                status: .recovering,
+                telemetry: MicrophoneCaptureTelemetry()
+            )
+        )
+        let fixture = try makeFixture(
+            microphoneRuntime: runtime
+        )
+
+        await fixture.viewModel.refreshAudioDevices()
+
+        XCTAssertTrue(fixture.viewModel.isMicrophoneRecovering)
+        XCTAssertTrue(
+            fixture.viewModel.audioDeviceMessage?
+                .contains("正在重新连接麦克风") == true
+        )
+    }
+
+    func testCoreAudioFallbackActiveRequiresActualRuntimeCapture()
+        async throws {
+        let coreAudioOnly = AudioInputDevice(
+            id: "ca:mic",
+            name: "USB Mic",
+            manufacturer: "Test",
+            isConnected: true,
+            isSuspended: false,
+            isInUseByAnotherApplication: false,
+            isSystemDefault: true,
+            coreAudioUID: "mic",
+            coreAudioDeviceID: AudioDeviceID(42),
+            inputChannelCount: 1,
+            isCoreAudioAvailable: true
+        )
+        let runtime = SettingsMicrophoneRuntimeStub(
+            snapshot: MicrophoneRuntimeSnapshot()
+        )
+        let fixture = try makeFixture(
+            audioDeviceCatalog: StaticAudioDeviceCatalog(
+                snapshot: AudioDeviceSnapshot(
+                    inputs: [coreAudioOnly],
+                    outputs: []
+                )
+            ),
+            microphoneRuntime: runtime
+        )
+
+        await fixture.viewModel.refreshAudioDevices()
+
+        XCTAssertEqual(
+            fixture.viewModel.resolvedInputCapture?
+                .usesCoreAudioFallback,
+            true
+        )
+        XCTAssertFalse(
+            fixture.viewModel.isCoreAudioFallbackActive
+        )
+    }
+
+    func testCoreAudioFallbackActiveWhenRuntimeActuallyUsesFallback()
+        async throws {
+        let coreAudioOnly = AudioInputDevice(
+            id: "ca:mic",
+            name: "USB Mic",
+            manufacturer: "Test",
+            isConnected: true,
+            isSuspended: false,
+            isInUseByAnotherApplication: false,
+            isSystemDefault: true,
+            coreAudioUID: "mic",
+            coreAudioDeviceID: AudioDeviceID(42),
+            inputChannelCount: 1,
+            isCoreAudioAvailable: true
+        )
+        var telemetry = MicrophoneCaptureTelemetry()
+        telemetry.captureStarted = true
+        telemetry.captureBackend = .coreAudioFallback
+        let runtime = SettingsMicrophoneRuntimeStub(
+            snapshot: MicrophoneRuntimeSnapshot(
+                status: .fallbackActive,
+                telemetry: telemetry
+            )
+        )
+        let fixture = try makeFixture(
+            audioDeviceCatalog: StaticAudioDeviceCatalog(
+                snapshot: AudioDeviceSnapshot(
+                    inputs: [coreAudioOnly],
+                    outputs: []
+                )
+            ),
+            microphoneRuntime: runtime
+        )
+
+        await fixture.viewModel.refreshAudioDevices()
+
+        XCTAssertTrue(fixture.viewModel.isCoreAudioFallbackActive)
+    }
+
     private func makeFixture(
         deepSeekTester: any DeepSeekConnectionTesting = RecordingDeepSeekTester(
             result: .success([])
@@ -1181,7 +1282,8 @@ final class SettingsViewModelTests: XCTestCase {
             ),
         diagnosticEnvironment:
             any AudioDiagnosticEnvironmentInfoProviding =
-                SettingsDiagnosticEnvironmentStub()
+                SettingsDiagnosticEnvironmentStub(),
+        microphoneRuntime: (any MicrophoneRuntimeReporting)? = nil
     ) throws -> Fixture {
         let suiteName = "SettingsViewModelTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -1203,7 +1305,8 @@ final class SettingsViewModelTests: XCTestCase {
                 audioOutputTester: audioOutputTester,
                 diagnosticCoordinatorFactory: diagnosticCoordinatorFactory,
                 diagnosticExplainer: diagnosticExplainer,
-                diagnosticEnvironment: diagnosticEnvironment
+                diagnosticEnvironment: diagnosticEnvironment,
+                microphoneRuntime: microphoneRuntime
             ),
             credentials: credentials,
             settings: settings
@@ -1349,6 +1452,21 @@ private actor BlockingDeepSeekTester: DeepSeekConnectionTesting {
         guard let resultContinuation else { return }
         self.resultContinuation = nil
         resultContinuation.resume(with: result)
+    }
+}
+
+private final class SettingsMicrophoneRuntimeStub:
+    MicrophoneRuntimeReporting,
+    @unchecked Sendable {
+    private let lock = NSLock()
+    private var snapshotValue: MicrophoneRuntimeSnapshot
+
+    init(snapshot: MicrophoneRuntimeSnapshot) {
+        snapshotValue = snapshot
+    }
+
+    func runtimeSnapshot() async -> MicrophoneRuntimeSnapshot {
+        lock.withLock { snapshotValue }
     }
 }
 

@@ -1,3 +1,5 @@
+import AppKit
+import AVFoundation
 import CoreAudio
 import XCTest
 @testable import MeetingNotes
@@ -135,6 +137,139 @@ final class AudioDeviceCatalogTests: XCTestCase {
 
         XCTAssertEqual(snapshot.inputs, [microphone])
         XCTAssertEqual(snapshot.outputs, [speaker])
+    }
+
+    func testInputNormalizationPreservesBackendIdentityMetadata()
+        async throws {
+        let microphone = AudioInputDevice(
+            id: "same-id",
+            name: "  Merged Mic  ",
+            manufacturer: "Apple",
+            isConnected: true,
+            isSuspended: false,
+            isInUseByAnotherApplication: false,
+            isSystemDefault: true,
+            avFoundationUniqueID: "same-id",
+            coreAudioUID: "same-id",
+            coreAudioDeviceID: AudioDeviceID(42),
+            inputChannelCount: 2,
+            isAVFoundationAvailable: true,
+            isCoreAudioAvailable: true
+        )
+        let catalog = AudioDeviceCatalog(
+            inputProvider: { [microphone] },
+            outputProvider: { [] }
+        )
+
+        let snapshot = try await catalog.snapshot()
+        let normalized = try XCTUnwrap(snapshot.inputs.first)
+
+        XCTAssertEqual(normalized.id, "same-id")
+        XCTAssertEqual(normalized.name, "Merged Mic")
+        XCTAssertEqual(normalized.avFoundationUniqueID, "same-id")
+        XCTAssertEqual(normalized.coreAudioUID, "same-id")
+        XCTAssertEqual(normalized.coreAudioDeviceID, AudioDeviceID(42))
+        XCTAssertEqual(normalized.inputChannelCount, 2)
+        XCTAssertTrue(normalized.isAVFoundationAvailable)
+        XCTAssertTrue(normalized.isCoreAudioAvailable)
+    }
+
+    func testCoreAudioInputEnumerationSkipsMalformedDeviceAndKeepsValidDevice()
+        throws {
+        let devices = CoreAudioDeviceProvider.buildInputDevices(
+            deviceIDs: [AudioDeviceID(100), AudioDeviceID(200)],
+            defaultInputID: AudioDeviceID(200),
+            channelCount: { deviceID in
+                if deviceID == AudioDeviceID(100) {
+                    throw AudioDeviceCatalogError
+                        .invalidCoreAudioPropertyData(
+                            objectID: 100,
+                            selector: 1
+                        )
+                }
+                return 1
+            },
+            uid: { deviceID in
+                deviceID == AudioDeviceID(100)
+                    ? "malformed" : "built-in"
+            },
+            name: { deviceID in
+                deviceID == AudioDeviceID(100)
+                    ? "Malformed" : "Built-in"
+            },
+            isAlive: { _ in true }
+        )
+
+        XCTAssertEqual(devices.count, 1)
+        XCTAssertEqual(devices.first?.deviceID, AudioDeviceID(200))
+        XCTAssertEqual(devices.first?.isSystemDefault, true)
+    }
+
+    func testCoreAudioEnumerationDoesNotRequireDefaultInputID()
+        throws {
+        let devices = CoreAudioDeviceProvider.buildInputDevices(
+            deviceIDs: [AudioDeviceID(200)],
+            defaultInputID: nil,
+            channelCount: { _ in 1 },
+            uid: { _ in "built-in" },
+            name: { _ in "Built-in" },
+            isAlive: { _ in true }
+        )
+
+        XCTAssertEqual(devices.count, 1)
+        XCTAssertEqual(devices.first?.deviceID, AudioDeviceID(200))
+        XCTAssertEqual(devices.first?.isSystemDefault, false)
+    }
+
+    @MainActor
+    func testObserverStartTwiceDoesNotDuplicateAndStopStops() {
+        let center = NotificationCenter()
+        let counter = CallCounter()
+        let observer = CoreAudioDeviceChangeObserver(
+            notificationCenter: center,
+            isAudioCaptureDevice: { _ in true }
+        )
+
+        observer.start { counter.increment() }
+        observer.start { counter.increment() }
+
+        center.post(
+            name: AVCaptureDevice.wasConnectedNotification,
+            object: nil
+        )
+        XCTAssertEqual(counter.count(), 1)
+
+        center.post(
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
+        XCTAssertEqual(counter.count(), 2)
+
+        observer.stop()
+        center.post(
+            name: AVCaptureDevice.wasDisconnectedNotification,
+            object: nil
+        )
+        XCTAssertEqual(counter.count(), 2)
+    }
+
+    @MainActor
+    func testObserverIgnoresNonAudioAVCaptureNotifications() {
+        let center = NotificationCenter()
+        let counter = CallCounter()
+        let observer = CoreAudioDeviceChangeObserver(
+            notificationCenter: center,
+            isAudioCaptureDevice: { _ in false }
+        )
+
+        observer.start { counter.increment() }
+        center.post(
+            name: AVCaptureDevice.wasConnectedNotification,
+            object: nil
+        )
+
+        XCTAssertEqual(counter.count(), 0)
+        observer.stop()
     }
 
     func testProviderErrorPropagatesAsAudioDeviceCatalogError() async {
@@ -338,5 +473,22 @@ final class AudioDeviceCatalogTests: XCTestCase {
                 line: line
             )
         }
+    }
+}
+
+private final class CallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+
+    func count() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }

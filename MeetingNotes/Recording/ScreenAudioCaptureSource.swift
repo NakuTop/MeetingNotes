@@ -10,6 +10,7 @@ enum ScreenAudioCaptureError: Error, Equatable, Sendable {
     case streamSetupFailed
     case streamStartFailed
     case streamStopped
+    case microphoneStreamStopped
     case invalidAudioSample
     case deliveryOverflow
     case packetBufferOverflow
@@ -20,17 +21,16 @@ enum ScreenAudioCaptureConfiguration {
     static let packetBufferCapacity = 256
 
     static let registeredOutputTypes: [SCStreamOutputType] = [
-        .audio,
-        .microphone
+        .audio
     ]
 
     static func makeStreamConfiguration(
-        microphoneDeviceID: String?
+        microphoneDeviceID: String? = nil
     ) -> SCStreamConfiguration {
         let configuration = SCStreamConfiguration()
         configuration.capturesAudio = true
-        configuration.captureMicrophone = true
-        configuration.microphoneCaptureDeviceID = microphoneDeviceID
+        configuration.captureMicrophone = false
+        configuration.microphoneCaptureDeviceID = nil
         configuration.excludesCurrentProcessAudio = true
         configuration.sampleRate = Int(PCMConverter.playbackSampleRate)
         configuration.channelCount = 1
@@ -365,7 +365,7 @@ final class ScreenAudioEventFIFO<Event: Sendable>: @unchecked Sendable {
     }
 }
 
-private enum ScreenAudioRelayEvent: @unchecked Sendable {
+enum ScreenAudioRelayEvent: @unchecked Sendable {
     case frame(
         CapturedAudioFrame,
         source: RealtimeAudioSource,
@@ -447,8 +447,38 @@ struct ScreenAudioPacketTimestampNormalizer {
     }
 }
 
+struct ScreenAudioMicrophoneLifecycleCoordination {
+    let microphoneCaptureSource: any AudioCaptureSource
+    let relay: ScreenAudioStreamRelay
+    let systemQueue: DispatchQueue
+
+    func pause() async throws {
+        try await microphoneCaptureSource.pause()
+        guard await relay.suspendAndWait(
+            callbackQueues: [systemQueue]
+        ) else {
+            try? await microphoneCaptureSource.resume()
+            throw AudioCaptureError.notRunning
+        }
+    }
+
+    func resume() async throws {
+        guard relay.resume() else {
+            throw AudioCaptureError.notRunning
+        }
+        try await microphoneCaptureSource.resume()
+    }
+
+    func suspendAndStopMicrophone() async {
+        _ = await relay.suspendAndWait(
+            callbackQueues: [systemQueue]
+        )
+        await microphoneCaptureSource.stop()
+    }
+}
+
 actor ScreenAudioCaptureSource: AudioCaptureSource {
-    private let microphoneDeviceID: String?
+    private let microphoneCaptureSource: any AudioCaptureSource
     private let mixer: RealtimeAudioMixer
     private let decoder: ScreenAudioSampleDecoder
     private let transcriptionFrameBuilder: ScreenAudioTranscriptionFrameBuilder
@@ -456,25 +486,26 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         label: "MeetingNotes.ScreenAudio.System",
         qos: .userInitiated
     )
-    private let microphoneQueue = DispatchQueue(
-        label: "MeetingNotes.ScreenAudio.Microphone",
-        qos: .userInitiated
-    )
     private var stream: SCStream?
     private var relay: ScreenAudioStreamRelay?
     private var continuation: AsyncThrowingStream<CapturedAudioPacket, Error>.Continuation?
+    private var microphoneConsumptionTask: Task<Void, Never>?
     private var outputTimestampNormalizer = ScreenAudioPacketTimestampNormalizer()
     private var frameSynchronizer: ScreenAudioFrameSynchronizer?
     private var isTerminating = false
 
     init(
-        microphoneDeviceID: String? = nil,
+        microphoneCaptureSource: any AudioCaptureSource =
+            MicrophoneCaptureSource(
+                selectedDeviceID: nil,
+                sampleProvider: AdaptiveMicrophoneSampleProvider()
+            ),
         mixer: RealtimeAudioMixer = RealtimeAudioMixer(),
         decoder: ScreenAudioSampleDecoder = ScreenAudioSampleDecoder(),
         transcriptionFrameBuilder: ScreenAudioTranscriptionFrameBuilder =
             ScreenAudioTranscriptionFrameBuilder()
     ) {
-        self.microphoneDeviceID = microphoneDeviceID
+        self.microphoneCaptureSource = microphoneCaptureSource
         self.mixer = mixer
         self.decoder = decoder
         self.transcriptionFrameBuilder = transcriptionFrameBuilder
@@ -510,9 +541,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             exceptingWindows: []
         )
         let configuration =
-            ScreenAudioCaptureConfiguration.makeStreamConfiguration(
-                microphoneDeviceID: microphoneDeviceID
-            )
+            ScreenAudioCaptureConfiguration.makeStreamConfiguration()
         let streamPair = AsyncThrowingStream<
             CapturedAudioPacket,
             Error
@@ -551,13 +580,11 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         )
 
         do {
-            for outputType in ScreenAudioCaptureConfiguration.registeredOutputTypes {
-                try stream.addStreamOutput(
-                    relay,
-                    type: outputType,
-                    sampleHandlerQueue: queue(for: outputType)
-                )
-            }
+            try stream.addStreamOutput(
+                relay,
+                type: .audio,
+                sampleHandlerQueue: systemQueue
+            )
         } catch {
             removeRegisteredOutputs(from: stream, relay: relay)
             await waitForCallbackQueues()
@@ -571,9 +598,48 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
 
         self.stream = stream
         self.relay = relay
+
+        guard await relay.suspendAndWait(
+            callbackQueues: [systemQueue]
+        ) else {
+            removeRegisteredOutputs(from: stream, relay: relay)
+            await waitForCallbackQueues()
+            await relay.finishAndWait()
+            resetConverters()
+            frameSynchronizer = nil
+            self.stream = nil
+            self.relay = nil
+            continuation?.finish(
+                throwing: ScreenAudioCaptureError.streamSetupFailed
+            )
+            continuation = nil
+            throw ScreenAudioCaptureError.streamSetupFailed
+        }
+
+        let microphoneStartedAt =
+            ProcessInfo.processInfo.systemUptime
+        let microphoneStream:
+            AsyncThrowingStream<CapturedAudioPacket, Error>
+        do {
+            microphoneStream =
+                try await microphoneCaptureSource.start()
+        } catch {
+            removeRegisteredOutputs(from: stream, relay: relay)
+            await waitForCallbackQueues()
+            await relay.finishAndWait()
+            resetConverters()
+            frameSynchronizer = nil
+            self.stream = nil
+            self.relay = nil
+            continuation?.finish(throwing: error)
+            continuation = nil
+            throw error
+        }
+
         do {
             try await stream.startCapture()
         } catch {
+            await microphoneCaptureSource.stop()
             removeRegisteredOutputs(from: stream, relay: relay)
             await waitForCallbackQueues()
             await relay.finishAndWait()
@@ -583,6 +649,50 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             self.relay = nil
             continuation?.finish(throwing: ScreenAudioCaptureError.streamStartFailed)
             continuation = nil
+            throw ScreenAudioCaptureError.streamStartFailed
+        }
+
+        let relayReference = relay
+        let microphoneAnchor = microphoneStartedAt
+        let microphoneTask = Task {
+            do {
+                for try await packet in microphoneStream {
+                    let frame = packet.master
+                    _ = relayReference.enqueueMicrophoneFrame(
+                        frame,
+                        receivedAt:
+                            microphoneAnchor
+                            + max(0, frame.timestamp)
+                    )
+                }
+                relayReference.closeAfterMicrophoneFailure(
+                    ScreenAudioCaptureError.microphoneStreamStopped
+                )
+            } catch {
+                relayReference.closeAfterMicrophoneFailure(error)
+            }
+        }
+        self.microphoneConsumptionTask = microphoneTask
+
+        guard relay.resume() else {
+            isTerminating = true
+            let microphoneTask = microphoneConsumptionTask
+            microphoneConsumptionTask = nil
+            await microphoneCaptureSource.stop()
+            await microphoneTask?.value
+            try? await stream.stopCapture()
+            removeRegisteredOutputs(from: stream, relay: relay)
+            await waitForCallbackQueues()
+            await relay.finishAndWait()
+            resetConverters()
+            frameSynchronizer = nil
+            self.stream = nil
+            self.relay = nil
+            continuation?.finish(
+                throwing: ScreenAudioCaptureError.streamStartFailed
+            )
+            continuation = nil
+            isTerminating = false
             throw ScreenAudioCaptureError.streamStartFailed
         }
         return streamPair.stream
@@ -595,11 +705,13 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
               let relay else {
             throw AudioCaptureError.notRunning
         }
-        guard await relay.suspendAndWait(
-            callbackQueues: [systemQueue, microphoneQueue]
-        ),
-              stream != nil,
-              continuation != nil else {
+        let coordination = ScreenAudioMicrophoneLifecycleCoordination(
+            microphoneCaptureSource: microphoneCaptureSource,
+            relay: relay,
+            systemQueue: systemQueue
+        )
+        try await coordination.pause()
+        guard stream != nil, continuation != nil else {
             throw AudioCaptureError.notRunning
         }
         do {
@@ -617,8 +729,16 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
               let relay else {
             throw AudioCaptureError.notRunning
         }
-        guard relay.resume() else {
-            throw AudioCaptureError.notRunning
+        let coordination = ScreenAudioMicrophoneLifecycleCoordination(
+            microphoneCaptureSource: microphoneCaptureSource,
+            relay: relay,
+            systemQueue: systemQueue
+        )
+        do {
+            try await coordination.resume()
+        } catch {
+            await handleStreamFailure(error)
+            throw error
         }
     }
 
@@ -631,6 +751,13 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             return
         }
         isTerminating = true
+        _ = await relay.suspendAndWait(
+            callbackQueues: [systemQueue]
+        )
+        let microphoneTask = microphoneConsumptionTask
+        microphoneConsumptionTask = nil
+        await microphoneCaptureSource.stop()
+        await microphoneTask?.value
         try? await stream.stopCapture()
         removeRegisteredOutputs(from: stream, relay: relay)
         await waitForCallbackQueues()
@@ -650,10 +777,6 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         isTerminating = false
     }
 
-    private func queue(for outputType: SCStreamOutputType) -> DispatchQueue {
-        outputType == .microphone ? microphoneQueue : systemQueue
-    }
-
     private func removeRegisteredOutputs(
         from stream: SCStream,
         relay: ScreenAudioStreamRelay
@@ -665,7 +788,7 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
 
     private func waitForCallbackQueues() async {
         await ScreenAudioCallbackBarrier.wait(
-            for: [systemQueue, microphoneQueue]
+            for: [systemQueue]
         )
     }
 
@@ -735,8 +858,12 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             return
         }
         isTerminating = true
+        let microphoneTask = microphoneConsumptionTask
+        microphoneConsumptionTask = nil
+        relay?.finishAccepting()
+        await microphoneCaptureSource.stop()
+        await microphoneTask?.value
         if let stream, let relay {
-            relay.finishAccepting()
             try? await stream.stopCapture()
             removeRegisteredOutputs(from: stream, relay: relay)
             await waitForCallbackQueues()
@@ -808,7 +935,7 @@ final class ScreenAudioSampleDecoder: @unchecked Sendable {
     }
 }
 
-private final class ScreenAudioStreamRelay: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+final class ScreenAudioStreamRelay: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private let decoder: ScreenAudioSampleDecoder
     private let events: ScreenAudioEventFIFO<ScreenAudioRelayEvent>
     private let callbackGate = ScreenAudioCallbackGate()
@@ -849,6 +976,24 @@ private final class ScreenAudioStreamRelay: NSObject, SCStreamOutput, SCStreamDe
         events.finishAccepting()
     }
 
+    @discardableResult
+    func enqueueMicrophoneFrame(
+        _ frame: CapturedAudioFrame,
+        receivedAt: TimeInterval
+    ) -> Bool {
+        events.enqueue(
+            .frame(
+                frame,
+                source: .microphone,
+                receivedAt: receivedAt
+            )
+        )
+    }
+
+    func closeAfterMicrophoneFailure(_ error: Error) {
+        events.close(afterEnqueueing: .failure(error))
+    }
+
     func stream(
         _ stream: SCStream,
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
@@ -856,33 +1001,38 @@ private final class ScreenAudioStreamRelay: NSObject, SCStreamOutput, SCStreamDe
     ) {
         _ = stream
         guard callbackGate.beginDelivery() else { return }
-        let source: RealtimeAudioSource
         switch outputType {
         case .audio:
-            source = .system
+            let receivedAt = ProcessInfo.processInfo.systemUptime
+            ScreenAudioDecodeDelivery.deliver(
+                decode: {
+                    try decoder.decode(
+                        sampleBuffer,
+                        source: .system
+                    )
+                },
+                onFrame: { frame in
+                    events.enqueue(
+                        .frame(
+                            frame,
+                            source: .system,
+                            receivedAt: receivedAt
+                        )
+                    )
+                },
+                onFailure: { error in
+                    events.close(afterEnqueueing: .failure(error))
+                }
+            )
         case .microphone:
-            source = .microphone
+            // Microphone capture is exclusively owned by the external
+            // Adaptive microphone source. ScreenCaptureKit microphone
+            // output is never registered, and any stray callback is
+            // deliberately ignored to avoid a duplicate microphone.
+            return
         default:
             return
         }
-        let receivedAt = ProcessInfo.processInfo.systemUptime
-        ScreenAudioDecodeDelivery.deliver(
-            decode: {
-                try decoder.decode(sampleBuffer, source: source)
-            },
-            onFrame: { frame in
-                events.enqueue(
-                    .frame(
-                        frame,
-                        source: source,
-                        receivedAt: receivedAt
-                    )
-                )
-            },
-            onFailure: { error in
-                events.close(afterEnqueueing: .failure(error))
-            }
-        )
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

@@ -1,4 +1,5 @@
 import AVFoundation
+import AppKit
 import CoreAudio
 import Foundation
 
@@ -12,8 +13,270 @@ struct MicrophoneRecoveryConfiguration: Equatable, Sendable {
     )
 }
 
+enum MicrophoneHardwareChangeEvent: Equatable, Sendable {
+    case coreAudioDeviceListChanged
+    case defaultInputChanged
+    case avFoundationConnected(uniqueID: String)
+    case avFoundationDisconnected(uniqueID: String)
+    case applicationBecameActive
+}
+
+enum MicrophoneTopologyDecision: Equatable, Sendable {
+    case ignore
+    case rediscover
+    case rediscoverClearing(Set<MicrophoneCaptureAttemptKey>)
+}
+
+enum MicrophoneHardwareChangePolicy {
+    static func decision(
+        event: MicrophoneHardwareChangeEvent,
+        preferred: PreferredAudioInput,
+        currentResolution: ResolvedMicrophoneCapture?,
+        previousSnapshot: AudioInputDiscoverySnapshot,
+        freshSnapshot: AudioInputDiscoverySnapshot,
+        attemptedCaptures: Set<MicrophoneCaptureAttemptKey>
+    ) -> MicrophoneTopologyDecision {
+        let isExplicit = preferred.hasExplicitIdentity
+        let freshInputs = AudioInputDeviceIdentityMatcher.mergedInputs(
+            from: freshSnapshot
+        )
+        let freshResolution =
+            AudioInputDeviceResolver.resolveCapture(
+                preferred: preferred,
+                inputs: freshInputs,
+                excludingAttempts: attemptedCaptures
+            )
+
+        func currentBackendAvailable() -> Bool {
+            guard let currentResolution else { return false }
+            switch currentResolution.plan {
+            case let .avFoundation(deviceID):
+                guard let deviceID else { return false }
+                return freshSnapshot.avFoundationInputs.contains {
+                    $0.uniqueID == deviceID && $0.isUsable
+                }
+            case let .coreAudio(_, uid):
+                return freshSnapshot.coreAudioInputs.contains {
+                    $0.uid == uid && $0.isUsable
+                }
+            }
+        }
+
+        func preferredAvailableInFreshSnapshot() -> Bool {
+            guard isExplicit else { return false }
+            if let legacyID = preferred.legacyAVFoundationID,
+               freshSnapshot.avFoundationInputs.contains(where: {
+                   $0.uniqueID == legacyID && $0.isUsable
+               }) {
+                return true
+            }
+            if let stableID = preferred.stableID {
+                if stableID.hasPrefix("avf:"),
+                   freshSnapshot.avFoundationInputs.contains(where: {
+                       "avf:\($0.uniqueID)" == stableID && $0.isUsable
+                   }) {
+                    return true
+                }
+                if stableID.hasPrefix("ca:"),
+                   freshSnapshot.coreAudioInputs.contains(where: {
+                       "ca:\($0.uid)" == stableID && $0.isUsable
+                   }) {
+                    return true
+                }
+            }
+            if let coreAudioUID = preferred.coreAudioUID,
+               freshSnapshot.coreAudioInputs.contains(where: {
+                   $0.uid == coreAudioUID && $0.isUsable
+               }) {
+                return true
+            }
+            return false
+        }
+
+        func preferredReappeared() -> Bool {
+            guard currentResolution?.kind != .preferred else {
+                return false
+            }
+            return preferredAvailableInFreshSnapshot()
+        }
+
+        func targetChanged() -> Bool {
+            guard let currentResolution else {
+                return freshResolution != nil
+            }
+            guard let freshResolution else {
+                return true
+            }
+            switch (currentResolution.plan, freshResolution.plan) {
+            case let (.avFoundation(currentID), .avFoundation(freshID)):
+                return currentID != freshID
+            case let (.coreAudio(_, currentUID), .coreAudio(_, freshUID)):
+                return currentUID != freshUID
+            default:
+                return true
+            }
+        }
+
+        func clearingKeys() -> Set<MicrophoneCaptureAttemptKey> {
+            var result: Set<MicrophoneCaptureAttemptKey> = []
+            if let stableID = preferred.stableID {
+                result.formUnion(
+                    attemptedCaptures.filter {
+                        $0.physicalStableID == stableID
+                    }
+                )
+            }
+            if let legacyID = preferred.legacyAVFoundationID {
+                let avfStableID = "avf:\(legacyID)"
+                result.formUnion(
+                    attemptedCaptures.filter {
+                        $0.physicalStableID == avfStableID
+                            && $0.backend == .avFoundation
+                    }
+                )
+            }
+            if let coreAudioUID = preferred.coreAudioUID {
+                let caStableID = "ca:\(coreAudioUID)"
+                result.formUnion(
+                    attemptedCaptures.filter {
+                        $0.physicalStableID == caStableID
+                            && $0.backend == .coreAudioFallback
+                    }
+                )
+            }
+            return result
+        }
+
+        switch event {
+        case let .avFoundationDisconnected(uniqueID):
+            if case let .avFoundation(deviceID)? =
+                currentResolution?.plan,
+                deviceID == uniqueID {
+                return .rediscover
+            }
+            return .ignore
+
+        case let .avFoundationConnected(uniqueID):
+            let stableID = "avf:\(uniqueID)"
+            let matchesPreferred =
+                preferred.legacyAVFoundationID == uniqueID
+                || preferred.stableID == stableID
+            if isExplicit, matchesPreferred, preferredReappeared() {
+                let cleared = attemptedCaptures.filter {
+                    $0.backend == .avFoundation
+                        && $0.physicalStableID == stableID
+                }
+                return .rediscoverClearing(Set(cleared))
+            }
+            return .ignore
+
+        case .coreAudioDeviceListChanged:
+            if preferredReappeared() {
+                return .rediscoverClearing(clearingKeys())
+            }
+            if currentBackendAvailable() {
+                return .ignore
+            }
+            return .rediscover
+
+        case .defaultInputChanged:
+            if isExplicit {
+                if currentResolution?.kind == .preferred,
+                   currentBackendAvailable() {
+                    return .ignore
+                }
+                if preferredReappeared() {
+                    return .rediscoverClearing(clearingKeys())
+                }
+                return .ignore
+            }
+            return targetChanged() ? .rediscover : .ignore
+
+        case .applicationBecameActive:
+            if !currentBackendAvailable() {
+                return .rediscover
+            }
+            if preferredReappeared() {
+                return .rediscoverClearing(clearingKeys())
+            }
+            if !isExplicit, targetChanged() {
+                return .rediscover
+            }
+            return .ignore
+        }
+    }
+}
+
+private extension PreferredAudioInput {
+    var hasExplicitIdentity: Bool {
+        !(stableID?.isEmpty ?? true)
+            || !(legacyAVFoundationID?.isEmpty ?? true)
+            || !(coreAudioUID?.isEmpty ?? true)
+    }
+}
+
+struct MicrophoneSampleTimelineNormalizer: Sendable {
+    private var backendOriginSeconds: TimeInterval?
+    private var backendSessionOrigin: TimeInterval = 0
+    private var nextSessionTimestamp: TimeInterval = 0
+
+    mutating func reset() {
+        backendOriginSeconds = nil
+        backendSessionOrigin = 0
+        nextSessionTimestamp = 0
+    }
+
+    mutating func beginBackend() {
+        backendOriginSeconds = nil
+        backendSessionOrigin = nextSessionTimestamp
+    }
+
+    mutating func normalize(
+        _ sample: MicrophoneSample
+    ) -> MicrophoneSample {
+        let rawSeconds: TimeInterval
+        if sample.sampleRate.isFinite, sample.sampleRate > 0 {
+            rawSeconds =
+                Double(sample.sampleTime) / sample.sampleRate
+        } else {
+            rawSeconds = 0
+        }
+
+        if backendOriginSeconds == nil {
+            backendOriginSeconds = rawSeconds
+        }
+        let origin = backendOriginSeconds ?? rawSeconds
+        let calculatedTimestamp =
+            backendSessionOrigin + max(0, rawSeconds - origin)
+        let timestamp = max(nextSessionTimestamp, calculatedTimestamp)
+
+        let frameDuration: TimeInterval
+        let formatSampleRate = sample.buffer.format.sampleRate
+        if formatSampleRate.isFinite, formatSampleRate > 0 {
+            frameDuration =
+                Double(sample.buffer.frameLength) / formatSampleRate
+        } else if sample.sampleRate.isFinite, sample.sampleRate > 0 {
+            frameDuration =
+                Double(sample.buffer.frameLength) / sample.sampleRate
+        } else {
+            frameDuration = 0
+        }
+        nextSessionTimestamp = max(
+            nextSessionTimestamp,
+            timestamp + frameDuration
+        )
+
+        return MicrophoneSample(
+            buffer: sample.buffer,
+            sampleTime: sample.sampleTime,
+            sampleRate: sample.sampleRate,
+            timestamp: timestamp
+        )
+    }
+}
+
 protocol CoreAudioInputHardwareObserving: Sendable {
-    func events() -> AsyncStream<Void>
+    func events() -> AsyncStream<MicrophoneHardwareChangeEvent>
 }
 
 struct LiveMicrophonePermissionChecker: MicrophonePermissionChecking {
@@ -36,6 +299,10 @@ actor AdaptiveMicrophoneSampleProvider:
     private enum BackendOutcome: Sendable {
         case completed
         case recoveryNeeded(BackendFailure)
+        case rediscoveryNeeded(
+            clearedAttempts: Set<MicrophoneCaptureAttemptKey>
+        )
+        case terminalFailure(BackendFailure)
         case cancelled
     }
 
@@ -54,9 +321,12 @@ actor AdaptiveMicrophoneSampleProvider:
     private var currentProvider: (any MicrophoneSampleProviding)?
     private var isPaused = false
     private var backendFrameCount = 0
-    private var attemptedDeviceIDs: Set<String> = []
-    private var excludedBackend: MicrophoneCaptureBackend?
+    private var attemptedCaptures:
+        Set<MicrophoneCaptureAttemptKey> = []
+    private var lastDiscoverySnapshot: AudioInputDiscoverySnapshot?
     private var lastBackendError: Error?
+    private var timelineNormalizer =
+        MicrophoneSampleTimelineNormalizer()
     private var runtime = MicrophoneRuntimeSnapshot()
 
     init(
@@ -134,10 +404,11 @@ actor AdaptiveMicrophoneSampleProvider:
         activeToken = token
         self.relay = relay
         isPaused = false
-        attemptedDeviceIDs = []
-        excludedBackend = nil
+        attemptedCaptures = []
+        lastDiscoverySnapshot = nil
         lastBackendError = nil
         backendFrameCount = 0
+        timelineNormalizer.reset()
         runTask = Task { [weak self] in
             await self?.recoveryLoop(
                 token: token,
@@ -169,12 +440,16 @@ actor AdaptiveMicrophoneSampleProvider:
         guard activeToken != nil else { return }
         activeToken = nil
         runtime.status = .stopped
-        runTask?.cancel()
+        let task = runTask
         runTask = nil
+        task?.cancel()
+        let provider = currentProvider
+        currentProvider = nil
+        await provider?.stop()
+        await task?.value
         relay?.finish()
         relay = nil
-        await currentProvider?.stop()
-        currentProvider = nil
+        isPaused = false
     }
 
     func runtimeSnapshot() async -> MicrophoneRuntimeSnapshot {
@@ -192,8 +467,21 @@ actor AdaptiveMicrophoneSampleProvider:
                 finish(token: token)
                 return
             }
+            let permissionStatus = permission.status()
+            runtime.telemetry.microphonePermission = permissionStatus
+            guard permissionStatus == .authorized else {
+                finish(
+                    token: token,
+                    throwing: Self.permissionError(
+                        for: permissionStatus
+                    )
+                )
+                return
+            }
+            runtime.status = .permissionAuthorized
             do {
                 let snapshot = try discovery.discover()
+                lastDiscoverySnapshot = snapshot
                 let inputs = AudioInputDeviceIdentityMatcher.mergedInputs(
                     from: snapshot
                 )
@@ -212,8 +500,7 @@ actor AdaptiveMicrophoneSampleProvider:
                     AudioInputDeviceResolver.resolveCapture(
                         preferred: preferred,
                         inputs: inputs,
-                        excludingDeviceIDs: attemptedDeviceIDs,
-                        excludingBackend: excludedBackend
+                        excludingAttempts: attemptedCaptures
                     ) else {
                     throw lastBackendError
                         ?? MicrophoneCaptureError.noUsableInputDevice
@@ -236,11 +523,20 @@ actor AdaptiveMicrophoneSampleProvider:
                 )
                 let outcome = await runBackend(
                     resolution: resolution,
+                    preferred: preferred,
                     token: token
                 )
                 switch outcome {
                 case .completed, .cancelled:
                     finish(token: token)
+                    return
+                case let .rediscoveryNeeded(clearedAttempts):
+                    if !clearedAttempts.isEmpty {
+                        attemptedCaptures.subtract(clearedAttempts)
+                    }
+                    continue
+                case let .terminalFailure(failure):
+                    finish(token: token, throwing: failure.error)
                     return
                 case let .recoveryNeeded(failure):
                     recordFailure(
@@ -287,6 +583,7 @@ actor AdaptiveMicrophoneSampleProvider:
 
     private func runBackend(
         resolution: ResolvedMicrophoneCapture,
+        preferred: PreferredAudioInput,
         token: UUID
     ) async -> BackendOutcome {
         let provider: any MicrophoneSampleProviding
@@ -313,17 +610,42 @@ actor AdaptiveMicrophoneSampleProvider:
 
         let changeEvents = hardwareObserver.events()
         let changeTask = Task { [weak self] in
-            for await _ in changeEvents {
+            for await event in changeEvents {
                 guard let self,
                       await self.activeToken == token else { break }
-                outcomeContinuation.yield(
-                    .recoveryNeeded(
-                        BackendFailure(
-                            error: MicrophoneCaptureError
-                                .deviceDisconnected
+                let permissionStatus = self.permission.status()
+                guard permissionStatus == .authorized else {
+                    outcomeContinuation.yield(
+                        .terminalFailure(
+                            BackendFailure(
+                                error: Self.permissionError(
+                                    for: permissionStatus
+                                )
+                            )
                         )
                     )
+                    break
+                }
+                let decision = await self.hardwareDecision(
+                    for: event,
+                    preferred: preferred,
+                    currentResolution: resolution,
+                    token: token
                 )
+                switch decision {
+                case .ignore:
+                    break
+                case .rediscover:
+                    outcomeContinuation.yield(
+                        .rediscoveryNeeded(clearedAttempts: [])
+                    )
+                case let .rediscoverClearing(clearedAttempts):
+                    outcomeContinuation.yield(
+                        .rediscoveryNeeded(
+                            clearedAttempts: clearedAttempts
+                        )
+                    )
+                }
             }
         }
 
@@ -331,10 +653,14 @@ actor AdaptiveMicrophoneSampleProvider:
         do {
             stream = try await provider.start(deviceID: deviceID)
             runtime.telemetry.captureStarted = true
+            timelineNormalizer.beginBackend()
         } catch {
             changeTask.cancel()
             runtime.status = .captureStartFailed
-            await provider.stop()
+            if activeToken == token {
+                await provider.stop()
+                currentProvider = nil
+            }
             return .recoveryNeeded(BackendFailure(error: error))
         }
 
@@ -386,9 +712,51 @@ actor AdaptiveMicrophoneSampleProvider:
         consumeTask.cancel()
         watchdog.cancel()
         changeTask.cancel()
-        await provider.stop()
-        currentProvider = nil
+        if activeToken == token {
+            await provider.stop()
+            currentProvider = nil
+        }
         return outcome
+    }
+
+    private func hardwareDecision(
+        for event: MicrophoneHardwareChangeEvent,
+        preferred: PreferredAudioInput,
+        currentResolution: ResolvedMicrophoneCapture,
+        token: UUID
+    ) async -> MicrophoneTopologyDecision {
+        guard activeToken == token else { return .ignore }
+        do {
+            let snapshot = try discovery.discover()
+            let previousSnapshot =
+                lastDiscoverySnapshot ?? snapshot
+            lastDiscoverySnapshot = snapshot
+            return MicrophoneHardwareChangePolicy.decision(
+                event: event,
+                preferred: preferred,
+                currentResolution: currentResolution,
+                previousSnapshot: previousSnapshot,
+                freshSnapshot: snapshot,
+                attemptedCaptures: attemptedCaptures
+            )
+        } catch {
+            return .rediscover
+        }
+    }
+
+    private static func permissionError(
+        for status: CapturePermissionStatus
+    ) -> MicrophoneCaptureError {
+        switch status {
+        case .authorized:
+            return .permissionDenied
+        case .notDetermined:
+            return .permissionNotDetermined
+        case .denied, .unavailable:
+            return .permissionDenied
+        case .restricted:
+            return .permissionRestricted
+        }
     }
 
     private func ingest(_ sample: MicrophoneSample) {
@@ -401,7 +769,8 @@ actor AdaptiveMicrophoneSampleProvider:
         runtime.telemetry.channelCount = Int(
             sample.buffer.format.channelCount
         )
-        relay?.yield(sample)
+        let normalizedSample = timelineNormalizer.normalize(sample)
+        relay?.yield(normalizedSample)
     }
 
     private func updateTelemetry(
@@ -429,18 +798,7 @@ actor AdaptiveMicrophoneSampleProvider:
         error: Error
     ) {
         lastBackendError = error
-        switch resolution.plan {
-        case let .avFoundation(deviceID):
-            if let deviceID {
-                attemptedDeviceIDs.insert(deviceID)
-            } else {
-                attemptedDeviceIDs.insert("avf:system-default")
-            }
-            excludedBackend = nil
-        case let .coreAudio(_, uid):
-            attemptedDeviceIDs.insert(uid)
-            excludedBackend = .coreAudioFallback
-        }
+        attemptedCaptures.insert(resolution.attemptKey)
     }
 
     private func finish(token: UUID, throwing error: Error? = nil) {
@@ -580,12 +938,19 @@ final class LiveCoreAudioInputHardwareObserver:
         label: "MeetingNotes.audio-input-changes"
     )
     private let systemObjectID = AudioObjectID(kAudioObjectSystemObject)
-    private var continuations: [UUID: AsyncStream<Void>.Continuation] = [:]
+    private var continuations:
+        [UUID: AsyncStream<MicrophoneHardwareChangeEvent>.Continuation] =
+            [:]
     private var listener: AudioObjectPropertyListenerBlock?
     private var registeredAddresses: [AudioObjectPropertyAddress] = []
+    private var notificationTokens: [NSObjectProtocol] = []
     private var isObserving = false
 
-    func events() -> AsyncStream<Void> {
+    deinit {
+        stopObserving()
+    }
+
+    func events() -> AsyncStream<MicrophoneHardwareChangeEvent> {
         let id = UUID()
         return AsyncStream { continuation in
             lock.lock()
@@ -604,8 +969,11 @@ final class LiveCoreAudioInputHardwareObserver:
             lock.unlock()
             return
         }
-        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.notify()
+        let listener: AudioObjectPropertyListenerBlock = {
+            [weak self] _, addresses in
+            self?.handleCoreAudioChange(
+                selector: addresses.pointee.mSelector
+            )
         }
         var registered: [AudioObjectPropertyAddress] = []
         for address in Self.observedAddresses {
@@ -622,7 +990,49 @@ final class LiveCoreAudioInputHardwareObserver:
         }
         self.listener = listener
         registeredAddresses = registered
-        isObserving = !registered.isEmpty
+        let notificationCenter = NotificationCenter.default
+        notificationTokens = [
+            notificationCenter.addObserver(
+                forName: AVCaptureDevice.wasConnectedNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] notification in
+                guard let device =
+                    notification.object as? AVCaptureDevice,
+                    device.hasMediaType(.audio) else {
+                    return
+                }
+                self?.notify(
+                    .avFoundationConnected(
+                        uniqueID: device.uniqueID
+                    )
+                )
+            },
+            notificationCenter.addObserver(
+                forName: AVCaptureDevice.wasDisconnectedNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] notification in
+                guard let device =
+                    notification.object as? AVCaptureDevice,
+                    device.hasMediaType(.audio) else {
+                    return
+                }
+                self?.notify(
+                    .avFoundationDisconnected(
+                        uniqueID: device.uniqueID
+                    )
+                )
+            },
+            notificationCenter.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                self?.notify(.applicationBecameActive)
+            },
+        ]
+        isObserving = !registered.isEmpty || !notificationTokens.isEmpty
         lock.unlock()
     }
 
@@ -653,15 +1063,33 @@ final class LiveCoreAudioInputHardwareObserver:
         }
         self.listener = nil
         registeredAddresses = []
+        let tokens = notificationTokens
+        notificationTokens = []
         isObserving = false
         lock.unlock()
+        tokens.forEach(NotificationCenter.default.removeObserver)
     }
 
-    private func notify() {
+    private func handleCoreAudioChange(
+        selector: AudioObjectPropertySelector
+    ) {
+        let event: MicrophoneHardwareChangeEvent
+        switch selector {
+        case kAudioHardwarePropertyDevices:
+            event = .coreAudioDeviceListChanged
+        case kAudioHardwarePropertyDefaultInputDevice:
+            event = .defaultInputChanged
+        default:
+            return
+        }
+        notify(event)
+    }
+
+    private func notify(_ event: MicrophoneHardwareChangeEvent) {
         lock.lock()
         let continuations = Array(continuations.values)
         lock.unlock()
-        continuations.forEach { $0.yield(()) }
+        continuations.forEach { $0.yield(event) }
     }
 
     private static let observedAddresses = [
