@@ -7,7 +7,7 @@ final class CapturePermissionClientTests: XCTestCase {
     func testMapsSystemMicrophoneAuthorizationStatuses() {
         XCTAssertEqual(CapturePermissionStatus(.authorized), .authorized)
         XCTAssertEqual(CapturePermissionStatus(.denied), .denied)
-        XCTAssertEqual(CapturePermissionStatus(.restricted), .denied)
+        XCTAssertEqual(CapturePermissionStatus(.restricted), .restricted)
         XCTAssertEqual(CapturePermissionStatus(.notDetermined), .notDetermined)
     }
 
