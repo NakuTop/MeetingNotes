@@ -9,6 +9,11 @@ enum MicrophoneCaptureError: Error, Equatable, Sendable {
     case unableToStartSession
     case deviceDisconnected
     case runtimeFailure
+    case permissionNotDetermined
+    case permissionDenied
+    case permissionRestricted
+    case noUsableInputDevice
+    case captureNoFrames
 }
 
 actor MicrophoneCaptureSource: AudioCaptureSource {
