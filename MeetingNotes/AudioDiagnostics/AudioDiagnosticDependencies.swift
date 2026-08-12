@@ -52,6 +52,8 @@ struct LiveAudioDiagnosticPermissionChecker:
             .authorized
         case .denied:
             .denied
+        case .restricted:
+            .denied
         case .notDetermined:
             .notDetermined
         case .unavailable:
@@ -68,16 +70,14 @@ struct LiveAudioDiagnosticInputDeviceChecker:
     func inputDeviceIsAvailable() async -> Bool {
         do {
             let snapshot = try await catalog.snapshot()
-            let preferredID = await preference.preferredInputDeviceID()
-            switch AudioDevicePreferenceResolver.resolveInput(
-                preferredID: preferredID,
-                devices: snapshot.inputs
-            ) {
-            case .preferred, .systemDefault, .firstUsable, .fallback:
+            let preferred = await preference.preferredAudioInput()
+            if AudioInputDeviceResolver.resolveCapture(
+                preferred: preferred,
+                inputs: snapshot.inputs
+            ) != nil {
                 return true
-            case .unavailable:
-                return false
             }
+            return false
         } catch {
             return false
         }
@@ -108,7 +108,7 @@ struct LiveAudioDiagnosticCoordinatorFactory:
             inputDevice: inputDevice,
             outputTester: outputTester,
             microphoneTester: LiveMicrophoneAudioDiagnosticSignalTester(
-                provider: AVCaptureMicrophoneSampleProvider(),
+                provider: AdaptiveMicrophoneSampleProvider(),
                 inputPreference: inputPreference
             ),
             systemAudioTester: LiveSystemAudioDiagnosticSignalTester(),
