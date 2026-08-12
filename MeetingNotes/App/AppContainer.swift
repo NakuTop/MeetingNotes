@@ -257,6 +257,7 @@ final class AppContainer {
             documentsUseCase: meetingDocumentsUseCase
         )
         self.summarizeAndArchiveUseCase = summarizeAndArchiveUseCase
+        let microphoneProvider = AdaptiveMicrophoneSampleProvider()
         settingsViewModel = SettingsViewModel(
             credentialStore: credentialStore,
             settingsStore: settingsStore,
@@ -273,7 +274,7 @@ final class AppContainer {
                 ),
             audioInputTester: audioInputTester
                 ?? LiveMicrophoneAudioDiagnosticSignalTester(
-                    provider: AVCaptureMicrophoneSampleProvider(),
+                    provider: microphoneProvider,
                     inputPreference: audioInputDevicePreference
                 ),
             audioOutputTester: audioOutputTester,
@@ -296,7 +297,8 @@ final class AppContainer {
             diagnosticExplainer: audioDiagnosticExplainer
                 ?? LiveAudioDiagnosticExplanationRequester(
                     httpClient: httpClient
-                )
+                ),
+            microphoneRuntime: microphoneProvider
         )
         controlRouter.connect(
             coordinator: coordinator,

@@ -59,6 +59,18 @@ protocol AudioInputDevicePreferenceReading: Sendable {
     func preferredInputDeviceID() async -> String?
 }
 
+extension AudioInputDevicePreferenceReading {
+    func preferredAudioInput() async -> PreferredAudioInput {
+        let id = await preferredInputDeviceID()
+        return PreferredAudioInput(
+            backend: .automatic,
+            stableID: id,
+            legacyAVFoundationID: id,
+            coreAudioUID: nil
+        )
+    }
+}
+
 protocol AudioOutputDevicePreferenceReading: Sendable {
     func preferredOutputDeviceID() async -> String?
 }
@@ -85,26 +97,27 @@ final class MainActorAudioInputDevicePreferenceAdapter:
     }
 
     func preferredInputDeviceID() async -> String? {
-        let preferredID = settingsStore.preferredInputDeviceID
+        let preferred = settingsStore.preferredAudioInput
         guard let deviceCatalog else {
-            return preferredID
+            return preferred.legacyDisplayID
         }
         guard let snapshot = try? await deviceCatalog.snapshot() else {
-            return preferredID
+            return preferred.legacyDisplayID
         }
-        switch AudioDevicePreferenceResolver.resolveInput(
-            preferredID: preferredID,
-            devices: snapshot.inputs
-        ) {
-        case let .preferred(device),
-             let .firstUsable(device):
-            return device.id
-        case .systemDefault:
+        guard let resolution = AudioInputDeviceResolver.resolveCapture(
+            preferred: preferred,
+            inputs: snapshot.inputs
+        ) else {
             return nil
-        case let .fallback(selected, _):
-            return selected.id
-        case .unavailable:
-            return preferredID
+        }
+        switch resolution.plan {
+        case let .avFoundation(deviceID):
+            return deviceID
+        case .coreAudio:
+            // ScreenCaptureKit only accepts an AVCaptureDevice uniqueID;
+            // a Core Audio-only selection must fall back to the system
+            // default microphone in the online capture path.
+            return nil
         }
     }
 }
