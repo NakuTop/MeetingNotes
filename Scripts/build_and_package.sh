@@ -5,8 +5,16 @@ cd "$(dirname "$0")/.."
 
 CONFIGURATION="${1:-Release}"
 DERIVED_DATA=".deriveddata"
-APP="$DERIVED_DATA/Build/Products/$CONFIGURATION/MeetingNotes.app"
-DMG="MeetingNotes.dmg"
+if [ "$CONFIGURATION" = "Beta" ]; then
+  APP_NAME="MeetingNotesBeta"
+  DMG="MeetingNotes-1.2.0-beta-build4.dmg"
+  VOLUME_NAME="MeetingNotes Beta"
+else
+  APP_NAME="MeetingNotes"
+  DMG="MeetingNotes.dmg"
+  VOLUME_NAME="MeetingNotes"
+fi
+APP="$DERIVED_DATA/Build/Products/$CONFIGURATION/$APP_NAME.app"
 STAGING="/tmp/meetingnotes-dmg-$$"
 ASSETS="MeetingNotes/Assets.xcassets"
 
@@ -27,17 +35,25 @@ xcodebuild -project MeetingNotes.xcodeproj \
   -scheme MeetingNotes \
   -configuration "$CONFIGURATION" \
   -derivedDataPath "$DERIVED_DATA" \
+  ARCHS=arm64 ONLY_ACTIVE_ARCH=YES EXCLUDED_ARCHS=x86_64 \
   build
 
 echo "=== Step 3: Package DMG ==="
 mkdir -p "$STAGING"
 cp -R "$APP" "$STAGING/"
 ln -sf /Applications "$STAGING/Applications"
-hdiutil create -volname "MeetingNotes" \
+hdiutil create -volname "$VOLUME_NAME" \
   -srcfolder "$STAGING" \
   -ov -format UDZO \
   "$DMG"
 rm -rf "$STAGING"
+
+echo "=== Step 4: Verify signature and entitlements ==="
+codesign --force --deep --sign - \
+  --entitlements Configuration/MeetingNotes.entitlements \
+  "$APP"
+codesign --verify --deep --strict "$APP"
+codesign -d --entitlements :- "$APP" 2>/dev/null | plutil -p - | sed -n '1,40p'
 
 echo "=== Done ==="
 echo "App: $APP"
