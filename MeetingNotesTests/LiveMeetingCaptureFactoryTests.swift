@@ -267,8 +267,10 @@ final class LiveMeetingCaptureFactoryTests: XCTestCase {
 
         let providerIdentities =
             recorder.recordedProviderIdentities()
-        let captureIdentities =
-            recorder.recordedCaptureIdentities()
+        let captures = recorder.recordedCaptures()
+        let captureIdentities = captures.map {
+            ObjectIdentifier($0 as AnyObject)
+        }
         XCTAssertEqual(providerIdentities.count, 2)
         XCTAssertNotEqual(providerIdentities[0], providerIdentities[1])
         XCTAssertEqual(captureIdentities.count, 2)
@@ -532,7 +534,7 @@ private final class PreferredInputRecorder: @unchecked Sendable {
     private var preferredValues: [PreferredAudioInput] = []
     private var providers: [FactoryTestMicrophoneProvider] = []
     private var captureProviderCount = 0
-    private var captureIdentities: [ObjectIdentifier] = []
+    private var captures: [any AudioCaptureSource] = []
     private var screenIdentities: [ObjectIdentifier] = []
 
     func recordPreferred(_ value: PreferredAudioInput) {
@@ -556,9 +558,7 @@ private final class PreferredInputRecorder: @unchecked Sendable {
 
     func recordCapture(_ capture: any AudioCaptureSource) {
         lock.withLock {
-            captureIdentities.append(
-                ObjectIdentifier(capture as AnyObject)
-            )
+            captures.append(capture)
         }
     }
 
@@ -584,8 +584,14 @@ private final class PreferredInputRecorder: @unchecked Sendable {
         lock.withLock { captureProviderCount }
     }
 
+    func recordedCaptures() -> [any AudioCaptureSource] {
+        lock.withLock { captures }
+    }
+
     func recordedCaptureIdentities() -> [ObjectIdentifier] {
-        lock.withLock { captureIdentities }
+        lock.withLock {
+            captures.map { ObjectIdentifier($0 as AnyObject) }
+        }
     }
 
     func recordedScreenIdentities() -> [ObjectIdentifier] {
