@@ -386,12 +386,14 @@ actor AdaptiveMicrophoneSampleProvider:
     private let afterSampleIngestAttempt:
         (@Sendable () async -> Void)?
     private let onWaitingForProviderCleanup:
-        (@Sendable () async -> Void)?
+        (@Sendable () -> Void)?
 
     private var activeToken: UUID?
     private var relay: AdaptiveMicrophoneSampleRelay?
     private var runTask: Task<Void, Never>?
     private var providerCleanup: ProviderCleanup?
+    private var providerCleanupWaiters:
+        [UUID: CheckedContinuation<Void, Error>] = [:]
     private var startupContinuation:
         CheckedContinuation<Void, Error>?
     private var currentProvider: (any MicrophoneSampleProviding)?
@@ -428,7 +430,7 @@ actor AdaptiveMicrophoneSampleProvider:
         afterSampleIngestAttempt:
             (@Sendable () async -> Void)? = nil,
         onWaitingForProviderCleanup:
-            (@Sendable () async -> Void)? = nil
+            (@Sendable () -> Void)? = nil
     ) {
         self.avFoundationProvider = avFoundationProvider
         self.coreAudioProvider = coreAudioProvider
@@ -449,8 +451,7 @@ actor AdaptiveMicrophoneSampleProvider:
     ) async throws -> AsyncThrowingStream<MicrophoneSample, Error> {
         try Task.checkCancellation()
         if let cleanup = providerCleanup {
-            await onWaitingForProviderCleanup?()
-            await cleanup.task.value
+            try await waitForProviderCleanup(cleanup)
             try Task.checkCancellation()
         }
         guard activeToken == nil else {
@@ -1035,6 +1036,42 @@ actor AdaptiveMicrophoneSampleProvider:
     private func providerCleanupDidFinish(id: UUID) {
         guard providerCleanup?.id == id else { return }
         providerCleanup = nil
+        let waiters = Array(providerCleanupWaiters.values)
+        providerCleanupWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    private func waitForProviderCleanup(
+        _ cleanup: ProviderCleanup
+    ) async throws {
+        let waiterID = UUID()
+        try Task.checkCancellation()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                guard providerCleanup?.id == cleanup.id else {
+                    continuation.resume()
+                    return
+                }
+                guard !Task.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                providerCleanupWaiters[waiterID] = continuation
+                onWaitingForProviderCleanup?()
+            }
+        } onCancel: { [weak self] in
+            Task {
+                await self?.cancelProviderCleanupWaiter(id: waiterID)
+            }
+        }
+    }
+
+    private func cancelProviderCleanupWaiter(id: UUID) {
+        guard let continuation = providerCleanupWaiters.removeValue(
+            forKey: id
+        ) else { return }
+        continuation.resume(throwing: CancellationError())
     }
 
     private func handleTermination(token: UUID) async {
