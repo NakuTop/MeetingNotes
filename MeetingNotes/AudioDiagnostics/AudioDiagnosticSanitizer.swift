@@ -83,6 +83,9 @@ struct AudioDiagnosticUploadEnvelope: Codable, Sendable, Equatable {
     let microphoneMetrics: AudioDiagnosticUploadMetrics?
     let systemAudioMetrics: AudioDiagnosticUploadMetrics?
     let historicalPlaybackFailed: Bool
+    let microphoneTestOutcome: AudioDiagnosticStageOutcome
+    let systemAudioTestOutcome: AudioDiagnosticStageOutcome
+    let diagnosticFailureStage: AudioDiagnosticStage?
     let primaryIssueCode: AudioDiagnosticIssueCode
     let supportingIssueCodes: [AudioDiagnosticIssueCode]
     let localIssue: String
@@ -100,7 +103,7 @@ struct AudioDiagnosticSanitizer: Sendable {
         metadata: AudioDiagnosticUploadMetadata
     ) -> AudioDiagnosticUploadEnvelope {
         AudioDiagnosticUploadEnvelope(
-            schemaVersion: 1,
+            schemaVersion: 2,
             appVersion: sanitize(
                 metadata.appVersion,
                 fallback: "unknown"
@@ -123,12 +126,30 @@ struct AudioDiagnosticSanitizer: Sendable {
             microphoneMetrics: uploadMetrics(report.facts.microphoneMetrics),
             systemAudioMetrics: uploadMetrics(report.facts.systemAudioMetrics),
             historicalPlaybackFailed: report.facts.historicalPlaybackFailed,
+            microphoneTestOutcome: report.facts.microphoneTestOutcome,
+            systemAudioTestOutcome: report.facts.systemAudioTestOutcome,
+            diagnosticFailureStage: failureStage(
+                for: report.primaryIssue
+            ),
             primaryIssueCode: report.primaryIssue,
             supportingIssueCodes: report.supportingIssues,
             localIssue: report.localIssue,
             localSolution: report.localSolution,
             apiErrorCategory: metadata.apiErrorCategory
         )
+    }
+
+    private func failureStage(
+        for issue: AudioDiagnosticIssueCode
+    ) -> AudioDiagnosticStage? {
+        switch issue {
+        case .microphoneDiagnosticTimedOut, .microphoneDiagnosticFailed:
+            return .microphone
+        case .systemAudioDiagnosticTimedOut, .systemAudioDiagnosticFailed:
+            return .systemAudio
+        default:
+            return nil
+        }
     }
 
     private func uploadDevice(

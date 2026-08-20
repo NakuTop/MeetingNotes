@@ -29,7 +29,7 @@ final class AudioDiagnosticSanitizerTests: XCTestCase {
             metadata: metadata
         )
 
-        XCTAssertEqual(envelope.schemaVersion, 1)
+        XCTAssertEqual(envelope.schemaVersion, 2)
         XCTAssertEqual(envelope.appVersion, "1.2.3")
         XCTAssertEqual(envelope.hardwareModel, "MacBookPro M5")
         XCTAssertEqual(envelope.macOSVersion, "26.5")
@@ -48,6 +48,9 @@ final class AudioDiagnosticSanitizerTests: XCTestCase {
         XCTAssertEqual(envelope.microphoneMetrics?.frameCount, 144_000)
         XCTAssertEqual(envelope.microphoneMetrics?.level, .audible)
         XCTAssertEqual(envelope.systemAudioMetrics?.sampleRate, 48_000)
+        XCTAssertEqual(envelope.microphoneTestOutcome, .succeeded)
+        XCTAssertEqual(envelope.systemAudioTestOutcome, .succeeded)
+        XCTAssertNil(envelope.diagnosticFailureStage)
         XCTAssertEqual(envelope.primaryIssueCode, .captureHealthy)
         XCTAssertEqual(envelope.localIssue, "当前音频采集正常")
         XCTAssertEqual(envelope.apiErrorCategory, .timeout)
@@ -66,6 +69,7 @@ final class AudioDiagnosticSanitizerTests: XCTestCase {
                 "outputToneWasScheduled",
                 "userHeardOutputTone", "microphoneMetrics",
                 "systemAudioMetrics", "historicalPlaybackFailed",
+                "microphoneTestOutcome", "systemAudioTestOutcome",
                 "primaryIssueCode", "supportingIssueCodes", "localIssue",
                 "localSolution", "apiErrorCategory"
             ]
@@ -74,6 +78,7 @@ final class AudioDiagnosticSanitizerTests: XCTestCase {
             decoding: try JSONEncoder().encode(envelope),
             as: UTF8.self
         )
+        XCTAssertFalse(encoded.contains("diagnosticFailureStage"))
         XCTAssertFalse(encoded.contains("device-id-secret"))
         XCTAssertFalse(encoded.contains("transcript"))
         XCTAssertFalse(encoded.contains("recordingPath"))
@@ -122,7 +127,9 @@ final class AudioDiagnosticSanitizerTests: XCTestCase {
             userHeardOutputTone: true,
             microphoneMetrics: metrics,
             systemAudioMetrics: nil,
-            historicalPlaybackFailed: false
+            historicalPlaybackFailed: false,
+            microphoneTestOutcome: .succeeded,
+            systemAudioTestOutcome: .skipped
         )
         let report = AudioDiagnosticReport(
             primaryIssue: .microphoneSilent,
@@ -150,6 +157,51 @@ final class AudioDiagnosticSanitizerTests: XCTestCase {
         )
         XCTAssertNoThrow(try JSONEncoder().encode(envelope))
     }
+
+    func testTimeoutReportExposesStageOutcomeWithoutRawErrorText() throws {
+        let facts = AudioDiagnosticFacts(
+            microphonePermission: .authorized,
+            screenPermission: .authorized,
+            inputDeviceAvailable: true,
+            outputToneWasScheduled: true,
+            userHeardOutputTone: true,
+            microphoneMetrics: nil,
+            systemAudioMetrics: nil,
+            historicalPlaybackFailed: false,
+            microphoneTestOutcome: .timedOut,
+            systemAudioTestOutcome: .notRun
+        )
+        let report = AudioDiagnosticReport(
+            primaryIssue: .microphoneDiagnosticTimedOut,
+            supportingIssues: [],
+            facts: facts
+        )
+
+        let envelope = AudioDiagnosticSanitizer().makeEnvelope(
+            report: report,
+            metadata: AudioDiagnosticUploadMetadata(
+                appVersion: "1.2.0",
+                hardwareModel: "Mac",
+                macOSVersion: "26",
+                inputDevice: .init(name: "USB Microphone", status: .selected),
+                outputDevice: .init(name: "Speaker", status: .automatic),
+                apiErrorCategory: nil
+            )
+        )
+
+        XCTAssertEqual(envelope.schemaVersion, 2)
+        XCTAssertEqual(envelope.microphoneTestOutcome, .timedOut)
+        XCTAssertEqual(envelope.systemAudioTestOutcome, .notRun)
+        XCTAssertEqual(envelope.diagnosticFailureStage, .microphone)
+        XCTAssertEqual(envelope.primaryIssueCode, .microphoneDiagnosticTimedOut)
+        let encoded = String(
+            decoding: try JSONEncoder().encode(envelope),
+            as: UTF8.self
+        )
+        XCTAssertFalse(encoded.contains("timedOut("))
+        XCTAssertFalse(encoded.contains("AudioDiagnosticCoordinatorError"))
+        XCTAssertTrue(encoded.contains("\"diagnosticFailureStage\":\"microphone\""))
+    }
 }
 
 private func diagnosticReport() -> AudioDiagnosticReport {
@@ -170,7 +222,9 @@ private func diagnosticReport() -> AudioDiagnosticReport {
         userHeardOutputTone: true,
         microphoneMetrics: metrics,
         systemAudioMetrics: metrics,
-        historicalPlaybackFailed: false
+        historicalPlaybackFailed: false,
+        microphoneTestOutcome: .succeeded,
+        systemAudioTestOutcome: .succeeded
     )
     return AudioDiagnosticReport(
         primaryIssue: .captureHealthy,

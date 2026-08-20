@@ -221,7 +221,9 @@ private func clientDiagnosticReport() -> AudioDiagnosticReport {
         userHeardOutputTone: true,
         microphoneMetrics: metrics,
         systemAudioMetrics: metrics,
-        historicalPlaybackFailed: false
+        historicalPlaybackFailed: false,
+        microphoneTestOutcome: .succeeded,
+        systemAudioTestOutcome: .succeeded
     )
     return AudioDiagnosticReport(
         primaryIssue: .captureHealthy,

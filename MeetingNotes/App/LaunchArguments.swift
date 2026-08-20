@@ -659,7 +659,9 @@ private actor UITestAudioDiagnosticCoordinator:
                     userHeardOutputTone: heardTone,
                     microphoneMetrics: uiTestAudioMetrics(),
                     systemAudioMetrics: uiTestAudioMetrics(),
-                    historicalPlaybackFailed: false
+                    historicalPlaybackFailed: false,
+                    microphoneTestOutcome: .succeeded,
+                    systemAudioTestOutcome: .succeeded
                 )
             )
         )

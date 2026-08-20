@@ -370,7 +370,9 @@ private func facts(
     userHeardOutputTone: Bool? = nil,
     microphoneMetrics: AudioSignalMetrics? = nil,
     systemAudioMetrics: AudioSignalMetrics? = nil,
-    historicalPlaybackFailed: Bool = false
+    historicalPlaybackFailed: Bool = false,
+    microphoneTestOutcome: AudioDiagnosticStageOutcome = .notRun,
+    systemAudioTestOutcome: AudioDiagnosticStageOutcome = .notRun
 ) -> AudioDiagnosticFacts {
     AudioDiagnosticFacts(
         microphonePermission: microphonePermission,
@@ -380,7 +382,9 @@ private func facts(
         userHeardOutputTone: userHeardOutputTone,
         microphoneMetrics: microphoneMetrics,
         systemAudioMetrics: systemAudioMetrics,
-        historicalPlaybackFailed: historicalPlaybackFailed
+        historicalPlaybackFailed: historicalPlaybackFailed,
+        microphoneTestOutcome: microphoneTestOutcome,
+        systemAudioTestOutcome: systemAudioTestOutcome
     )
 }
 

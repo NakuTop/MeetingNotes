@@ -16,6 +16,29 @@ enum AudioDiagnosticPermissionStatus:
     }
 }
 
+enum AudioDiagnosticStage:
+    String,
+    Codable,
+    Sendable,
+    Equatable
+{
+    case microphone
+    case systemAudio
+}
+
+enum AudioDiagnosticStageOutcome:
+    String,
+    Codable,
+    Sendable,
+    Equatable
+{
+    case notRun
+    case skipped
+    case succeeded
+    case timedOut
+    case failed
+}
+
 enum AudioDiagnosticIssueCode:
     String,
     Codable,
@@ -32,6 +55,10 @@ enum AudioDiagnosticIssueCode:
     case systemAudioNoFrames
     case captureHealthy
     case playbackPipelineSuspected
+    case microphoneDiagnosticTimedOut
+    case systemAudioDiagnosticTimedOut
+    case microphoneDiagnosticFailed
+    case systemAudioDiagnosticFailed
 
     var localIssue: String {
         switch self {
@@ -53,6 +80,14 @@ enum AudioDiagnosticIssueCode:
             return "当前音频采集正常"
         case .playbackPipelineSuspected:
             return "历史无声问题可能出在保存或回放环节"
+        case .microphoneDiagnosticTimedOut:
+            return "麦克风智能检测超时"
+        case .systemAudioDiagnosticTimedOut:
+            return "系统音频智能检测超时"
+        case .microphoneDiagnosticFailed:
+            return "麦克风智能检测失败"
+        case .systemAudioDiagnosticFailed:
+            return "系统音频智能检测失败"
         }
     }
 
@@ -76,6 +111,14 @@ enum AudioDiagnosticIssueCode:
             return "无需修改音频设备；如果会议仍无声，请检查具体录音文件的保存与回放。"
         case .playbackPipelineSuspected:
             return "请用其他播放器检查原始录音文件，并重新打开 MeetingNotes 后再次回放。"
+        case .microphoneDiagnosticTimedOut:
+            return "麦克风手动测试正常时，可先重新运行智能诊断；若持续超时，可将诊断数据发送给 DeepSeek 分析检测阶段。"
+        case .systemAudioDiagnosticTimedOut:
+            return "请确认屏幕录制权限已开启；若扬声器手动测试正常，可将当前诊断数据发送给 DeepSeek 分析 ScreenCaptureKit 检测阶段。"
+        case .microphoneDiagnosticFailed:
+            return "可先重新运行智能诊断；若持续失败，可将诊断数据发送给 DeepSeek 分析麦克风检测阶段。"
+        case .systemAudioDiagnosticFailed:
+            return "请确认屏幕录制权限已开启；若持续失败，可将诊断数据发送给 DeepSeek 分析系统音频检测阶段。"
         }
     }
 }
@@ -89,6 +132,8 @@ struct AudioDiagnosticFacts: Sendable, Equatable {
     let microphoneMetrics: AudioSignalMetrics?
     let systemAudioMetrics: AudioSignalMetrics?
     let historicalPlaybackFailed: Bool
+    let microphoneTestOutcome: AudioDiagnosticStageOutcome
+    let systemAudioTestOutcome: AudioDiagnosticStageOutcome
 }
 
 struct AudioDiagnosticReport: Sendable, Equatable {

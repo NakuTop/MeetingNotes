@@ -673,10 +673,16 @@ final class SettingsViewModel {
             applyCoordinatorState(await activeDiagnostic.currentState())
         } catch {
             guard diagnosticGeneration == requestedGeneration else { return }
-            audioDiagnosticState = .failed(
-                local: currentDiagnosticPreview,
-                message: Self.diagnosticMessage(for: error)
-            )
+            let coordinatorState = await activeDiagnostic.currentState()
+            guard diagnosticGeneration == requestedGeneration else { return }
+            if case .readyForUpload = coordinatorState {
+                applyCoordinatorState(coordinatorState)
+            } else {
+                audioDiagnosticState = .failed(
+                    local: currentDiagnosticPreview,
+                    message: Self.diagnosticMessage(for: error)
+                )
+            }
         }
     }
 
@@ -1026,7 +1032,7 @@ final class SettingsViewModel {
         case .failed:
             audioDiagnosticState = .failed(
                 local: currentDiagnosticPreview,
-                message: "音频诊断未完成，请检查权限与设备后重试。"
+                message: "音频诊断未完成，请重新运行。"
             )
         }
     }
@@ -1185,12 +1191,17 @@ final class SettingsViewModel {
         switch error as? AudioDiagnosticCoordinatorError {
         case .recordingActive:
             "录音进行中无法运行音频诊断。"
-        case .timedOut:
-            "音频诊断超时，请检查设备连接后重试。"
+        case let .timedOut(stage):
+            switch stage {
+            case .microphone:
+                "麦克风智能检测未在预期时间内完成。手动测试正常时，可能是诊断启动阶段耗时较长。"
+            case .systemAudio:
+                "系统音频智能检测未在预期时间内完成。手动扬声器正常不代表 ScreenCaptureKit 系统音频检测已完成。"
+            }
         case .insufficientEvidence:
             "没有获得足够的音频证据，请重新运行诊断。"
         case .invalidState, nil:
-            "音频诊断未完成，请检查权限与设备后重试。"
+            "音频诊断未完成，请重新运行。"
         }
     }
 

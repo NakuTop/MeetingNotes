@@ -799,6 +799,72 @@ final class SettingsViewModelTests: XCTestCase {
         XCTAssertEqual(message, "请输入 DeepSeek API Key，或先保存已有 Key。")
     }
 
+    func testDiagnosticTimeoutReportRemainsUploadableToDeepSeek()
+        async throws {
+        let explainer = SettingsDiagnosticExplainerStub(
+            result: .success(
+                AudioDiagnosticExplanation(
+                    issue: "AI 问题",
+                    solution: "AI 方案",
+                    source: .deepSeek
+                )
+            )
+        )
+        let timeoutReport = AudioDiagnosticReport(
+            primaryIssue: .microphoneDiagnosticTimedOut,
+            supportingIssues: [],
+            facts: AudioDiagnosticFacts(
+                microphonePermission: .authorized,
+                screenPermission: .authorized,
+                inputDeviceAvailable: true,
+                outputToneWasScheduled: true,
+                userHeardOutputTone: true,
+                microphoneMetrics: nil,
+                systemAudioMetrics: nil,
+                historicalPlaybackFailed: false,
+                microphoneTestOutcome: .timedOut,
+                systemAudioTestOutcome: .notRun
+            )
+        )
+        let coordinator = SettingsDiagnosticCoordinatorStub(
+            report: timeoutReport
+        )
+        let fixture = try makeDiagnosticFixture(
+            coordinator: coordinator,
+            explainer: explainer
+        )
+        try fixture.credentials.save(
+            "test-key",
+            for: .deepSeekAPIKey
+        )
+
+        await fixture.viewModel.startSmartDiagnostic()
+        await fixture.viewModel.confirmOutputWasAudible(true)
+
+        guard case let .readyForUpload(preview) =
+                fixture.viewModel.audioDiagnosticState else {
+            return XCTFail("Expected timeout preview")
+        }
+        XCTAssertEqual(preview.primaryIssue, .microphoneDiagnosticTimedOut)
+        XCTAssertEqual(
+            preview.localIssue,
+            AudioDiagnosticIssueCode.microphoneDiagnosticTimedOut.localIssue
+        )
+        XCTAssertTrue(preview.allowlistedJSON.contains("microphoneTestOutcome"))
+        XCTAssertTrue(preview.allowlistedJSON.contains("\"timedOut\""))
+
+        await fixture.viewModel.sendDiagnosticToDeepSeek()
+
+        guard case let .completed(presentation) =
+                fixture.viewModel.audioDiagnosticState else {
+            return XCTFail("Expected DeepSeek completion")
+        }
+        XCTAssertEqual(presentation.issue, "AI 问题")
+        XCTAssertEqual(presentation.local.primaryIssue, .microphoneDiagnosticTimedOut)
+        let callCount = await explainer.callCount
+        XCTAssertEqual(callCount, 1)
+    }
+
     func testDiagnosticUploadUsesCurrentKeyAndSelectedModel() async throws {
         let explainer = SettingsDiagnosticExplainerStub(
             result: .success(
@@ -1915,7 +1981,9 @@ private func settingsDiagnosticReport(
             userHeardOutputTone: true,
             microphoneMetrics: audibleDiagnosticMetrics(),
             systemAudioMetrics: audibleDiagnosticMetrics(),
-            historicalPlaybackFailed: false
+            historicalPlaybackFailed: false,
+            microphoneTestOutcome: .succeeded,
+            systemAudioTestOutcome: .succeeded
         )
     )
 }

@@ -15,13 +15,14 @@ enum AudioDiagnosticCoordinatorError: Error, Sendable, Equatable {
     case recordingActive
     case invalidState(AudioDiagnosticCoordinatorState)
     case insufficientEvidence
-    case timedOut
+    case timedOut(AudioDiagnosticStage)
 }
 
 actor AudioDiagnosticCoordinator {
     private static let outputToneDuration: TimeInterval = 1
-    private static let signalTestDuration: TimeInterval = 3
-    private static let signalTestTimeout: TimeInterval = 4
+    private static let signalObservationDuration: TimeInterval = 3
+    private static let microphoneOperationTimeout: TimeInterval = 12
+    private static let systemAudioOperationTimeout: TimeInterval = 15
 
     private(set) var state: AudioDiagnosticCoordinatorState = .idle
 
@@ -91,38 +92,104 @@ actor AudioDiagnosticCoordinator {
         }
         resourcesRequireCleanup = true
 
-        do {
-            let microphoneMetrics: AudioSignalMetrics?
-            if permissionSnapshot.microphone.isAuthorized,
-               inputDeviceAvailable {
-                state = .testingMicrophone
-                microphoneMetrics = try await timeoutRacer.run(
-                    timeout: Self.signalTestTimeout
-                ) { [microphoneTester] in
-                    try await microphoneTester.testSignal(
-                        duration: Self.signalTestDuration
-                    )
-                }
-            } else {
-                microphoneMetrics = nil
-            }
+        let microphoneShouldRun =
+            permissionSnapshot.microphone.isAuthorized
+            && inputDeviceAvailable
+        let systemAudioShouldRun =
+            permissionSnapshot.screenRecording.isAuthorized
 
-            let systemAudioMetrics: AudioSignalMetrics?
-            if permissionSnapshot.screenRecording.isAuthorized {
-                state = .testingSystemAudio
-                systemAudioMetrics = try await timeoutRacer.run(
-                    timeout: Self.signalTestTimeout
-                ) { [systemAudioTester, outputTester] in
-                    try await systemAudioTester.testSignal(
-                        duration: Self.signalTestDuration
-                    ) {
-                        _ = try await outputTester.playTestTone(
-                            duration: Self.outputToneDuration
+        var microphoneOutcome: AudioDiagnosticStageOutcome =
+            microphoneShouldRun ? .notRun : .skipped
+        var systemAudioOutcome: AudioDiagnosticStageOutcome =
+            systemAudioShouldRun ? .notRun : .skipped
+        var microphoneMetrics: AudioSignalMetrics?
+        var systemAudioMetrics: AudioSignalMetrics?
+
+        do {
+            if microphoneShouldRun {
+                state = .testingMicrophone
+                do {
+                    microphoneMetrics = try await timeoutRacer.run(
+                        stage: .microphone,
+                        timeout: Self.microphoneOperationTimeout
+                    ) { [microphoneTester] in
+                        try await microphoneTester.testSignal(
+                            duration: Self.signalObservationDuration
                         )
                     }
+                    microphoneOutcome = .succeeded
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch let error as AudioDiagnosticCoordinatorError {
+                    guard error == .timedOut(.microphone) else {
+                        throw error
+                    }
+                    microphoneOutcome = .timedOut
+                } catch {
+                    microphoneOutcome = .failed
                 }
-            } else {
-                systemAudioMetrics = nil
+                guard microphoneOutcome == .succeeded else {
+                    await cleanupResourcesIfNeeded()
+                    state = .readyForUpload(
+                        stageFailureReport(
+                            permissionSnapshot: permissionSnapshot,
+                            primaryIssue: microphoneOutcome == .timedOut
+                                ? .microphoneDiagnosticTimedOut
+                                : .microphoneDiagnosticFailed,
+                            heardTone: heardTone,
+                            microphoneMetrics: microphoneMetrics,
+                            systemAudioMetrics: nil,
+                            microphoneOutcome: microphoneOutcome,
+                            systemAudioOutcome: .notRun
+                        )
+                    )
+                    return
+                }
+            }
+
+            if systemAudioShouldRun {
+                state = .testingSystemAudio
+                do {
+                    systemAudioMetrics = try await timeoutRacer.run(
+                        stage: .systemAudio,
+                        timeout: Self.systemAudioOperationTimeout
+                    ) { [systemAudioTester, outputTester] in
+                        try await systemAudioTester.testSignal(
+                            duration: Self.signalObservationDuration
+                        ) {
+                            _ = try await outputTester.playTestTone(
+                                duration: Self.outputToneDuration
+                            )
+                        }
+                    }
+                    systemAudioOutcome = .succeeded
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch let error as AudioDiagnosticCoordinatorError {
+                    guard error == .timedOut(.systemAudio) else {
+                        throw error
+                    }
+                    systemAudioOutcome = .timedOut
+                } catch {
+                    systemAudioOutcome = .failed
+                }
+                guard systemAudioOutcome == .succeeded else {
+                    await cleanupResourcesIfNeeded()
+                    state = .readyForUpload(
+                        stageFailureReport(
+                            permissionSnapshot: permissionSnapshot,
+                            primaryIssue: systemAudioOutcome == .timedOut
+                                ? .systemAudioDiagnosticTimedOut
+                                : .systemAudioDiagnosticFailed,
+                            heardTone: heardTone,
+                            microphoneMetrics: microphoneMetrics,
+                            systemAudioMetrics: nil,
+                            microphoneOutcome: microphoneOutcome,
+                            systemAudioOutcome: systemAudioOutcome
+                        )
+                    )
+                    return
+                }
             }
 
             let facts = AudioDiagnosticFacts(
@@ -133,7 +200,9 @@ actor AudioDiagnosticCoordinator {
                 userHeardOutputTone: heardTone,
                 microphoneMetrics: microphoneMetrics,
                 systemAudioMetrics: systemAudioMetrics,
-                historicalPlaybackFailed: false
+                historicalPlaybackFailed: false,
+                microphoneTestOutcome: microphoneOutcome,
+                systemAudioTestOutcome: systemAudioOutcome
             )
             guard let report = ruleEngine.evaluate(facts) else {
                 state = .failed("insufficientEvidence")
@@ -145,8 +214,6 @@ actor AudioDiagnosticCoordinator {
             await cleanupResourcesIfNeeded()
             if error is CancellationError {
                 state = .failed("cancelled")
-            } else if error as? AudioDiagnosticCoordinatorError == .timedOut {
-                state = .failed("timedOut")
             } else if case .failed = state {
                 // Preserve a more specific failure selected above.
             } else {
@@ -154,6 +221,33 @@ actor AudioDiagnosticCoordinator {
             }
             throw error
         }
+    }
+
+    private func stageFailureReport(
+        permissionSnapshot: AudioDiagnosticPermissionSnapshot,
+        primaryIssue: AudioDiagnosticIssueCode,
+        heardTone: Bool,
+        microphoneMetrics: AudioSignalMetrics?,
+        systemAudioMetrics: AudioSignalMetrics?,
+        microphoneOutcome: AudioDiagnosticStageOutcome,
+        systemAudioOutcome: AudioDiagnosticStageOutcome
+    ) -> AudioDiagnosticReport {
+        AudioDiagnosticReport(
+            primaryIssue: primaryIssue,
+            supportingIssues: [],
+            facts: AudioDiagnosticFacts(
+                microphonePermission: permissionSnapshot.microphone,
+                screenPermission: permissionSnapshot.screenRecording,
+                inputDeviceAvailable: inputDeviceAvailable,
+                outputToneWasScheduled: outputToneWasScheduled,
+                userHeardOutputTone: heardTone,
+                microphoneMetrics: microphoneMetrics,
+                systemAudioMetrics: systemAudioMetrics,
+                historicalPlaybackFailed: false,
+                microphoneTestOutcome: microphoneOutcome,
+                systemAudioTestOutcome: systemAudioOutcome
+            )
+        )
     }
 
     func cancel() async {

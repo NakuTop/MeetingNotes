@@ -153,6 +153,7 @@ extension AudioDiagnosticRuleEngine: AudioDiagnosticRuleEvaluating {}
 
 protocol AudioDiagnosticTimeoutRacing: Sendable {
     func run(
+        stage: AudioDiagnosticStage,
         timeout: TimeInterval,
         operation: @escaping @Sendable () async throws -> AudioSignalMetrics
     ) async throws -> AudioSignalMetrics
@@ -177,38 +178,248 @@ struct ContinuousAudioDiagnosticTimeoutSleeper:
 
 struct LiveAudioDiagnosticTimeoutRacer: AudioDiagnosticTimeoutRacing {
     private let sleeper: any AudioDiagnosticTimeoutSleeping
+    private let gateHooks: AudioDiagnosticOperationTimeoutGateHooks
 
     init(
         sleeper: any AudioDiagnosticTimeoutSleeping =
-            ContinuousAudioDiagnosticTimeoutSleeper()
+            ContinuousAudioDiagnosticTimeoutSleeper(),
+        gateHooks: AudioDiagnosticOperationTimeoutGateHooks = .none
     ) {
         self.sleeper = sleeper
+        self.gateHooks = gateHooks
     }
 
     func run(
+        stage: AudioDiagnosticStage,
         timeout: TimeInterval,
         operation: @escaping @Sendable () async throws -> AudioSignalMetrics
     ) async throws -> AudioSignalMetrics {
-        try await withThrowingTaskGroup(of: AudioSignalMetrics.self) {
-            group in
-            group.addTask {
-                try await operation()
-            }
-            group.addTask { [sleeper] in
-                try await sleeper.sleep(for: timeout)
-                throw AudioDiagnosticCoordinatorError.timedOut
-            }
+        let gate = AudioDiagnosticOperationTimeoutGate(
+            stage: stage,
+            timeout: timeout,
+            operation: operation,
+            sleeper: sleeper,
+            hooks: gateHooks
+        )
+        return try await gate.run()
+    }
+}
 
-            do {
-                guard let result = try await group.next() else {
-                    throw AudioDiagnosticCoordinatorError.timedOut
+struct AudioDiagnosticOperationTimeoutGateHooks: Sendable {
+    let beforeContinuationRegistration: @Sendable () -> Void
+    let continuationRegistered: @Sendable () -> Void
+    let beforeTaskInstallation: @Sendable () -> Void
+    let cancellationRecorded: @Sendable () -> Void
+
+    init(
+        beforeContinuationRegistration: @escaping @Sendable () -> Void = {},
+        continuationRegistered: @escaping @Sendable () -> Void = {},
+        beforeTaskInstallation: @escaping @Sendable () -> Void = {},
+        cancellationRecorded: @escaping @Sendable () -> Void = {}
+    ) {
+        self.beforeContinuationRegistration = beforeContinuationRegistration
+        self.continuationRegistered = continuationRegistered
+        self.beforeTaskInstallation = beforeTaskInstallation
+        self.cancellationRecorded = cancellationRecorded
+    }
+
+    static let none = AudioDiagnosticOperationTimeoutGateHooks()
+}
+
+private final class AudioDiagnosticOperationTimeoutGate:
+    @unchecked Sendable {
+    private struct OperationFailure: @unchecked Sendable {
+        let error: any Error
+    }
+
+    private enum TerminalResult: @unchecked Sendable {
+        case success(AudioSignalMetrics)
+        case failure(OperationFailure)
+        case timedOut
+        case cancelled
+    }
+
+    private struct TerminalAction {
+        let continuation: CheckedContinuation<AudioSignalMetrics, Error>?
+        let operationTask: Task<Void, Never>?
+        let timeoutTask: Task<Void, Never>?
+    }
+
+    private let lock = NSLock()
+    private let stage: AudioDiagnosticStage
+    private let timeout: TimeInterval
+    private let operation: @Sendable () async throws -> AudioSignalMetrics
+    private let sleeper: any AudioDiagnosticTimeoutSleeping
+    private let hooks: AudioDiagnosticOperationTimeoutGateHooks
+
+    private var continuation: CheckedContinuation<AudioSignalMetrics, Error>?
+    private var operationTask: Task<Void, Never>?
+    private var timeoutTask: Task<Void, Never>?
+    private var terminalResult: TerminalResult?
+
+    init(
+        stage: AudioDiagnosticStage,
+        timeout: TimeInterval,
+        operation: @escaping @Sendable () async throws -> AudioSignalMetrics,
+        sleeper: any AudioDiagnosticTimeoutSleeping,
+        hooks: AudioDiagnosticOperationTimeoutGateHooks
+    ) {
+        self.stage = stage
+        self.timeout = timeout
+        self.operation = operation
+        self.sleeper = sleeper
+        self.hooks = hooks
+    }
+
+    func run() async throws -> AudioSignalMetrics {
+        try Task.checkCancellation()
+        return try await withTaskCancellationHandler {
+            hooks.beforeContinuationRegistration()
+            return try await withCheckedThrowingContinuation { continuation in
+                if let terminalResult = registerContinuation(continuation) {
+                    resume(continuation, with: terminalResult)
+                    return
                 }
-                group.cancelAll()
-                return result
-            } catch {
-                group.cancelAll()
-                throw error
+                hooks.continuationRegistered()
+                let operation = self.operation
+                let operationTask = Task { [weak self] in
+                    do {
+                        let metrics = try await operation()
+                        self?.operationSucceeded(metrics)
+                    } catch {
+                        self?.operationFailed(
+                            OperationFailure(error: error)
+                        )
+                    }
+                }
+                let sleeper = self.sleeper
+                let timeout = self.timeout
+                let timeoutTask = Task { [weak self] in
+                    try? await sleeper.sleep(for: timeout)
+                    self?.timeoutFired()
+                }
+                hooks.beforeTaskInstallation()
+                installTasks(
+                    operationTask: operationTask,
+                    timeoutTask: timeoutTask
+                )
             }
+        } onCancel: {
+            self.cancelPending()
+        }
+    }
+
+    private func registerContinuation(
+        _ continuation: CheckedContinuation<AudioSignalMetrics, Error>
+    ) -> TerminalResult? {
+        lock.withLock {
+            if let terminalResult {
+                return terminalResult
+            }
+            self.continuation = continuation
+            return nil
+        }
+    }
+
+    private func installTasks(
+        operationTask: Task<Void, Never>,
+        timeoutTask: Task<Void, Never>
+    ) {
+        let shouldCancel = lock.withLock { () -> Bool in
+            guard terminalResult == nil else { return true }
+            self.operationTask = operationTask
+            self.timeoutTask = timeoutTask
+            return false
+        }
+        if shouldCancel {
+            operationTask.cancel()
+            timeoutTask.cancel()
+        }
+    }
+
+    private func operationSucceeded(_ metrics: AudioSignalMetrics) {
+        finish(
+            with: .success(metrics),
+            cancelOperation: false,
+            cancelTimeout: true
+        )
+    }
+
+    private func operationFailed(_ failure: OperationFailure) {
+        finish(
+            with: .failure(failure),
+            cancelOperation: false,
+            cancelTimeout: true
+        )
+    }
+
+    private func timeoutFired() {
+        finish(
+            with: .timedOut,
+            cancelOperation: true,
+            cancelTimeout: false
+        )
+    }
+
+    private func cancelPending() {
+        let cancellationWon = finish(
+            with: .cancelled,
+            cancelOperation: true,
+            cancelTimeout: true
+        )
+        if cancellationWon {
+            hooks.cancellationRecorded()
+        }
+    }
+
+    @discardableResult
+    private func finish(
+        with result: TerminalResult,
+        cancelOperation: Bool,
+        cancelTimeout: Bool
+    ) -> Bool {
+        let action = lock.withLock { () -> TerminalAction? in
+            guard terminalResult == nil else { return nil }
+            terminalResult = result
+            let action = TerminalAction(
+                continuation: continuation,
+                operationTask: operationTask,
+                timeoutTask: timeoutTask
+            )
+            continuation = nil
+            operationTask = nil
+            timeoutTask = nil
+            return action
+        }
+        guard let action else { return false }
+
+        if cancelOperation {
+            action.operationTask?.cancel()
+        }
+        if cancelTimeout {
+            action.timeoutTask?.cancel()
+        }
+        if let continuation = action.continuation {
+            resume(continuation, with: result)
+        }
+        return true
+    }
+
+    private func resume(
+        _ continuation: CheckedContinuation<AudioSignalMetrics, Error>,
+        with result: TerminalResult
+    ) {
+        switch result {
+        case let .success(metrics):
+            continuation.resume(returning: metrics)
+        case let .failure(failure):
+            continuation.resume(throwing: failure.error)
+        case .timedOut:
+            continuation.resume(
+                throwing: AudioDiagnosticCoordinatorError.timedOut(stage)
+            )
+        case .cancelled:
+            continuation.resume(throwing: CancellationError())
         }
     }
 }
