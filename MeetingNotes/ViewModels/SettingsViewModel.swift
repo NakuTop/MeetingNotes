@@ -141,6 +141,11 @@ private enum SettingsAudioOperation: Equatable {
     case diagnostic
 }
 
+private struct SettingsAudioOperationClaim: Equatable {
+    let id: UInt64
+    let operation: SettingsAudioOperation
+}
+
 private struct SettingsDiagnosticOperationTask {
     let id: UInt64
     let task: Task<Void, Error>
@@ -284,8 +289,10 @@ final class SettingsViewModel {
     private var diagnosticGeneration: UInt64 = 0
     private var inputTestGeneration: UInt64 = 0
     private var outputTestGeneration: UInt64 = 0
-    private var activeAudioOperation: SettingsAudioOperation?
+    private var audioOperationSequence: UInt64 = 0
+    private var activeAudioOperation: SettingsAudioOperationClaim?
     private var isCancellingAudioOperation = false
+    private var cancellingAudioOperationClaimID: UInt64?
     private var diagnosticOperationSequence: UInt64 = 0
     private var activeDiagnosticOperation: SettingsDiagnosticOperationTask?
     private var audioCleanupSequence: UInt64 = 0
@@ -521,7 +528,7 @@ final class SettingsViewModel {
             )
             return
         }
-        guard claimAudioOperation(
+        guard let operationClaimID = claimAudioOperation(
             .inputTest,
             settingsSession: settingsSession
         ) else { return }
@@ -530,7 +537,10 @@ final class SettingsViewModel {
         inputTestGeneration &+= 1
         let requestedGeneration = inputTestGeneration
         defer {
-            releaseAudioOperation(.inputTest)
+            releaseAudioOperation(
+                .inputTest,
+                claimID: operationClaimID
+            )
         }
         audioInputTestState = .testing(nil)
         do {
@@ -574,7 +584,7 @@ final class SettingsViewModel {
             )
             return
         }
-        guard claimAudioOperation(
+        guard let operationClaimID = claimAudioOperation(
             .outputTest,
             settingsSession: settingsSession
         ) else { return }
@@ -583,7 +593,10 @@ final class SettingsViewModel {
         outputTestGeneration &+= 1
         let requestedGeneration = outputTestGeneration
         defer {
-            releaseAudioOperation(.outputTest)
+            releaseAudioOperation(
+                .outputTest,
+                claimID: operationClaimID
+            )
         }
         audioOutputTestState = .testing
         do {
@@ -619,14 +632,17 @@ final class SettingsViewModel {
             )
             return
         }
-        guard claimAudioOperation(
+        guard let operationClaimID = claimAudioOperation(
             .diagnostic,
             settingsSession: settingsSession
         ) else { return }
         var shouldKeepOperationClaimed = false
         defer {
             if !shouldKeepOperationClaimed {
-                releaseAudioOperation(.diagnostic)
+                releaseAudioOperation(
+                    .diagnostic,
+                    claimID: operationClaimID
+                )
             }
         }
 
@@ -635,18 +651,37 @@ final class SettingsViewModel {
         let requestedGeneration = diagnosticGeneration
         await refreshAudioDevices()
         guard diagnosticGeneration == requestedGeneration,
-              activeAudioOperation == .diagnostic else { return }
+              isAudioOperationClaimCurrent(
+                .diagnostic,
+                claimID: operationClaimID
+              ) else { return }
         audioDiagnosticState = .running(.checkingPermissions)
         let coordinator = await diagnosticCoordinatorFactory.makeCoordinator()
-        guard diagnosticGeneration == requestedGeneration else {
+        guard diagnosticGeneration == requestedGeneration,
+              isAudioOperationClaimCurrent(
+                .diagnostic,
+                claimID: operationClaimID
+              ) else {
             await coordinator.cancel()
             return
         }
         activeDiagnostic = coordinator
 
-        do {
-            audioDiagnosticState = .running(.playingOutputTone)
+        diagnosticOperationSequence &+= 1
+        let preparationOperationID = diagnosticOperationSequence
+        let preparationTask = Task<Void, Error> {
             try await coordinator.prepare()
+        }
+        activeDiagnosticOperation = SettingsDiagnosticOperationTask(
+            id: preparationOperationID,
+            task: preparationTask
+        )
+        do {
+            defer {
+                finishDiagnosticOperation(preparationOperationID)
+            }
+            audioDiagnosticState = .running(.playingOutputTone)
+            try await preparationTask.value
             guard diagnosticGeneration == requestedGeneration else { return }
             applyCoordinatorState(await coordinator.currentState())
             shouldKeepOperationClaimed =
@@ -665,7 +700,8 @@ final class SettingsViewModel {
         guard !areAudioControlsDisabled else { return }
         guard case .awaitingOutputConfirmation = audioDiagnosticState,
               let activeDiagnostic,
-              activeAudioOperation == .diagnostic else { return }
+              let operationClaim = activeAudioOperation,
+              operationClaim.operation == .diagnostic else { return }
         let requestedGeneration = diagnosticGeneration
         diagnosticOperationSequence &+= 1
         let operationID = diagnosticOperationSequence
@@ -680,7 +716,10 @@ final class SettingsViewModel {
         )
         defer {
             finishDiagnosticOperation(operationID)
-            releaseAudioOperation(.diagnostic)
+            releaseAudioOperation(
+                .diagnostic,
+                claimID: operationClaim.id
+            )
         }
         audioDiagnosticState = .running(.testingMicrophone)
         let monitor = Task { @MainActor [weak self] in
@@ -781,6 +820,7 @@ final class SettingsViewModel {
     func cancelAudioDiagnostic() async {
         guard !isCancellingAudioOperation else { return }
         isCancellingAudioOperation = true
+        cancellingAudioOperationClaimID = activeAudioOperation?.id
         activeDiagnosticOperation?.task.cancel()
         diagnosticGeneration &+= 1
         inputTestGeneration &+= 1
@@ -833,23 +873,42 @@ final class SettingsViewModel {
     private func claimAudioOperation(
         _ operation: SettingsAudioOperation,
         settingsSession: UInt64
-    ) -> Bool {
+    ) -> UInt64? {
         guard activeAudioOperation == nil,
               !isCancellingAudioOperation,
               isAudioSettingsVisible,
               audioSettingsSessionGeneration == settingsSession else {
-            return false
+            return nil
         }
-        activeAudioOperation = operation
-        return true
+        audioOperationSequence &+= 1
+        let claimID = audioOperationSequence
+        activeAudioOperation = SettingsAudioOperationClaim(
+            id: claimID,
+            operation: operation
+        )
+        return claimID
     }
 
     private func releaseAudioOperation(
-        _ operation: SettingsAudioOperation
+        _ operation: SettingsAudioOperation,
+        claimID: UInt64
     ) {
         guard !isCancellingAudioOperation else { return }
-        guard activeAudioOperation == operation else { return }
+        guard isAudioOperationClaimCurrent(
+            operation,
+            claimID: claimID
+        ) else { return }
         activeAudioOperation = nil
+    }
+
+    private func isAudioOperationClaimCurrent(
+        _ operation: SettingsAudioOperation,
+        claimID: UInt64
+    ) -> Bool {
+        activeAudioOperation == SettingsAudioOperationClaim(
+            id: claimID,
+            operation: operation
+        )
     }
 
     private func finishDiagnosticOperation(_ operationID: UInt64) {
@@ -868,7 +927,10 @@ final class SettingsViewModel {
         guard isCancellingAudioOperation,
               activeDiagnosticOperation == nil,
               activeAudioCleanup == nil else { return }
-        activeAudioOperation = nil
+        if activeAudioOperation?.id == cancellingAudioOperationClaimID {
+            activeAudioOperation = nil
+        }
+        cancellingAudioOperationClaimID = nil
         isCancellingAudioOperation = false
     }
 

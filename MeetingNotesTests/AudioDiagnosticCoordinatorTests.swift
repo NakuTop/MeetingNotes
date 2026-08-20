@@ -1012,8 +1012,14 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
 
     func testTimeoutDoesNotDoubleResume() async throws {
         let operation = NonCooperativeAudioDiagnosticOperation()
+        let lateTerminalAttempted = AudioDiagnosticGateTestSignal()
         let racer = LiveAudioDiagnosticTimeoutRacer(
-            sleeper: ImmediateTimeoutSleeper()
+            sleeper: ImmediateTimeoutSleeper(),
+            gateHooks: AudioDiagnosticOperationTimeoutGateHooks(
+                operationTerminalAttempted: {
+                    lateTerminalAttempted.signal()
+                }
+            )
         )
 
         do {
@@ -1033,7 +1039,7 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
 
         await operation.releaseSuccess()
         await operation.releaseSuccess()
-        try await Task.sleep(for: .milliseconds(50))
+        await lateTerminalAttempted.wait()
     }
 
     func testCancellationBeforeContinuationRegistrationDoesNotHang()
