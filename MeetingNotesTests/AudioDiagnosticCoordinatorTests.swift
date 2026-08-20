@@ -88,10 +88,12 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
         XCTAssertEqual(events.count(of: "inputDevice"), 0)
     }
 
-    func testCoordinatorCancelDuringTonePreventsLateAwaitingState()
+    func testCancelDuringToneStopsAndCompletesPreparationWithoutManualRelease()
         async throws {
         let events = AudioDiagnosticEventRecorder()
         let output = SuspendingOutputTester(events: events)
+        let callerFinished = expectation(description: "caller finished")
+        let callerFinishedSignal = AudioDiagnosticGateTestSignal()
         let coordinator = AudioDiagnosticCoordinator(
             recordingActivity: RecordingActivityStub(
                 isActive: false,
@@ -113,26 +115,65 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
             systemAudioTester: SystemSignalTesterStub(),
             timeoutRacer: ImmediateTimeoutRacer()
         )
-        let caller = Task {
-            try await coordinator.prepare()
+        let caller = Task { () -> Bool in
+            defer {
+                callerFinishedSignal.signal()
+                callerFinished.fulfill()
+            }
+            do {
+                try await coordinator.prepare()
+                return false
+            } catch {
+                return error is CancellationError
+            }
         }
         await output.waitUntilPlayStarted()
 
+        caller.cancel()
         await coordinator.cancel()
-        await output.releaseTone()
+        await fulfillment(of: [callerFinished], timeout: 0.5)
 
-        do {
-            try await caller.value
-            XCTFail("Expected cancelled preparation")
-        } catch {
-            XCTAssertTrue(
-                error is CancellationError,
-                "Expected CancellationError, got \(error)"
-            )
+        if !callerFinishedSignal.isSignaled {
+            await output.releaseToneForTestTeardown()
         }
+        let callerWasCancelled = await caller.value
+        XCTAssertTrue(callerWasCancelled)
         let state = await coordinator.state
         XCTAssertEqual(state, .failed("cancelled"))
         XCTAssertEqual(events.count(of: "tone"), 1)
+        XCTAssertEqual(events.count(of: "outputStop"), 1)
+    }
+
+    func testPreparationToneFailureTransitionsToCoherentFailedState()
+        async throws {
+        let events = AudioDiagnosticEventRecorder()
+        let output = FailingPreparationOutputTester(events: events)
+        let coordinator = AudioDiagnosticCoordinator(
+            recordingActivity: RecordingActivityStub(isActive: false),
+            permissions: PermissionSnapshotStub(
+                snapshot: AudioDiagnosticPermissionSnapshot(
+                    microphone: .authorized,
+                    screenRecording: .authorized
+                )
+            ),
+            inputDevice: InputDeviceAvailabilityStub(isAvailable: true),
+            outputTester: output,
+            microphoneTester: SignalTesterStub(),
+            systemAudioTester: SystemSignalTesterStub(),
+            timeoutRacer: ImmediateTimeoutRacer()
+        )
+
+        do {
+            try await coordinator.prepare()
+            XCTFail("Expected tone failure")
+        } catch {
+            XCTAssertTrue(error is AudioDiagnosticTestFailure)
+        }
+
+        let state = await coordinator.state
+        XCTAssertEqual(state, .failed("outputToneFailed"))
+        XCTAssertEqual(events.count(of: "tone"), 1)
+        XCTAssertEqual(events.count(of: "outputStop"), 1)
     }
 
     func testConfirmedToneMeasuresBothTracksAndProducesHealthyReport()
@@ -2168,13 +2209,15 @@ private actor SuspendingOutputTester: AudioOutputTesting {
 
     func stop() async {
         events.append("outputStop")
+        continuation?.resume(throwing: CancellationError())
+        continuation = nil
     }
 
     func waitUntilPlayStarted() async {
         await playStarted.wait()
     }
 
-    func releaseTone() {
+    func releaseToneForTestTeardown() {
         continuation?.resume(
             returning: AudioOutputTestResult(
                 wasScheduled: true,
@@ -2183,6 +2226,26 @@ private actor SuspendingOutputTester: AudioOutputTesting {
             )
         )
         continuation = nil
+    }
+}
+
+private actor FailingPreparationOutputTester: AudioOutputTesting {
+    private let events: AudioDiagnosticEventRecorder
+
+    init(events: AudioDiagnosticEventRecorder) {
+        self.events = events
+    }
+
+    func playTestTone(
+        duration: TimeInterval
+    ) async throws -> AudioOutputTestResult {
+        _ = duration
+        events.append("tone")
+        throw AudioDiagnosticTestFailure.failed
+    }
+
+    func stop() async {
+        events.append("outputStop")
     }
 }
 

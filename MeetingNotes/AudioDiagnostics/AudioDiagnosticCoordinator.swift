@@ -41,6 +41,7 @@ actor AudioDiagnosticCoordinator {
     private var outputToneWasScheduled = false
     private var resourcesRequireCleanup = false
     private var preparationGeneration: UInt64 = 0
+    private var preparationToneRequiresCleanup = false
 
     init(
         recordingActivity:
@@ -90,16 +91,35 @@ actor AudioDiagnosticCoordinator {
         inputDeviceAvailable = currentInputDeviceAvailable
 
         state = .playingOutputTone
+        preparationToneRequiresCleanup = true
         let result: AudioOutputTestResult
         do {
             result = try await outputTester.playTestTone(
                 duration: Self.outputToneDuration
             )
-        } catch {
             try ensurePreparationIsCurrent(requestedGeneration)
+        } catch {
+            let generationIsCurrent =
+                preparationGeneration == requestedGeneration
+            let wasCancelled =
+                !generationIsCurrent
+                || Task.isCancelled
+                || error is CancellationError
+            if generationIsCurrent {
+                if wasCancelled {
+                    preparationGeneration &+= 1
+                    state = .failed("cancelled")
+                } else {
+                    state = .failed("outputToneFailed")
+                }
+            }
+            await stopPreparationToneIfNeeded()
+            if wasCancelled {
+                throw CancellationError()
+            }
             throw error
         }
-        try ensurePreparationIsCurrent(requestedGeneration)
+        preparationToneRequiresCleanup = false
         outputToneWasScheduled = result.wasScheduled
         state = .awaitingOutputConfirmation
     }
@@ -287,7 +307,14 @@ actor AudioDiagnosticCoordinator {
     func cancel() async {
         preparationGeneration &+= 1
         state = .failed("cancelled")
+        await stopPreparationToneIfNeeded()
         await cleanupResourcesIfNeeded()
+    }
+
+    private func stopPreparationToneIfNeeded() async {
+        guard preparationToneRequiresCleanup else { return }
+        preparationToneRequiresCleanup = false
+        await outputTester.stop()
     }
 
     private func cleanupResourcesIfNeeded() async {
