@@ -1039,6 +1039,71 @@ final class SettingsViewModelTests: XCTestCase {
         XCTAssertEqual(confirmationCount, 1)
     }
 
+    func testCancelDuringPreparationStateFetchCannotRepublishStaleState()
+        async throws {
+        let coordinator = PreparationStateFetchRaceSettingsCoordinator()
+        let factory = SettingsDiagnosticCoordinatorFactoryStub(
+            coordinator: coordinator
+        )
+        let fixture = try makeFixture(
+            diagnosticCoordinatorFactory: factory
+        )
+        let firstStart = Task { @MainActor in
+            await fixture.viewModel.startSmartDiagnostic()
+        }
+        await coordinator.waitUntilStateFetchStarted()
+
+        await fixture.viewModel.cancelAudioDiagnostic()
+        await coordinator.waitUntilCleanupFinished()
+        XCTAssertEqual(fixture.viewModel.audioDiagnosticState, .idle)
+
+        coordinator.releaseStateFetch()
+        await firstStart.value
+        XCTAssertEqual(fixture.viewModel.audioDiagnosticState, .idle)
+
+        await fixture.viewModel.startSmartDiagnostic()
+        let makeCount = await factory.makeCount
+        XCTAssertEqual(makeCount, 2)
+        XCTAssertEqual(
+            fixture.viewModel.audioDiagnosticState,
+            .awaitingOutputConfirmation
+        )
+    }
+
+    func testCancelDuringConfirmationStateFetchCannotRepublishStaleState()
+        async throws {
+        let coordinator = ConfirmationStateFetchRaceSettingsCoordinator(
+            report: settingsDiagnosticReport(.captureHealthy)
+        )
+        let factory = SettingsDiagnosticCoordinatorFactoryStub(
+            coordinator: coordinator
+        )
+        let fixture = try makeFixture(
+            diagnosticCoordinatorFactory: factory
+        )
+        await fixture.viewModel.startSmartDiagnostic()
+        let confirmationTask = Task { @MainActor in
+            await fixture.viewModel.confirmOutputWasAudible(true)
+        }
+        await coordinator.waitUntilConfirmationStateFetchStarted()
+
+        await fixture.viewModel.cancelAudioDiagnostic()
+        await coordinator.waitUntilCleanupFinished()
+        XCTAssertEqual(fixture.viewModel.audioDiagnosticState, .idle)
+
+        coordinator.releaseConfirmationStateFetch()
+        await confirmationTask.value
+        XCTAssertEqual(fixture.viewModel.audioDiagnosticState, .idle)
+
+        await fixture.viewModel.startSmartDiagnostic()
+        let makeCount = await factory.makeCount
+        XCTAssertEqual(makeCount, 2)
+        XCTAssertEqual(
+            fixture.viewModel.audioDiagnosticState,
+            .awaitingOutputConfirmation
+        )
+    }
+
     func testSpeakerDiarizationPreferenceDefaultsOffAndLoadsAndSaves() async throws {
         let fixture = try makeFixture()
 
@@ -2146,6 +2211,111 @@ private actor NonCooperativePreparationSettingsDiagnosticCoordinator:
 
     nonisolated func releaseFirstPreparation() {
         firstPreparation.release()
+    }
+
+    func waitUntilCleanupFinished() async {
+        await cleanupFinished.wait()
+    }
+}
+
+private actor PreparationStateFetchRaceSettingsCoordinator:
+    AudioDiagnosticCoordinating {
+    private let stateFetchStarted = SettingsDiagnosticTestSignal()
+    private let stateFetchRelease = SettingsDiagnosticTestSignal()
+    private let cleanupFinished = SettingsDiagnosticTestSignal()
+    private var stateFetchCount = 0
+    private var current: AudioDiagnosticCoordinatorState = .idle
+
+    func prepare() async throws {
+        current = .awaitingOutputConfirmation
+    }
+
+    func continueAfterOutputConfirmation(heardTone: Bool) async throws {
+        _ = heardTone
+    }
+
+    func cancel() async {
+        current = .failed("cancelled")
+        cleanupFinished.signal()
+    }
+
+    func currentState() async -> AudioDiagnosticCoordinatorState {
+        stateFetchCount += 1
+        let snapshot = current
+        if stateFetchCount == 1 {
+            stateFetchStarted.signal()
+            await stateFetchRelease.wait()
+        }
+        return snapshot
+    }
+
+    func waitUntilStateFetchStarted() async {
+        await stateFetchStarted.wait()
+    }
+
+    nonisolated func releaseStateFetch() {
+        stateFetchRelease.signal()
+    }
+
+    func waitUntilCleanupFinished() async {
+        await cleanupFinished.wait()
+    }
+}
+
+private actor ConfirmationStateFetchRaceSettingsCoordinator:
+    AudioDiagnosticCoordinating {
+    private let report: AudioDiagnosticReport
+    private let monitorStateFetchStarted = SettingsDiagnosticTestSignal()
+    private let monitorStateFetchRelease = SettingsDiagnosticTestSignal()
+    private let confirmationStateFetchStarted = SettingsDiagnosticTestSignal()
+    private let confirmationStateFetchRelease = SettingsDiagnosticTestSignal()
+    private let cleanupFinished = SettingsDiagnosticTestSignal()
+    private var stateFetchCount = 0
+    private var current: AudioDiagnosticCoordinatorState = .idle
+
+    init(report: AudioDiagnosticReport) {
+        self.report = report
+    }
+
+    func prepare() async throws {
+        current = .awaitingOutputConfirmation
+    }
+
+    func continueAfterOutputConfirmation(heardTone: Bool) async throws {
+        _ = heardTone
+        current = .testingMicrophone
+        await monitorStateFetchStarted.wait()
+        current = .readyForUpload(report)
+    }
+
+    func cancel() async {
+        current = .failed("cancelled")
+        monitorStateFetchRelease.signal()
+        cleanupFinished.signal()
+    }
+
+    func currentState() async -> AudioDiagnosticCoordinatorState {
+        stateFetchCount += 1
+        let snapshot = current
+        switch stateFetchCount {
+        case 2:
+            monitorStateFetchStarted.signal()
+            await monitorStateFetchRelease.wait()
+        case 3:
+            confirmationStateFetchStarted.signal()
+            await confirmationStateFetchRelease.wait()
+        default:
+            break
+        }
+        return snapshot
+    }
+
+    func waitUntilConfirmationStateFetchStarted() async {
+        await confirmationStateFetchStarted.wait()
+    }
+
+    nonisolated func releaseConfirmationStateFetch() {
+        confirmationStateFetchRelease.signal()
     }
 
     func waitUntilCleanupFinished() async {

@@ -683,7 +683,13 @@ final class SettingsViewModel {
             audioDiagnosticState = .running(.playingOutputTone)
             try await preparationTask.value
             guard diagnosticGeneration == requestedGeneration else { return }
-            applyCoordinatorState(await coordinator.currentState())
+            let coordinatorState = await coordinator.currentState()
+            guard diagnosticGeneration == requestedGeneration,
+                  isAudioOperationClaimCurrent(
+                    .diagnostic,
+                    claimID: operationClaimID
+                  ) else { return }
+            applyCoordinatorState(coordinatorState)
             shouldKeepOperationClaimed =
                 audioDiagnosticState == .awaitingOutputConfirmation
         } catch {
@@ -733,7 +739,13 @@ final class SettingsViewModel {
         do {
             try await operationTask.value
             guard diagnosticGeneration == requestedGeneration else { return }
-            applyCoordinatorState(await activeDiagnostic.currentState())
+            let coordinatorState = await activeDiagnostic.currentState()
+            guard diagnosticGeneration == requestedGeneration,
+                  isAudioOperationClaimCurrent(
+                    .diagnostic,
+                    claimID: operationClaim.id
+                  ) else { return }
+            applyCoordinatorState(coordinatorState)
         } catch {
             guard diagnosticGeneration == requestedGeneration else { return }
             let coordinatorState = await activeDiagnostic.currentState()
