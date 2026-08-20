@@ -109,7 +109,8 @@ if [[ -f "$APP/Contents/Frameworks/libswiftCompatibilitySpan.dylib" ]]; then
         "$APP/Contents/Frameworks/libswiftCompatibilitySpan.dylib"
 fi
 APP_REQUIREMENTS=()
-if [[ "$SIGNING_MODE" == "developer-id" ]]; then
+if [[ "$SIGNING_MODE" == "developer-id" ]] \
+    && [[ "$CONFIGURATION" != "Beta" ]]; then
     APP_REQUIREMENTS=(
         --requirements="$(pwd)/Configuration/MeetingNotesRequirements.req"
     )
@@ -133,6 +134,12 @@ if [[ "$SIGNING_MODE" == "developer-id" ]]; then
     SECURE_TIMESTAMP="PASS"
     if ! grep -q "flags=0x10000" <<<"$SIGN_DETAILS"; then
         echo "ERROR: hardened runtime flag missing" >&2
+        exit 1
+    fi
+    DESIGNATED_REQUIREMENT="$(codesign -d -r- "$APP" 2>&1 || true)"
+    if ! grep -Fq "identifier \"$EXPECTED_BUNDLE_ID\"" \
+        <<<"$DESIGNATED_REQUIREMENT"; then
+        echo "ERROR: designated requirement identifier mismatch" >&2
         exit 1
     fi
 fi
