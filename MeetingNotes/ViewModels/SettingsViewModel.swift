@@ -141,6 +141,16 @@ private enum SettingsAudioOperation: Equatable {
     case diagnostic
 }
 
+private struct SettingsDiagnosticOperationTask {
+    let id: UInt64
+    let task: Task<Void, Error>
+}
+
+private struct SettingsAudioCleanupTask {
+    let id: UInt64
+    let task: Task<Void, Never>
+}
+
 protocol DeepSeekConnectionTesting: Sendable {
     func testConnection(apiKey: String) async throws -> [String]
 }
@@ -276,6 +286,10 @@ final class SettingsViewModel {
     private var outputTestGeneration: UInt64 = 0
     private var activeAudioOperation: SettingsAudioOperation?
     private var isCancellingAudioOperation = false
+    private var diagnosticOperationSequence: UInt64 = 0
+    private var activeDiagnosticOperation: SettingsDiagnosticOperationTask?
+    private var audioCleanupSequence: UInt64 = 0
+    private var activeAudioCleanup: SettingsAudioCleanupTask?
     private var audioSettingsSessionGeneration: UInt64 = 0
     private var isAudioSettingsVisible = true
     private var isAudioDeviceRefreshPending = false
@@ -653,7 +667,19 @@ final class SettingsViewModel {
               let activeDiagnostic,
               activeAudioOperation == .diagnostic else { return }
         let requestedGeneration = diagnosticGeneration
+        diagnosticOperationSequence &+= 1
+        let operationID = diagnosticOperationSequence
+        let operationTask = Task<Void, Error> {
+            try await activeDiagnostic.continueAfterOutputConfirmation(
+                heardTone: heardTone
+            )
+        }
+        activeDiagnosticOperation = SettingsDiagnosticOperationTask(
+            id: operationID,
+            task: operationTask
+        )
         defer {
+            finishDiagnosticOperation(operationID)
             releaseAudioOperation(.diagnostic)
         }
         audioDiagnosticState = .running(.testingMicrophone)
@@ -666,9 +692,7 @@ final class SettingsViewModel {
         defer { monitor.cancel() }
 
         do {
-            try await activeDiagnostic.continueAfterOutputConfirmation(
-                heardTone: heardTone
-            )
+            try await operationTask.value
             guard diagnosticGeneration == requestedGeneration else { return }
             applyCoordinatorState(await activeDiagnostic.currentState())
         } catch {
@@ -757,23 +781,32 @@ final class SettingsViewModel {
     func cancelAudioDiagnostic() async {
         guard !isCancellingAudioOperation else { return }
         isCancellingAudioOperation = true
-        defer {
-            activeAudioOperation = nil
-            isCancellingAudioOperation = false
-        }
+        activeDiagnosticOperation?.task.cancel()
         diagnosticGeneration &+= 1
         inputTestGeneration &+= 1
         outputTestGeneration &+= 1
         let coordinator = activeDiagnostic
         activeDiagnostic = nil
-        await coordinator?.cancel()
-        await audioInputTester?.cancel()
-        await audioOutputTester?.stop()
+        let inputTester = audioInputTester
+        let outputTester = audioOutputTester
         latestDiagnosticReport = nil
         latestDiagnosticMetadata = nil
         audioInputTestState = .idle
         audioOutputTestState = .idle
         audioDiagnosticState = .idle
+
+        audioCleanupSequence &+= 1
+        let cleanupID = audioCleanupSequence
+        let cleanupTask = Task { @MainActor [weak self] in
+            await coordinator?.cancel()
+            await inputTester?.cancel()
+            await outputTester?.stop()
+            self?.finishAudioCleanup(cleanupID)
+        }
+        activeAudioCleanup = SettingsAudioCleanupTask(
+            id: cleanupID,
+            task: cleanupTask
+        )
     }
 
     func audioSettingsDidAppear() {
@@ -814,8 +847,29 @@ final class SettingsViewModel {
     private func releaseAudioOperation(
         _ operation: SettingsAudioOperation
     ) {
+        guard !isCancellingAudioOperation else { return }
         guard activeAudioOperation == operation else { return }
         activeAudioOperation = nil
+    }
+
+    private func finishDiagnosticOperation(_ operationID: UInt64) {
+        guard activeDiagnosticOperation?.id == operationID else { return }
+        activeDiagnosticOperation = nil
+        finishAudioCancellationIfPossible()
+    }
+
+    private func finishAudioCleanup(_ cleanupID: UInt64) {
+        guard activeAudioCleanup?.id == cleanupID else { return }
+        activeAudioCleanup = nil
+        finishAudioCancellationIfPossible()
+    }
+
+    private func finishAudioCancellationIfPossible() {
+        guard isCancellingAudioOperation,
+              activeDiagnosticOperation == nil,
+              activeAudioCleanup == nil else { return }
+        activeAudioOperation = nil
+        isCancellingAudioOperation = false
     }
 
     func testDeepSeekConnection() async {

@@ -210,17 +210,20 @@ struct AudioDiagnosticOperationTimeoutGateHooks: Sendable {
     let continuationRegistered: @Sendable () -> Void
     let beforeTaskInstallation: @Sendable () -> Void
     let cancellationRecorded: @Sendable () -> Void
+    let operationTerminalAttempted: @Sendable () -> Void
 
     init(
         beforeContinuationRegistration: @escaping @Sendable () -> Void = {},
         continuationRegistered: @escaping @Sendable () -> Void = {},
         beforeTaskInstallation: @escaping @Sendable () -> Void = {},
-        cancellationRecorded: @escaping @Sendable () -> Void = {}
+        cancellationRecorded: @escaping @Sendable () -> Void = {},
+        operationTerminalAttempted: @escaping @Sendable () -> Void = {}
     ) {
         self.beforeContinuationRegistration = beforeContinuationRegistration
         self.continuationRegistered = continuationRegistered
         self.beforeTaskInstallation = beforeTaskInstallation
         self.cancellationRecorded = cancellationRecorded
+        self.operationTerminalAttempted = operationTerminalAttempted
     }
 
     static let none = AudioDiagnosticOperationTimeoutGateHooks()
@@ -282,6 +285,8 @@ private final class AudioDiagnosticOperationTimeoutGate:
                 }
                 hooks.continuationRegistered()
                 let operation = self.operation
+                let operationTerminalAttempted =
+                    hooks.operationTerminalAttempted
                 let operationTask = Task { [weak self] in
                     do {
                         let metrics = try await operation()
@@ -291,6 +296,7 @@ private final class AudioDiagnosticOperationTimeoutGate:
                             OperationFailure(error: error)
                         )
                     }
+                    operationTerminalAttempted()
                 }
                 let sleeper = self.sleeper
                 let timeout = self.timeout

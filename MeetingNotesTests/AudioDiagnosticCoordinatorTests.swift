@@ -843,6 +843,7 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
     func testLateSuccessAfterTimeoutDoesNotReplaceTimeoutReport()
         async throws {
         let operation = NonCooperativeAudioDiagnosticOperation()
+        let lateTerminalAttempted = AudioDiagnosticGateTestSignal()
         let coordinator = AudioDiagnosticCoordinator(
             recordingActivity: RecordingActivityStub(isActive: false),
             permissions: PermissionSnapshotStub(
@@ -858,7 +859,12 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
             ),
             systemAudioTester: SystemSignalTesterStub(),
             timeoutRacer: LiveAudioDiagnosticTimeoutRacer(
-                sleeper: ScaledTimeoutSleeper(scale: 0.01)
+                sleeper: ScaledTimeoutSleeper(scale: 0.01),
+                gateHooks: AudioDiagnosticOperationTimeoutGateHooks(
+                    operationTerminalAttempted: {
+                        lateTerminalAttempted.signal()
+                    }
+                )
             )
         )
         try await coordinator.prepare()
@@ -877,7 +883,7 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
         XCTAssertEqual(timeoutReport.primaryIssue, .microphoneDiagnosticTimedOut)
 
         await operation.releaseSuccess()
-        try await Task.sleep(for: .milliseconds(50))
+        await lateTerminalAttempted.wait()
 
         let stateAfterRelease = await coordinator.state
         guard case let .readyForUpload(finalReport) = stateAfterRelease else {
@@ -890,6 +896,7 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
     func testLateFailureAfterTimeoutDoesNotReplaceTimeoutReport()
         async throws {
         let operation = NonCooperativeAudioDiagnosticOperation()
+        let lateTerminalAttempted = AudioDiagnosticGateTestSignal()
         let coordinator = AudioDiagnosticCoordinator(
             recordingActivity: RecordingActivityStub(isActive: false),
             permissions: PermissionSnapshotStub(
@@ -905,7 +912,12 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
             ),
             systemAudioTester: SystemSignalTesterStub(),
             timeoutRacer: LiveAudioDiagnosticTimeoutRacer(
-                sleeper: ScaledTimeoutSleeper(scale: 0.01)
+                sleeper: ScaledTimeoutSleeper(scale: 0.01),
+                gateHooks: AudioDiagnosticOperationTimeoutGateHooks(
+                    operationTerminalAttempted: {
+                        lateTerminalAttempted.signal()
+                    }
+                )
             )
         )
         try await coordinator.prepare()
@@ -918,7 +930,7 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
         _ = try? await diagnosticTask.value
 
         await operation.releaseFailure()
-        try await Task.sleep(for: .milliseconds(50))
+        await lateTerminalAttempted.wait()
 
         let state = await coordinator.state
         guard case let .readyForUpload(report) = state else {

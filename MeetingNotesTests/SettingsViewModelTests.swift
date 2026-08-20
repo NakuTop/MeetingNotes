@@ -747,6 +747,7 @@ final class SettingsViewModelTests: XCTestCase {
         await recordingActivity.setActive(true)
 
         await fixture.viewModel.confirmOutputWasAudible(true)
+        await coordinator.waitUntilCancelCount(1)
 
         XCTAssertTrue(fixture.viewModel.areAudioControlsDisabled)
         XCTAssertEqual(fixture.viewModel.audioDiagnosticState, .idle)
@@ -927,10 +928,63 @@ final class SettingsViewModelTests: XCTestCase {
         await fixture.viewModel.startSmartDiagnostic()
 
         await fixture.viewModel.cancelAudioDiagnostic()
+        await coordinator.waitUntilCancelCount(1)
 
         XCTAssertEqual(fixture.viewModel.audioDiagnosticState, .idle)
         let cancelCount = await coordinator.cancelCount
         XCTAssertEqual(cancelCount, 1)
+    }
+
+    func testCancelReturnsBeforeBlockedDiagnosticCleanupAndGatesReuse()
+        async throws {
+        let coordinator = BlockingCancellationSettingsDiagnosticCoordinator()
+        let factory = SettingsDiagnosticCoordinatorFactoryStub(
+            coordinator: coordinator
+        )
+        let outputTester = CountingSettingsOutputTester()
+        let fixture = try makeFixture(
+            audioOutputTester: outputTester,
+            diagnosticCoordinatorFactory: factory
+        )
+        await fixture.viewModel.startSmartDiagnostic()
+        let confirmationTask = Task { @MainActor in
+            await fixture.viewModel.confirmOutputWasAudible(true)
+        }
+        await coordinator.waitUntilContinueStarted()
+
+        let cancelReturned = expectation(description: "cancel returned")
+        let cancelTask = Task { @MainActor in
+            await fixture.viewModel.cancelAudioDiagnostic()
+            cancelReturned.fulfill()
+        }
+        await fulfillment(of: [cancelReturned], timeout: 0.5)
+        await coordinator.waitUntilContinueCancellationWasRequested()
+        await coordinator.waitUntilCleanupStarted()
+
+        XCTAssertEqual(fixture.viewModel.audioDiagnosticState, .idle)
+        await fixture.viewModel.testSelectedOutput()
+        await fixture.viewModel.startSmartDiagnostic()
+        let outputPlayCountDuringCleanup = await outputTester.playCount
+        let makeCountDuringCleanup = await factory.makeCount
+        XCTAssertEqual(outputPlayCountDuringCleanup, 0)
+        XCTAssertEqual(makeCountDuringCleanup, 1)
+
+        coordinator.releaseCleanup()
+        await coordinator.waitUntilCleanupFinished()
+        await confirmationTask.value
+        await cancelTask.value
+
+        for _ in 0..<1_000 {
+            await fixture.viewModel.startSmartDiagnostic()
+            if await factory.makeCount == 2 { break }
+            await Task.yield()
+        }
+        let finalMakeCount = await factory.makeCount
+        XCTAssertEqual(finalMakeCount, 2)
+        XCTAssertEqual(
+            fixture.viewModel.audioDiagnosticState,
+            .awaitingOutputConfirmation
+        )
     }
 
     func testSpeakerDiarizationPreferenceDefaultsOffAndLoadsAndSaves() async throws {
@@ -1882,6 +1936,10 @@ private actor SettingsDiagnosticCoordinatorStub:
     private var current: AudioDiagnosticCoordinatorState = .idle
     private let report: AudioDiagnosticReport
     private(set) var cancelCount = 0
+    private var cancelWaiters: [(
+        target: Int,
+        continuation: CheckedContinuation<Void, Never>
+    )] = []
 
     init(report: AudioDiagnosticReport) {
         self.report = report
@@ -1902,7 +1960,19 @@ private actor SettingsDiagnosticCoordinatorStub:
 
     func cancel() async {
         cancelCount += 1
+        let readyWaiters = cancelWaiters.filter { $0.target <= cancelCount }
+        cancelWaiters.removeAll { $0.target <= cancelCount }
+        for waiter in readyWaiters {
+            waiter.continuation.resume()
+        }
         current = .failed("cancelled")
+    }
+
+    func waitUntilCancelCount(_ target: Int) async {
+        guard cancelCount < target else { return }
+        await withCheckedContinuation { continuation in
+            cancelWaiters.append((target, continuation))
+        }
     }
 
     func currentState() async -> AudioDiagnosticCoordinatorState {
@@ -1912,16 +1982,145 @@ private actor SettingsDiagnosticCoordinatorStub:
 
 private actor SettingsDiagnosticCoordinatorFactoryStub:
     AudioDiagnosticCoordinatorCreating {
-    let coordinator: SettingsDiagnosticCoordinatorStub
+    let coordinator: any AudioDiagnosticCoordinating
     private(set) var makeCount = 0
 
-    init(coordinator: SettingsDiagnosticCoordinatorStub) {
+    init(coordinator: any AudioDiagnosticCoordinating) {
         self.coordinator = coordinator
     }
 
     func makeCoordinator() async -> any AudioDiagnosticCoordinating {
         makeCount += 1
         return coordinator
+    }
+}
+
+private actor BlockingCancellationSettingsDiagnosticCoordinator:
+    AudioDiagnosticCoordinating {
+    private let continueOperation =
+        CancellationAwareSettingsDiagnosticOperation()
+    private let cleanupStarted = SettingsDiagnosticTestSignal()
+    private let cleanupRelease = SettingsDiagnosticTestSignal()
+    private let cleanupFinished = SettingsDiagnosticTestSignal()
+    private var current: AudioDiagnosticCoordinatorState = .idle
+
+    func prepare() async throws {
+        current = .awaitingOutputConfirmation
+    }
+
+    func continueAfterOutputConfirmation(heardTone: Bool) async throws {
+        _ = heardTone
+        current = .testingMicrophone
+        do {
+            try await continueOperation.run()
+        } catch {
+            current = .failed("cancelled")
+            throw error
+        }
+    }
+
+    func cancel() async {
+        cleanupStarted.signal()
+        await cleanupRelease.wait()
+        current = .failed("cancelled")
+        cleanupFinished.signal()
+    }
+
+    func currentState() async -> AudioDiagnosticCoordinatorState {
+        current
+    }
+
+    func waitUntilContinueStarted() async {
+        await continueOperation.waitUntilStarted()
+    }
+
+    func waitUntilContinueCancellationWasRequested() async {
+        await continueOperation.waitUntilCancellationWasRequested()
+    }
+
+    func waitUntilCleanupStarted() async {
+        await cleanupStarted.wait()
+    }
+
+    nonisolated func releaseCleanup() {
+        cleanupRelease.signal()
+    }
+
+    func waitUntilCleanupFinished() async {
+        await cleanupFinished.wait()
+    }
+}
+
+private final class CancellationAwareSettingsDiagnosticOperation:
+    @unchecked Sendable {
+    private let lock = NSLock()
+    private let started = SettingsDiagnosticTestSignal()
+    private let cancellationRequested = SettingsDiagnosticTestSignal()
+    private var continuation: CheckedContinuation<Void, any Error>?
+
+    func run() async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.withLock {
+                    self.continuation = continuation
+                }
+                started.signal()
+            }
+        } onCancel: {
+            cancellationRequested.signal()
+            let continuation = lock.withLock { () -> CheckedContinuation<
+                Void,
+                any Error
+            >? in
+                let continuation = self.continuation
+                self.continuation = nil
+                return continuation
+            }
+            continuation?.resume(throwing: CancellationError())
+        }
+    }
+
+    func waitUntilStarted() async {
+        await started.wait()
+    }
+
+    func waitUntilCancellationWasRequested() async {
+        await cancellationRequested.wait()
+    }
+}
+
+private final class SettingsDiagnosticTestSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isSignaled = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func signal() {
+        let currentWaiters = lock.withLock { () -> [CheckedContinuation<
+            Void,
+            Never
+        >] in
+            guard !isSignaled else { return [] }
+            isSignaled = true
+            let currentWaiters = waiters
+            waiters.removeAll()
+            return currentWaiters
+        }
+        for waiter in currentWaiters {
+            waiter.resume()
+        }
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let shouldResume = lock.withLock { () -> Bool in
+                guard !isSignaled else { return true }
+                waiters.append(continuation)
+                return false
+            }
+            if shouldResume {
+                continuation.resume()
+            }
+        }
     }
 }
 
