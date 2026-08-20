@@ -108,18 +108,10 @@ if [[ -f "$APP/Contents/Frameworks/libswiftCompatibilitySpan.dylib" ]]; then
         --sign "$SIGN_IDENTITY" \
         "$APP/Contents/Frameworks/libswiftCompatibilitySpan.dylib"
 fi
-APP_REQUIREMENTS=()
-if [[ "$SIGNING_MODE" == "developer-id" ]] \
-    && [[ "$CONFIGURATION" != "Beta" ]]; then
-    APP_REQUIREMENTS=(
-        --requirements="$(pwd)/Configuration/MeetingNotesRequirements.req"
-    )
-fi
 codesign --force ${EXTRA_SIGN_FLAGS[@]+"${EXTRA_SIGN_FLAGS[@]}"} \
     --sign "$SIGN_IDENTITY" \
     -o runtime \
     --entitlements Configuration/MeetingNotes.entitlements \
-    ${APP_REQUIREMENTS[@]+"${APP_REQUIREMENTS[@]}"} \
     "$APP"
 
 codesign --verify --deep --strict --verbose=2 "$APP"
@@ -140,6 +132,10 @@ if [[ "$SIGNING_MODE" == "developer-id" ]]; then
     if ! grep -Fq "identifier \"$EXPECTED_BUNDLE_ID\"" \
         <<<"$DESIGNATED_REQUIREMENT"; then
         echo "ERROR: designated requirement identifier mismatch" >&2
+        exit 1
+    fi
+    if ! grep -q "anchor apple generic" <<<"$DESIGNATED_REQUIREMENT"; then
+        echo "ERROR: Developer ID designated requirement anchor missing" >&2
         exit 1
     fi
 fi
