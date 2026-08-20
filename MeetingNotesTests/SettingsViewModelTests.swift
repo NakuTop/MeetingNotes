@@ -779,7 +779,8 @@ final class SettingsViewModelTests: XCTestCase {
             preview.localIssue,
             AudioDiagnosticIssueCode.microphoneNoFrames.localIssue
         )
-        XCTAssertTrue(preview.allowlistedJSON.contains("USB 麦克风"))
+        XCTAssertFalse(preview.allowlistedJSON.contains("USB 麦克风"))
+        XCTAssertFalse(preview.allowlistedJSON.contains("\"name\""))
         XCTAssertFalse(preview.allowlistedJSON.contains("api-key"))
         let callCount = await explainer.callCount
         XCTAssertEqual(callCount, 0)

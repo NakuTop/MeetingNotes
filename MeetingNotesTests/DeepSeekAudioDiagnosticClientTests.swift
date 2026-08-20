@@ -49,7 +49,9 @@ final class DeepSeekAudioDiagnosticClientTests: XCTestCase {
                 from: envelopeData
             )
             XCTAssertEqual(envelope.primaryIssueCode, .captureHealthy)
-            XCTAssertEqual(envelope.inputDevice.name, "USB Microphone")
+            XCTAssertEqual(envelope.inputDevice.status, .selected)
+            XCTAssertFalse(envelopeData.contains(Data("USB Microphone".utf8)))
+            XCTAssertFalse(envelopeData.contains(Data("Display Audio".utf8)))
 
             return try chatResponse(
                 request: request,

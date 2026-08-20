@@ -53,7 +53,6 @@ struct AudioDiagnosticUploadMetadata: Sendable, Equatable {
 }
 
 struct AudioDiagnosticUploadDevice: Codable, Sendable, Equatable {
-    let name: String
     let status: AudioDiagnosticDeviceStatus
     let isConnected: Bool
     let isSystemDefault: Bool
@@ -96,7 +95,6 @@ struct AudioDiagnosticUploadEnvelope: Codable, Sendable, Equatable {
 struct AudioDiagnosticSanitizer: Sendable {
     private static let maximumMetadataLength = 80
     private static let maximumObservationMilliseconds = 60_000.0
-    private static let unknownDeviceName = "未知设备"
 
     func makeEnvelope(
         report: AudioDiagnosticReport,
@@ -156,10 +154,6 @@ struct AudioDiagnosticSanitizer: Sendable {
         _ metadata: AudioDiagnosticDeviceMetadata
     ) -> AudioDiagnosticUploadDevice {
         AudioDiagnosticUploadDevice(
-            name: sanitize(
-                metadata.name ?? "",
-                fallback: Self.unknownDeviceName
-            ),
             status: metadata.status,
             isConnected: metadata.isConnected,
             isSystemDefault: metadata.isSystemDefault,

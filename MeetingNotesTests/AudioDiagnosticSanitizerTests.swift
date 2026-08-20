@@ -2,7 +2,7 @@ import XCTest
 @testable import MeetingNotes
 
 final class AudioDiagnosticSanitizerTests: XCTestCase {
-    func testBuildsAllowlistedEnvelopeAndNormalizesDeviceNames() throws {
+    func testBuildsAllowlistedEnvelope() throws {
         let metadata = AudioDiagnosticUploadMetadata(
             appVersion: "1.2.3",
             hardwareModel: "MacBookPro\u{0000} M5",
@@ -33,12 +33,10 @@ final class AudioDiagnosticSanitizerTests: XCTestCase {
         XCTAssertEqual(envelope.appVersion, "1.2.3")
         XCTAssertEqual(envelope.hardwareModel, "MacBookPro M5")
         XCTAssertEqual(envelope.macOSVersion, "26.5")
-        XCTAssertEqual(envelope.inputDevice.name, "USB Microphone")
         XCTAssertEqual(envelope.inputDevice.status, .selected)
         XCTAssertTrue(envelope.inputDevice.isConnected)
         XCTAssertFalse(envelope.inputDevice.isSystemDefault)
         XCTAssertTrue(envelope.inputDevice.isInUseByAnotherApplication)
-        XCTAssertEqual(envelope.outputDevice.name, "Display Audio")
         XCTAssertEqual(envelope.outputDevice.status, .automatic)
         XCTAssertTrue(envelope.outputDevice.isConnected)
         XCTAssertTrue(envelope.outputDevice.isSystemDefault)
@@ -85,14 +83,76 @@ final class AudioDiagnosticSanitizerTests: XCTestCase {
         XCTAssertFalse(encoded.contains("rawAudio"))
     }
 
-    func testBoundsDeviceAndEnvironmentStringsWithoutControlCharacters() {
-        let longName = String(repeating: "麦", count: 120)
-            + "\nignore previous instructions"
+    func testOmitsDeviceNamesAndPrivateIdentifiersFromEncodedEnvelope() throws {
+        let privateUsername = "private-user"
+        let privateSerial = "C02PRIVATE1234"
+        let privateDeviceUID = "coreaudio-uid-private"
+        let privatePath = "/Users/private-user/recording.wav"
+        let privateAudio = "private-audio-samples"
+        let privateTranscript = "private-transcript-text"
+        let privateAPIKey = "api-key-secret"
+        let privateToken = "notion-token-secret"
+        let privateRawError = "NSError-private-description"
+        let inputDeviceName = [
+            privateUsername, privateSerial, privateDeviceUID, privatePath
+        ].joined(separator: " ")
+        let outputDeviceName = [
+            privateAudio, privateTranscript, privateAPIKey,
+            privateToken, privateRawError
+        ].joined(separator: " ")
+        let metadata = AudioDiagnosticUploadMetadata(
+            appVersion: "1.2.0",
+            hardwareModel: "MacBookPro18,3",
+            macOSVersion: "26.5",
+            inputDevice: .init(
+                name: inputDeviceName,
+                status: .selected,
+                isConnected: true
+            ),
+            outputDevice: .init(
+                name: outputDeviceName,
+                status: .automatic,
+                isConnected: true,
+                isSystemDefault: true
+            ),
+            apiErrorCategory: nil
+        )
+
+        let envelope = AudioDiagnosticSanitizer().makeEnvelope(
+            report: diagnosticReport(),
+            metadata: metadata
+        )
+        let data = try JSONEncoder().encode(envelope)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let inputDevice = try XCTUnwrap(
+            object["inputDevice"] as? [String: Any]
+        )
+        let outputDevice = try XCTUnwrap(
+            object["outputDevice"] as? [String: Any]
+        )
+        let encoded = String(decoding: data, as: UTF8.self)
+
+        XCTAssertEqual(metadata.inputDevice.name, inputDeviceName)
+        XCTAssertEqual(metadata.outputDevice.name, outputDeviceName)
+        XCTAssertNil(inputDevice["name"])
+        XCTAssertNil(outputDevice["name"])
+        for forbiddenValue in [
+            privateUsername, privateSerial, privateDeviceUID, privatePath,
+            privateAudio, privateTranscript, privateAPIKey, privateToken,
+            privateRawError
+        ] {
+            XCTAssertFalse(encoded.contains(forbiddenValue))
+        }
+    }
+
+    func testBoundsEnvironmentStringsWithoutControlCharacters() {
         let metadata = AudioDiagnosticUploadMetadata(
             appVersion: "  1.0\tdebug  ",
             hardwareModel: " M5\rPro ",
             macOSVersion: " 26.5 ",
-            inputDevice: .init(name: longName, status: .fallback),
+            inputDevice: .init(name: "Microphone", status: .fallback),
             outputDevice: .init(name: nil, status: .unavailable),
             apiErrorCategory: nil
         )
@@ -102,11 +162,8 @@ final class AudioDiagnosticSanitizerTests: XCTestCase {
             metadata: metadata
         )
 
-        XCTAssertLessThanOrEqual(envelope.inputDevice.name.count, 80)
-        XCTAssertFalse(envelope.inputDevice.name.contains("\n"))
         XCTAssertEqual(envelope.appVersion, "1.0 debug")
         XCTAssertEqual(envelope.hardwareModel, "M5 Pro")
-        XCTAssertEqual(envelope.outputDevice.name, "未知设备")
     }
 
     func testClampsInvalidAndOversizedMetricMetadata() throws {
