@@ -1,12 +1,7 @@
 import Foundation
 
-struct TranscriptionModelLoadRequest: Equatable, Sendable {
-    let descriptor: TranscriptionModelDescriptor
-    let folder: URL
-    let download: Bool
-}
-
 struct TranscriptionModelServiceConfiguration: Equatable, Sendable {
+    let mode: TranscriptionQualityMode
     let modelSelector: String
     let persistentModelFolder: URL
     let download: Bool
@@ -27,7 +22,7 @@ protocol TranscriptionModelControlling: TranscriptionModelStatusControlling {
 
 actor TranscriptionModelController: TranscriptionModelControlling {
     typealias ServiceFactory = @Sendable (
-        TranscriptionModelLoadRequest
+        TranscriptionModelServiceConfiguration
     ) async -> any TranscriptionService
 
     private struct Preparation: Sendable {
@@ -49,10 +44,8 @@ actor TranscriptionModelController: TranscriptionModelControlling {
 
     init(
         storage: TranscriptionModelStorage,
-        makeService: @escaping ServiceFactory = { request in
-            let configuration = TranscriptionModelController
-                .defaultServiceConfiguration(for: request)
-            return WhisperKitTranscriptionService(
+        makeService: @escaping ServiceFactory = { configuration in
+            WhisperKitTranscriptionService(
                 model: configuration.modelSelector,
                 persistentModelFolder: configuration.persistentModelFolder,
                 download: configuration.download
@@ -61,16 +54,6 @@ actor TranscriptionModelController: TranscriptionModelControlling {
     ) {
         self.storage = storage
         self.makeService = makeService
-    }
-
-    nonisolated static func defaultServiceConfiguration(
-        for request: TranscriptionModelLoadRequest
-    ) -> TranscriptionModelServiceConfiguration {
-        TranscriptionModelServiceConfiguration(
-            modelSelector: request.descriptor.downloadSelector,
-            persistentModelFolder: request.folder,
-            download: request.download
-        )
     }
 
     func status(
@@ -114,15 +97,16 @@ actor TranscriptionModelController: TranscriptionModelControlling {
             statuses[mode] = .failed
             throw error
         }
-        let request = TranscriptionModelLoadRequest(
-            descriptor: descriptor,
-            folder: folder,
+        let configuration = TranscriptionModelServiceConfiguration(
+            mode: mode,
+            modelSelector: descriptor.downloadSelector,
+            persistentModelFolder: folder,
             download: !storage.hasCompleteModel(at: folder)
         )
         let makeService = self.makeService
         statuses[mode] = .downloading
         let task = Task<any TranscriptionService, Error> {
-            let service = await makeService(request)
+            let service = await makeService(configuration)
             try await service.prepare()
             return service
         }

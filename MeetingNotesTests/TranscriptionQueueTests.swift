@@ -228,10 +228,10 @@ private actor QueueModelServiceFactory {
     private var modes: [TranscriptionQualityMode] = []
 
     func makeService(
-        for request: TranscriptionModelLoadRequest
+        for configuration: TranscriptionModelServiceConfiguration
     ) -> any TranscriptionService {
-        modes.append(request.descriptor.mode)
-        return QueueModelService(mode: request.descriptor.mode)
+        modes.append(configuration.mode)
+        return QueueModelService(mode: configuration.mode)
     }
 
     func selectedModes() -> [TranscriptionQualityMode] {

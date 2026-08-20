@@ -25,86 +25,49 @@ final class TranscriptionModelControllerTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    func testPreparePreservesBalancedModelIDAndFolder() async throws {
+    func testPrepareRoutesBalancedPublicSelectorToPersistentFolder()
+        async throws {
         let storage = makeStorage()
         let spy = TranscriptionModelServiceFactorySpy()
         let controller = makeController(storage: storage, spy: spy)
 
         try await controller.prepare(mode: .balanced)
 
-        let requests = await spy.recordedRequests()
+        let configurations = await spy.recordedConfigurations()
         XCTAssertEqual(
-            requests,
+            configurations,
             [
-                TranscriptionModelLoadRequest(
-                    descriptor: TranscriptionModelCatalog.descriptor(
-                        for: .balanced
-                    ),
-                    folder: storage.folder(for: .balanced),
+                TranscriptionModelServiceConfiguration(
+                    mode: .balanced,
+                    modelSelector: "openai_whisper-large-v3-v20240930_turbo",
+                    persistentModelFolder: storage.folder(for: .balanced),
                     download: true
                 )
             ]
         )
-        let request = try XCTUnwrap(requests.first)
         XCTAssertEqual(
-            request.descriptor.modelID,
-            "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page"
-        )
-        XCTAssertEqual(
-            request.descriptor.downloadSelector,
-            "openai_whisper-large-v3-v20240930_turbo"
-        )
-        XCTAssertEqual(
-            request.folder.lastPathComponent,
+            configurations.first?.persistentModelFolder.lastPathComponent,
             "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page"
         )
     }
 
-    func testHighAccuracyPassesExactLargeV3ModelID() async throws {
+    func testPrepareRoutesHighAccuracyLargeV3Selector() async throws {
         let storage = makeStorage()
         let spy = TranscriptionModelServiceFactorySpy()
         let controller = makeController(storage: storage, spy: spy)
 
         try await controller.prepare(mode: .highAccuracy)
 
-        let requests = await spy.recordedRequests()
-        let request = try XCTUnwrap(requests.first)
-        XCTAssertEqual(
-            request.descriptor.modelID,
-            "openai_whisper-large-v3"
-        )
-        XCTAssertEqual(
-            request.descriptor.downloadSelector,
-            "openai_whisper-large-v3"
-        )
-        XCTAssertEqual(request.descriptor.mode, .highAccuracy)
-        XCTAssertEqual(request.folder, storage.folder(for: .highAccuracy))
-        XCTAssertTrue(request.download)
-    }
+        let configurations = await spy.recordedConfigurations()
+        let configuration = try XCTUnwrap(configurations.first)
 
-    func testDefaultFactoryUsesDownloadSelectorAndPersistentFolder() throws {
-        let storage = makeStorage()
-        let descriptor = TranscriptionModelCatalog.descriptor(for: .balanced)
-        let folder = storage.folder(for: .balanced)
-        let request = TranscriptionModelLoadRequest(
-            descriptor: descriptor,
-            folder: folder,
-            download: true
-        )
-
-        let configuration = TranscriptionModelController
-            .defaultServiceConfiguration(for: request)
-
+        XCTAssertEqual(configuration.mode, .highAccuracy)
+        XCTAssertEqual(configuration.modelSelector, "openai_whisper-large-v3")
         XCTAssertEqual(
-            configuration.modelSelector,
-            "openai_whisper-large-v3-v20240930_turbo"
+            configuration.persistentModelFolder,
+            storage.folder(for: .highAccuracy)
         )
-        XCTAssertEqual(configuration.persistentModelFolder, folder)
         XCTAssertTrue(configuration.download)
-        XCTAssertEqual(
-            folder.lastPathComponent,
-            "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page"
-        )
     }
 
     func testDownloadedModelLoadsOfflineFromItsOwnFolder() async throws {
@@ -116,10 +79,10 @@ final class TranscriptionModelControllerTests: XCTestCase {
 
         try await controller.prepare(mode: .highAccuracy)
 
-        let requests = await spy.recordedRequests()
-        let request = try XCTUnwrap(requests.first)
-        XCTAssertEqual(request.folder, folder)
-        XCTAssertFalse(request.download)
+        let configurations = await spy.recordedConfigurations()
+        let configuration = try XCTUnwrap(configurations.first)
+        XCTAssertEqual(configuration.persistentModelFolder, folder)
+        XCTAssertFalse(configuration.download)
     }
 
     func testCachedHighAccuracyReportsReadyBeforePreparation() async throws {
@@ -129,10 +92,10 @@ final class TranscriptionModelControllerTests: XCTestCase {
         let controller = makeController(storage: storage, spy: spy)
 
         let status = await controller.status(for: .highAccuracy)
-        let requests = await spy.recordedRequests()
+        let configurations = await spy.recordedConfigurations()
 
         XCTAssertEqual(status, .ready)
-        XCTAssertTrue(requests.isEmpty)
+        XCTAssertTrue(configurations.isEmpty)
     }
 
     func testIncompleteHighAccuracyCacheStillReportsNotDownloaded()
@@ -150,10 +113,10 @@ final class TranscriptionModelControllerTests: XCTestCase {
         let controller = makeController(storage: storage, spy: spy)
 
         let status = await controller.status(for: .highAccuracy)
-        let requests = await spy.recordedRequests()
+        let configurations = await spy.recordedConfigurations()
 
         XCTAssertEqual(status, .notDownloaded)
-        XCTAssertTrue(requests.isEmpty)
+        XCTAssertTrue(configurations.isEmpty)
     }
 
     func testChangingModeCreatesASeparateCachedService() async throws {
@@ -177,12 +140,12 @@ final class TranscriptionModelControllerTests: XCTestCase {
             samples: [1],
             startingAt: 0
         ).first?.text
-        let requests = await spy.recordedRequests()
+        let configurations = await spy.recordedConfigurations()
 
         XCTAssertEqual(balancedText, "balanced")
         XCTAssertEqual(highAccuracyText, "highAccuracy")
         XCTAssertEqual(balancedAgainText, "balanced")
-        XCTAssertEqual(requests.map(\.descriptor.mode), [.balanced, .highAccuracy])
+        XCTAssertEqual(configurations.map(\.mode), [.balanced, .highAccuracy])
     }
 
     func testConcurrentPrepareForSameModeSharesOneOperation() async throws {
@@ -194,9 +157,9 @@ final class TranscriptionModelControllerTests: XCTestCase {
         async let second: Void = controller.prepare(mode: .balanced)
         _ = try await (first, second)
 
-        let requests = await spy.recordedRequests()
+        let configurations = await spy.recordedConfigurations()
         let prepareCount = await spy.prepareCount(for: .balanced)
-        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(configurations.count, 1)
         XCTAssertEqual(prepareCount, 1)
         let status = await controller.status(for: .balanced)
         XCTAssertEqual(status, .ready)
@@ -263,12 +226,12 @@ final class TranscriptionModelControllerTests: XCTestCase {
             samples: [1],
             startingAt: 0
         ).first?.text
-        let requestCount = await spy.recordedRequests().count
+        let configurationCount = await spy.recordedConfigurations().count
         let prepareCount = await spy.prepareCount(for: .highAccuracy)
         let status = await controller.status(for: .highAccuracy)
 
         XCTAssertEqual(text, "highAccuracy")
-        XCTAssertEqual(requestCount, 1)
+        XCTAssertEqual(configurationCount, 1)
         XCTAssertEqual(prepareCount, 1)
         XCTAssertEqual(status, .ready)
     }
@@ -287,8 +250,8 @@ final class TranscriptionModelControllerTests: XCTestCase {
         storage: TranscriptionModelStorage,
         spy: TranscriptionModelServiceFactorySpy
     ) -> TranscriptionModelController {
-        TranscriptionModelController(storage: storage) { request in
-            await spy.makeService(for: request)
+        TranscriptionModelController(storage: storage) { configuration in
+            await spy.makeService(for: configuration)
         }
     }
 
@@ -318,7 +281,7 @@ private actor TranscriptionModelServiceFactorySpy {
     private let preparationDelay: TimeInterval
     private let preparationGate: ControllerPreparationGate?
     private let failingModes: Set<TranscriptionQualityMode>
-    private var requests: [TranscriptionModelLoadRequest] = []
+    private var configurations: [TranscriptionModelServiceConfiguration] = []
     private var services: [TranscriptionQualityMode: ControllerFakeService] = [:]
 
     init(
@@ -332,23 +295,23 @@ private actor TranscriptionModelServiceFactorySpy {
     }
 
     func makeService(
-        for request: TranscriptionModelLoadRequest
+        for configuration: TranscriptionModelServiceConfiguration
     ) -> any TranscriptionService {
-        requests.append(request)
+        configurations.append(configuration)
         let service = ControllerFakeService(
-            mode: request.descriptor.mode,
+            mode: configuration.mode,
             preparationDelay: preparationDelay,
             preparationGate: preparationGate,
             shouldFailPreparation: failingModes.contains(
-                request.descriptor.mode
+                configuration.mode
             )
         )
-        services[request.descriptor.mode] = service
+        services[configuration.mode] = service
         return service
     }
 
-    func recordedRequests() -> [TranscriptionModelLoadRequest] {
-        requests
+    func recordedConfigurations() -> [TranscriptionModelServiceConfiguration] {
+        configurations
     }
 
     func prepareCount(for mode: TranscriptionQualityMode) async -> Int {
