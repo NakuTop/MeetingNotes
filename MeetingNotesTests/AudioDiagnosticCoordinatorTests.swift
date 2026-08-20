@@ -39,6 +39,102 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
         )
     }
 
+    func testCancelledPreparationCannotPlayToneOrPublishAwaitingState()
+        async throws {
+        let events = AudioDiagnosticEventRecorder()
+        let permissions = SuspendingPermissionSnapshotStub(
+            snapshot: AudioDiagnosticPermissionSnapshot(
+                microphone: .authorized,
+                screenRecording: .authorized
+            ),
+            events: events
+        )
+        let coordinator = AudioDiagnosticCoordinator(
+            recordingActivity: RecordingActivityStub(
+                isActive: false,
+                events: events
+            ),
+            permissions: permissions,
+            inputDevice: InputDeviceAvailabilityStub(
+                isAvailable: true,
+                events: events
+            ),
+            outputTester: OutputTesterStub(events: events),
+            microphoneTester: SignalTesterStub(),
+            systemAudioTester: SystemSignalTesterStub(),
+            timeoutRacer: ImmediateTimeoutRacer()
+        )
+        let caller = Task {
+            try await coordinator.prepare()
+        }
+        await permissions.waitUntilRequested()
+
+        caller.cancel()
+        await coordinator.cancel()
+        await permissions.release()
+
+        do {
+            try await caller.value
+            XCTFail("Expected cancelled preparation")
+        } catch {
+            XCTAssertTrue(
+                error is CancellationError,
+                "Expected CancellationError, got \(error)"
+            )
+        }
+        let state = await coordinator.state
+        XCTAssertEqual(state, .failed("cancelled"))
+        XCTAssertEqual(events.count(of: "tone"), 0)
+        XCTAssertEqual(events.count(of: "inputDevice"), 0)
+    }
+
+    func testCoordinatorCancelDuringTonePreventsLateAwaitingState()
+        async throws {
+        let events = AudioDiagnosticEventRecorder()
+        let output = SuspendingOutputTester(events: events)
+        let coordinator = AudioDiagnosticCoordinator(
+            recordingActivity: RecordingActivityStub(
+                isActive: false,
+                events: events
+            ),
+            permissions: PermissionSnapshotStub(
+                snapshot: AudioDiagnosticPermissionSnapshot(
+                    microphone: .authorized,
+                    screenRecording: .authorized
+                ),
+                events: events
+            ),
+            inputDevice: InputDeviceAvailabilityStub(
+                isAvailable: true,
+                events: events
+            ),
+            outputTester: output,
+            microphoneTester: SignalTesterStub(),
+            systemAudioTester: SystemSignalTesterStub(),
+            timeoutRacer: ImmediateTimeoutRacer()
+        )
+        let caller = Task {
+            try await coordinator.prepare()
+        }
+        await output.waitUntilPlayStarted()
+
+        await coordinator.cancel()
+        await output.releaseTone()
+
+        do {
+            try await caller.value
+            XCTFail("Expected cancelled preparation")
+        } catch {
+            XCTAssertTrue(
+                error is CancellationError,
+                "Expected CancellationError, got \(error)"
+            )
+        }
+        let state = await coordinator.state
+        XCTAssertEqual(state, .failed("cancelled"))
+        XCTAssertEqual(events.count(of: "tone"), 1)
+    }
+
     func testConfirmedToneMeasuresBothTracksAndProducesHealthyReport()
         async throws {
         let events = AudioDiagnosticEventRecorder()
@@ -1974,6 +2070,40 @@ private struct PermissionSnapshotStub: AudioDiagnosticPermissionChecking {
     }
 }
 
+private actor SuspendingPermissionSnapshotStub:
+    AudioDiagnosticPermissionChecking {
+    private let snapshot: AudioDiagnosticPermissionSnapshot
+    private let events: AudioDiagnosticEventRecorder
+    private let requested = AudioDiagnosticGateTestSignal()
+    private var continuation:
+        CheckedContinuation<AudioDiagnosticPermissionSnapshot, Never>?
+
+    init(
+        snapshot: AudioDiagnosticPermissionSnapshot,
+        events: AudioDiagnosticEventRecorder
+    ) {
+        self.snapshot = snapshot
+        self.events = events
+    }
+
+    func permissionSnapshot() async -> AudioDiagnosticPermissionSnapshot {
+        events.append("permissions")
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            requested.signal()
+        }
+    }
+
+    func waitUntilRequested() async {
+        await requested.wait()
+    }
+
+    func release() {
+        continuation?.resume(returning: snapshot)
+        continuation = nil
+    }
+}
+
 private struct InputDeviceAvailabilityStub:
     AudioDiagnosticInputDeviceChecking {
     let isAvailable: Bool
@@ -2013,6 +2143,46 @@ private struct OutputTesterStub: AudioOutputTesting {
 
     func stop() async {
         events?.append("outputStop")
+    }
+}
+
+private actor SuspendingOutputTester: AudioOutputTesting {
+    private let events: AudioDiagnosticEventRecorder
+    private let playStarted = AudioDiagnosticGateTestSignal()
+    private var continuation:
+        CheckedContinuation<AudioOutputTestResult, Error>?
+
+    init(events: AudioDiagnosticEventRecorder) {
+        self.events = events
+    }
+
+    func playTestTone(
+        duration: TimeInterval
+    ) async throws -> AudioOutputTestResult {
+        events.append("tone")
+        return try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+            playStarted.signal()
+        }
+    }
+
+    func stop() async {
+        events.append("outputStop")
+    }
+
+    func waitUntilPlayStarted() async {
+        await playStarted.wait()
+    }
+
+    func releaseTone() {
+        continuation?.resume(
+            returning: AudioOutputTestResult(
+                wasScheduled: true,
+                duration: 1,
+                outputDeviceID: nil
+            )
+        )
+        continuation = nil
     }
 }
 

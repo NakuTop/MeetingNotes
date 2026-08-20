@@ -40,6 +40,7 @@ actor AudioDiagnosticCoordinator {
     private var inputDeviceAvailable = false
     private var outputToneWasScheduled = false
     private var resourcesRequireCleanup = false
+    private var preparationGeneration: UInt64 = 0
 
     init(
         recordingActivity:
@@ -67,22 +68,55 @@ actor AudioDiagnosticCoordinator {
         guard state == .idle else {
             throw AudioDiagnosticCoordinatorError.invalidState(state)
         }
+        preparationGeneration &+= 1
+        let requestedGeneration = preparationGeneration
+        try ensurePreparationIsCurrent(requestedGeneration)
 
         state = .checkingPermissions
-        guard !(await recordingActivity.isRecordingActive()) else {
+        let recordingIsActive = await recordingActivity.isRecordingActive()
+        try ensurePreparationIsCurrent(requestedGeneration)
+        guard !recordingIsActive else {
             state = .failed("recordingActive")
             throw AudioDiagnosticCoordinatorError.recordingActive
         }
 
-        permissionSnapshot = await permissions.permissionSnapshot()
-        inputDeviceAvailable = await inputDevice.inputDeviceIsAvailable()
+        let currentPermissionSnapshot = await permissions.permissionSnapshot()
+        try ensurePreparationIsCurrent(requestedGeneration)
+        permissionSnapshot = currentPermissionSnapshot
+
+        let currentInputDeviceAvailable =
+            await inputDevice.inputDeviceIsAvailable()
+        try ensurePreparationIsCurrent(requestedGeneration)
+        inputDeviceAvailable = currentInputDeviceAvailable
 
         state = .playingOutputTone
-        let result = try await outputTester.playTestTone(
-            duration: Self.outputToneDuration
-        )
+        let result: AudioOutputTestResult
+        do {
+            result = try await outputTester.playTestTone(
+                duration: Self.outputToneDuration
+            )
+        } catch {
+            try ensurePreparationIsCurrent(requestedGeneration)
+            throw error
+        }
+        try ensurePreparationIsCurrent(requestedGeneration)
         outputToneWasScheduled = result.wasScheduled
         state = .awaitingOutputConfirmation
+    }
+
+    private func ensurePreparationIsCurrent(
+        _ requestedGeneration: UInt64
+    ) throws {
+        guard preparationGeneration == requestedGeneration else {
+            throw CancellationError()
+        }
+        do {
+            try Task.checkCancellation()
+        } catch {
+            preparationGeneration &+= 1
+            state = .failed("cancelled")
+            throw error
+        }
     }
 
     func continueAfterOutputConfirmation(heardTone: Bool) async throws {
@@ -251,7 +285,7 @@ actor AudioDiagnosticCoordinator {
     }
 
     func cancel() async {
-        guard resourcesRequireCleanup else { return }
+        preparationGeneration &+= 1
         state = .failed("cancelled")
         await cleanupResourcesIfNeeded()
     }
