@@ -538,20 +538,30 @@ actor AdaptiveMicrophoneSampleProvider:
     }
 
     func pause() async throws {
-        guard activeToken != nil else {
+        guard let token = activeToken,
+              let provider = currentProvider else {
             throw AudioCaptureError.notRunning
         }
         guard !isPaused else { return }
-        try await currentProvider?.pause()
+        try await provider.pause()
+        guard activeToken == token,
+              isCurrentProvider(provider) else {
+            throw CancellationError()
+        }
         isPaused = true
     }
 
     func resume() async throws {
-        guard activeToken != nil else {
+        guard let token = activeToken,
+              let provider = currentProvider else {
             throw AudioCaptureError.notRunning
         }
         guard isPaused else { return }
-        try await currentProvider?.resume()
+        try await provider.resume()
+        guard activeToken == token,
+              isCurrentProvider(provider) else {
+            throw CancellationError()
+        }
         isPaused = false
     }
 
