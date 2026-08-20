@@ -43,7 +43,7 @@ targets:
           PRODUCT_NAME: MeetingNotesBeta
           MEETINGNOTES_DISPLAY_NAME: 会议记录 Beta
           MARKETING_VERSION: 1.2.0
-          CURRENT_PROJECT_VERSION: 5
+          CURRENT_PROJECT_VERSION: 12
     entitlements:
       path: Configuration/MeetingNotes.entitlements
     dependencies:
