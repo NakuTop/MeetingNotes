@@ -183,6 +183,76 @@ final class CoreAudioMicrophoneSampleProviderTests: XCTestCase {
         await provider.stop()
     }
 
+    func testLatePauseFromStoppedRunCannotMutateRestartedRun()
+        async throws {
+        let session = FakeCoreAudioMicrophoneSession(
+            blockedOperation: .pause
+        )
+        let provider = makeProvider(session: session)
+        let staleStream = try await provider.start(deviceID: nil)
+        let stalePause = Task {
+            try await provider.pause()
+        }
+        await session.waitUntilPauseEntered()
+
+        await provider.stop()
+        let currentStream = try await provider.start(deviceID: nil)
+        await session.releasePause()
+        do {
+            try await stalePause.value
+            XCTFail("Expected stale pause cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        try await provider.pause()
+        let pauses = await session.pauseCount()
+        let resumes = await session.resumeCount()
+        let stopsBeforeFinalStop = await session.stopCount()
+        XCTAssertEqual(pauses, 2)
+        XCTAssertEqual(resumes, 0)
+        XCTAssertEqual(stopsBeforeFinalStop, 1)
+
+        await provider.stop()
+        withExtendedLifetime((staleStream, currentStream)) {}
+    }
+
+    func testLateResumeFromStoppedRunCannotMutateRestartedRun()
+        async throws {
+        let session = FakeCoreAudioMicrophoneSession(
+            blockedOperation: .resume
+        )
+        let provider = makeProvider(session: session)
+        let staleStream = try await provider.start(deviceID: nil)
+        try await provider.pause()
+        let staleResume = Task {
+            try await provider.resume()
+        }
+        await session.waitUntilResumeEntered()
+
+        await provider.stop()
+        let currentStream = try await provider.start(deviceID: nil)
+        try await provider.pause()
+        await session.releaseResume()
+        do {
+            try await staleResume.value
+            XCTFail("Expected stale resume cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        try await provider.resume()
+        let pauses = await session.pauseCount()
+        let resumes = await session.resumeCount()
+        let stopsBeforeFinalStop = await session.stopCount()
+        XCTAssertEqual(pauses, 2)
+        XCTAssertEqual(resumes, 2)
+        XCTAssertEqual(stopsBeforeFinalStop, 1)
+
+        await provider.stop()
+        withExtendedLifetime((staleStream, currentStream)) {}
+    }
+
     func testStreamTerminationStopsSessionExactlyOnce() async throws {
         let session = FakeCoreAudioMicrophoneSession()
         let provider = CoreAudioMicrophoneSampleProvider(
@@ -228,6 +298,18 @@ final class CoreAudioMicrophoneSampleProviderTests: XCTestCase {
         }
         return buffer
     }
+
+    private func makeProvider(
+        session: any CoreAudioMicrophoneSessionManaging
+    ) -> CoreAudioMicrophoneSampleProvider {
+        CoreAudioMicrophoneSampleProvider(
+            session: session,
+            resolver: StaticCoreAudioDeviceIDResolver(
+                idsByUID: [:],
+                defaultID: AudioDeviceID(1)
+            )
+        )
+    }
 }
 
 private enum CoreAudioSessionTestError: Error, Equatable, Sendable {
@@ -240,6 +322,12 @@ private enum FakeAUHALTestError: Error {
 
 private actor FakeCoreAudioMicrophoneSession:
     CoreAudioMicrophoneSessionManaging {
+    enum BlockedOperation: Sendable {
+        case pause
+        case resume
+    }
+
+    private let blockedOperation: BlockedOperation?
     private var configuredIDs: [AudioDeviceID?] = []
     private var handler:
         (@Sendable (CoreAudioMicrophoneSessionEvent) -> Void)?
@@ -247,6 +335,20 @@ private actor FakeCoreAudioMicrophoneSession:
     private var pauses = 0
     private var resumes = 0
     private var stops = 0
+    private var pauseEntered = false
+    private var resumeEntered = false
+    private var pauseEnteredWaiters:
+        [CheckedContinuation<Void, Never>] = []
+    private var resumeEnteredWaiters:
+        [CheckedContinuation<Void, Never>] = []
+    private var pauseReleaseContinuation:
+        CheckedContinuation<Void, Never>?
+    private var resumeReleaseContinuation:
+        CheckedContinuation<Void, Never>?
+
+    init(blockedOperation: BlockedOperation? = nil) {
+        self.blockedOperation = blockedOperation
+    }
 
     func configure(
         deviceID: AudioDeviceID?,
@@ -265,10 +367,28 @@ private actor FakeCoreAudioMicrophoneSession:
 
     func pause() async {
         pauses += 1
+        guard blockedOperation == .pause,
+              pauses == 1 else { return }
+        pauseEntered = true
+        let waiters = pauseEnteredWaiters
+        pauseEnteredWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            pauseReleaseContinuation = continuation
+        }
     }
 
     func resume() async throws {
         resumes += 1
+        guard blockedOperation == .resume,
+              resumes == 1 else { return }
+        resumeEntered = true
+        let waiters = resumeEnteredWaiters
+        resumeEnteredWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            resumeReleaseContinuation = continuation
+        }
     }
 
     func stop() async {
@@ -298,6 +418,32 @@ private actor FakeCoreAudioMicrophoneSession:
 
     func stopCount() -> Int {
         stops
+    }
+
+    func waitUntilPauseEntered() async {
+        guard !pauseEntered else { return }
+        await withCheckedContinuation { continuation in
+            pauseEnteredWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilResumeEntered() async {
+        guard !resumeEntered else { return }
+        await withCheckedContinuation { continuation in
+            resumeEnteredWaiters.append(continuation)
+        }
+    }
+
+    func releasePause() {
+        let continuation = pauseReleaseContinuation
+        pauseReleaseContinuation = nil
+        continuation?.resume()
+    }
+
+    func releaseResume() {
+        let continuation = resumeReleaseContinuation
+        resumeReleaseContinuation = nil
+        continuation?.resume()
     }
 }
 

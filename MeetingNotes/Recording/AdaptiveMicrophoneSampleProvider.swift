@@ -397,6 +397,7 @@ actor AdaptiveMicrophoneSampleProvider:
     private var startupContinuation:
         CheckedContinuation<Void, Error>?
     private var currentProvider: (any MicrophoneSampleProviding)?
+    private var currentBackendAttemptID: UUID?
     private var isPaused = false
     private var backendFrameCount = 0
     private var attemptedCaptures:
@@ -495,6 +496,7 @@ actor AdaptiveMicrophoneSampleProvider:
         )
         activeToken = token
         self.relay = relay
+        currentBackendAttemptID = nil
         isPaused = false
         attemptedCaptures = []
         lastDiscoverySnapshot = nil
@@ -539,13 +541,17 @@ actor AdaptiveMicrophoneSampleProvider:
 
     func pause() async throws {
         guard let token = activeToken,
-              let provider = currentProvider else {
+              let provider = currentProvider,
+              let attemptID = currentBackendAttemptID else {
             throw AudioCaptureError.notRunning
         }
         guard !isPaused else { return }
         try await provider.pause()
-        guard activeToken == token,
-              isCurrentProvider(provider) else {
+        guard isCurrentBackendAttempt(
+            token: token,
+            attemptID: attemptID,
+            provider: provider
+        ) else {
             throw CancellationError()
         }
         isPaused = true
@@ -553,13 +559,17 @@ actor AdaptiveMicrophoneSampleProvider:
 
     func resume() async throws {
         guard let token = activeToken,
-              let provider = currentProvider else {
+              let provider = currentProvider,
+              let attemptID = currentBackendAttemptID else {
             throw AudioCaptureError.notRunning
         }
         guard isPaused else { return }
         try await provider.resume()
-        guard activeToken == token,
-              isCurrentProvider(provider) else {
+        guard isCurrentBackendAttempt(
+            token: token,
+            attemptID: attemptID,
+            provider: provider
+        ) else {
             throw CancellationError()
         }
         isPaused = false
@@ -576,6 +586,7 @@ actor AdaptiveMicrophoneSampleProvider:
         startupContinuation = nil
         let provider = currentProvider
         currentProvider = nil
+        currentBackendAttemptID = nil
         isPaused = false
         let relay = self.relay
         self.relay = nil
@@ -732,6 +743,7 @@ actor AdaptiveMicrophoneSampleProvider:
         token: UUID
     ) async -> BackendOutcome {
         guard activeToken == token else { return .cancelled }
+        let attemptID = UUID()
         let provider: any MicrophoneSampleProviding
         let deviceID: String?
         switch resolution.plan {
@@ -748,6 +760,7 @@ actor AdaptiveMicrophoneSampleProvider:
             MicrophoneDiagnosticLogger.fallbackStarted()
         }
         currentProvider = provider
+        currentBackendAttemptID = attemptID
         backendFrameCount = 0
         runtime.telemetry.captureStarted = false
 
@@ -798,7 +811,11 @@ actor AdaptiveMicrophoneSampleProvider:
         let stream: AsyncThrowingStream<MicrophoneSample, Error>
         do {
             stream = try await provider.start(deviceID: deviceID)
-            guard activeToken == token else {
+            guard isCurrentBackendAttempt(
+                token: token,
+                attemptID: attemptID,
+                provider: provider
+            ) else {
                 changeTask.cancel()
                 if !isCurrentProvider(provider) {
                     await provider.stop()
@@ -810,15 +827,24 @@ actor AdaptiveMicrophoneSampleProvider:
             timelineNormalizer.beginBackend()
         } catch {
             changeTask.cancel()
-            guard activeToken == token else {
+            guard isCurrentBackendAttempt(
+                token: token,
+                attemptID: attemptID,
+                provider: provider
+            ) else {
                 return .cancelled
             }
             runtime.status = .captureStartFailed
             await provider.stop()
-            guard activeToken == token else {
+            guard isCurrentBackendAttempt(
+                token: token,
+                attemptID: attemptID,
+                provider: provider
+            ) else {
                 return .cancelled
             }
             currentProvider = nil
+            currentBackendAttemptID = nil
             return .recoveryNeeded(BackendFailure(error: error))
         }
 
@@ -875,15 +901,34 @@ actor AdaptiveMicrophoneSampleProvider:
         consumeTask.cancel()
         watchdog.cancel()
         changeTask.cancel()
-        guard activeToken == token else {
+        guard isCurrentBackendAttempt(
+            token: token,
+            attemptID: attemptID,
+            provider: provider
+        ) else {
             return .cancelled
         }
         await provider.stop()
-        guard activeToken == token else {
+        guard isCurrentBackendAttempt(
+            token: token,
+            attemptID: attemptID,
+            provider: provider
+        ) else {
             return .cancelled
         }
         currentProvider = nil
+        currentBackendAttemptID = nil
         return outcome
+    }
+
+    private func isCurrentBackendAttempt(
+        token: UUID,
+        attemptID: UUID,
+        provider: any MicrophoneSampleProviding
+    ) -> Bool {
+        activeToken == token
+            && currentBackendAttemptID == attemptID
+            && isCurrentProvider(provider)
     }
 
     private func isCurrentProvider(
@@ -984,6 +1029,7 @@ actor AdaptiveMicrophoneSampleProvider:
     private func finish(token: UUID, throwing error: Error? = nil) {
         guard activeToken == token else { return }
         activeToken = nil
+        currentBackendAttemptID = nil
         runTask = nil
         if let continuation = startupContinuation {
             startupContinuation = nil
@@ -1017,6 +1063,7 @@ actor AdaptiveMicrophoneSampleProvider:
         startupContinuation = nil
         let provider = currentProvider
         currentProvider = nil
+        currentBackendAttemptID = nil
         isPaused = false
         let relay = self.relay
         self.relay = nil

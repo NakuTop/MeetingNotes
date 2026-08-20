@@ -138,20 +138,26 @@ actor CoreAudioMicrophoneSampleProvider: MicrophoneSampleProviding {
     }
 
     func pause() async throws {
-        guard activeToken != nil else {
+        guard let token = activeToken else {
             throw AudioCaptureError.notRunning
         }
         guard !isPaused else { return }
         await session.pause()
+        guard activeToken == token else {
+            throw CancellationError()
+        }
         isPaused = true
     }
 
     func resume() async throws {
-        guard activeToken != nil else {
+        guard let token = activeToken else {
             throw AudioCaptureError.notRunning
         }
         guard isPaused else { return }
         try await session.resume()
+        guard activeToken == token else {
+            throw CancellationError()
+        }
         isPaused = false
     }
 

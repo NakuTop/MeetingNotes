@@ -1509,6 +1509,125 @@ final class AdaptiveMicrophoneSampleProviderTests: XCTestCase {
         withExtendedLifetime((oldStream, newStream)) {}
     }
 
+    func testLateOldPauseCannotMutateRecoveredSameProviderAttempt()
+        async throws {
+        let backend = PauseResumeInterleavingMicrophoneProvider(
+            blockedOperation: .pause
+        )
+        let discovery = MutableAudioInputDiscoveryProvider(
+            snapshot: snapshotWithAVFDevices(
+                defaultID: "A",
+                ids: ["A"]
+            )
+        )
+        let observer = EmittingHardwareObserver()
+        let provider = makeProvider(
+            avfProvider: backend,
+            coreAudioProvider: FakeMicrophoneBackendProvider(
+                mode: .yieldsSamples
+            ),
+            discovery: discovery,
+            hardwareObserver: observer,
+            configuration: MicrophoneRecoveryConfiguration(
+                firstFrameTimeout: .seconds(5),
+                maxAutomaticRecoveryAttempts: 2
+            )
+        )
+        let stream = try await provider.start(deviceID: nil)
+        var iterator = stream.makeAsyncIterator()
+        let firstSample = try await iterator.next()
+        XCTAssertNotNil(firstSample)
+        let stalePause = Task {
+            try await provider.pause()
+        }
+        await backend.waitUntilPauseEntered()
+
+        discovery.set(
+            snapshotWithAVFDevices(defaultID: "B", ids: ["B"])
+        )
+        observer.emit(.defaultInputChanged)
+        let replacementSample = try await iterator.next()
+        XCTAssertNotNil(replacementSample)
+        let starts = await backend.startCount()
+        XCTAssertEqual(starts, 2)
+
+        await backend.releasePause()
+        do {
+            try await stalePause.value
+            XCTFail("Expected stale backend-attempt pause cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        try await provider.pause()
+        let pauses = await backend.pauseCount()
+        let resumes = await backend.resumeCount()
+        XCTAssertEqual(pauses, 2)
+        XCTAssertEqual(resumes, 0)
+        await provider.stop()
+        withExtendedLifetime(stream) {}
+    }
+
+    func testLateOldResumeCannotMutateRecoveredSameProviderAttempt()
+        async throws {
+        let backend = PauseResumeInterleavingMicrophoneProvider(
+            blockedOperation: .resume
+        )
+        let discovery = MutableAudioInputDiscoveryProvider(
+            snapshot: snapshotWithAVFDevices(
+                defaultID: "A",
+                ids: ["A"]
+            )
+        )
+        let observer = EmittingHardwareObserver()
+        let provider = makeProvider(
+            avfProvider: backend,
+            coreAudioProvider: FakeMicrophoneBackendProvider(
+                mode: .yieldsSamples
+            ),
+            discovery: discovery,
+            hardwareObserver: observer,
+            configuration: MicrophoneRecoveryConfiguration(
+                firstFrameTimeout: .seconds(5),
+                maxAutomaticRecoveryAttempts: 2
+            )
+        )
+        let stream = try await provider.start(deviceID: nil)
+        var iterator = stream.makeAsyncIterator()
+        let firstSample = try await iterator.next()
+        XCTAssertNotNil(firstSample)
+        try await provider.pause()
+        let staleResume = Task {
+            try await provider.resume()
+        }
+        await backend.waitUntilResumeEntered()
+
+        discovery.set(
+            snapshotWithAVFDevices(defaultID: "B", ids: ["B"])
+        )
+        observer.emit(.defaultInputChanged)
+        let replacementSample = try await iterator.next()
+        XCTAssertNotNil(replacementSample)
+        let starts = await backend.startCount()
+        XCTAssertEqual(starts, 2)
+
+        await backend.releaseResume()
+        do {
+            try await staleResume.value
+            XCTFail("Expected stale backend-attempt resume cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        try await provider.resume()
+        let pauses = await backend.pauseCount()
+        let resumes = await backend.resumeCount()
+        XCTAssertEqual(pauses, 1)
+        XCTAssertEqual(resumes, 2)
+        await provider.stop()
+        withExtendedLifetime(stream) {}
+    }
+
     func testRestartWaitsForCancelledStartupProviderCleanup()
         async throws {
         let events = AsyncStream<CleanupRestartEvent>.makeStream()
@@ -3016,6 +3135,7 @@ private actor PauseResumeInterleavingMicrophoneProvider:
     private let blockedOperation: BlockedOperation?
     private var streamContinuation:
         AsyncThrowingStream<MicrophoneSample, Error>.Continuation?
+    private var starts = 0
     private var pauseCalls = 0
     private var resumeCalls = 0
     private var stopCalls = 0
@@ -3038,6 +3158,7 @@ private actor PauseResumeInterleavingMicrophoneProvider:
         deviceID: String?
     ) async throws -> AsyncThrowingStream<MicrophoneSample, Error> {
         _ = deviceID
+        starts += 1
         let pair = AsyncThrowingStream<
             MicrophoneSample,
             Error
@@ -3049,7 +3170,8 @@ private actor PauseResumeInterleavingMicrophoneProvider:
 
     func pause() async throws {
         pauseCalls += 1
-        guard blockedOperation == .pause else { return }
+        guard blockedOperation == .pause,
+              pauseCalls == 1 else { return }
         pauseEntered = true
         let waiters = pauseEnteredWaiters
         pauseEnteredWaiters.removeAll()
@@ -3061,7 +3183,8 @@ private actor PauseResumeInterleavingMicrophoneProvider:
 
     func resume() async throws {
         resumeCalls += 1
-        guard blockedOperation == .resume else { return }
+        guard blockedOperation == .resume,
+              resumeCalls == 1 else { return }
         resumeEntered = true
         let waiters = resumeEnteredWaiters
         resumeEnteredWaiters.removeAll()
@@ -3105,6 +3228,10 @@ private actor PauseResumeInterleavingMicrophoneProvider:
 
     func pauseCount() -> Int {
         pauseCalls
+    }
+
+    func startCount() -> Int {
+        starts
     }
 
     func resumeCount() -> Int {
