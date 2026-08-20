@@ -1369,6 +1369,81 @@ final class AdaptiveMicrophoneSampleProviderTests: XCTestCase {
         _ = try? await oldConsumer.value
     }
 
+    func testInFlightOldAttemptSampleCannotMutateRecoveredSameTokenAttempt()
+        async throws {
+        let backend = PauseResumeInterleavingMicrophoneProvider()
+        let ingestBarrier = SampleIngestInterleavingBarrier()
+        let discovery = MutableAudioInputDiscoveryProvider(
+            snapshot: snapshotWithAVFDevices(
+                defaultID: "A",
+                ids: ["A"]
+            )
+        )
+        let observer = EmittingHardwareObserver()
+        let provider = makeProvider(
+            avfProvider: backend,
+            coreAudioProvider: FakeMicrophoneBackendProvider(
+                mode: .yieldsSamples
+            ),
+            discovery: discovery,
+            hardwareObserver: observer,
+            configuration: MicrophoneRecoveryConfiguration(
+                firstFrameTimeout: .seconds(5),
+                maxAutomaticRecoveryAttempts: 2
+            ),
+            beforeSampleIngest: {
+                await ingestBarrier.beforeIngest()
+            },
+            afterSampleIngestAttempt: {
+                await ingestBarrier.afterIngestAttempt()
+            }
+        )
+        let stream = try await provider.start(deviceID: nil)
+        var iterator = stream.makeAsyncIterator()
+        await ingestBarrier.waitUntilFirstIngestIsBlocked()
+
+        discovery.set(
+            snapshotWithAVFDevices(defaultID: "B", ids: ["B"])
+        )
+        observer.emit(.defaultInputChanged)
+        let firstCurrentSample = try await iterator.next()
+        XCTAssertEqual(
+            firstCurrentSample?.timestamp ?? -1,
+            0,
+            accuracy: 0.000_001
+        )
+        await ingestBarrier.waitUntilAttemptCount(1)
+        let runtimeBeforeStaleRelease = await provider.runtimeSnapshot()
+        let starts = await backend.startCount()
+        XCTAssertEqual(starts, 2)
+        XCTAssertEqual(
+            runtimeBeforeStaleRelease.telemetry.receivedFrameCount,
+            1
+        )
+
+        await ingestBarrier.releaseFirstIngest()
+        await ingestBarrier.waitUntilAttemptCount(2)
+
+        let runtimeAfterStaleRelease = await provider.runtimeSnapshot()
+        XCTAssertEqual(runtimeAfterStaleRelease, runtimeBeforeStaleRelease)
+        XCTAssertEqual(
+            runtimeAfterStaleRelease.telemetry.receivedFrameCount,
+            1
+        )
+
+        await backend.yieldCurrent(sampleTime: 48_000)
+        await ingestBarrier.waitUntilAttemptCount(3)
+        let secondCurrentSample = try await iterator.next()
+        XCTAssertEqual(
+            secondCurrentSample?.timestamp ?? -1,
+            1,
+            accuracy: 0.000_001
+        )
+
+        await provider.stop()
+        withExtendedLifetime(stream) {}
+    }
+
     func testLateOldPauseCannotMutateRestartedSession()
         async throws {
         let stale = PauseResumeInterleavingMicrophoneProvider(
@@ -3242,7 +3317,13 @@ private actor PauseResumeInterleavingMicrophoneProvider:
         stopCalls
     }
 
-    private func makeSample() -> MicrophoneSample {
+    func yieldCurrent(sampleTime: AVAudioFramePosition) {
+        streamContinuation?.yield(makeSample(sampleTime: sampleTime))
+    }
+
+    private func makeSample(
+        sampleTime: AVAudioFramePosition = 0
+    ) -> MicrophoneSample {
         let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 48_000,
@@ -3257,7 +3338,7 @@ private actor PauseResumeInterleavingMicrophoneProvider:
         buffer.floatChannelData?.pointee[0] = 0.25
         return MicrophoneSample(
             buffer: buffer,
-            sampleTime: 0,
+            sampleTime: sampleTime,
             sampleRate: 48_000
         )
     }

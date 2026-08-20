@@ -771,7 +771,11 @@ actor AdaptiveMicrophoneSampleProvider:
         let changeTask = Task { [weak self] in
             for await event in changeEvents {
                 guard let self,
-                      await self.activeToken == token else { break }
+                      await self.isCurrentBackendAttempt(
+                        token: token,
+                        attemptID: attemptID,
+                        provider: provider
+                      ) else { break }
                 let permissionStatus = self.permission.status()
                 guard permissionStatus == .authorized else {
                     outcomeContinuation.yield(
@@ -789,7 +793,9 @@ actor AdaptiveMicrophoneSampleProvider:
                     for: event,
                     preferred: preferred,
                     currentResolution: resolution,
-                    token: token
+                    token: token,
+                    attemptID: attemptID,
+                    provider: provider
                 )
                 switch decision {
                 case .ignore:
@@ -857,8 +863,13 @@ actor AdaptiveMicrophoneSampleProvider:
             } catch {
                 return
             }
-            guard let self, await self.activeToken == token else { return }
-            if await self.backendFrameCount == 0 {
+            guard let self,
+                  await self.shouldReportNoFrames(
+                    token: token,
+                    attemptID: attemptID,
+                    provider: provider
+                  ) else { return }
+            if !Task.isCancelled {
                 outcomeContinuation.yield(
                     .recoveryNeeded(
                         BackendFailure(
@@ -876,11 +887,18 @@ actor AdaptiveMicrophoneSampleProvider:
                     await self.beforeSampleIngest?()
                     let accepted = await self.ingest(
                         sample,
-                        token: token
+                        token: token,
+                        attemptID: attemptID,
+                        provider: provider
                     )
                     await self.afterSampleIngestAttempt?()
                     guard accepted else { break }
                 }
+                guard await self.isCurrentBackendAttempt(
+                    token: token,
+                    attemptID: attemptID,
+                    provider: provider
+                ) else { return }
                 outcomeContinuation.yield(
                     .recoveryNeeded(
                         BackendFailure(
@@ -889,6 +907,11 @@ actor AdaptiveMicrophoneSampleProvider:
                     )
                 )
             } catch {
+                guard await self.isCurrentBackendAttempt(
+                    token: token,
+                    attemptID: attemptID,
+                    provider: provider
+                ) else { return }
                 outcomeContinuation.yield(
                     .recoveryNeeded(BackendFailure(error: error))
                 )
@@ -942,9 +965,15 @@ actor AdaptiveMicrophoneSampleProvider:
         for event: MicrophoneHardwareChangeEvent,
         preferred: PreferredAudioInput,
         currentResolution: ResolvedMicrophoneCapture,
-        token: UUID
+        token: UUID,
+        attemptID: UUID,
+        provider: any MicrophoneSampleProviding
     ) async -> MicrophoneTopologyDecision {
-        guard activeToken == token else { return .ignore }
+        guard isCurrentBackendAttempt(
+            token: token,
+            attemptID: attemptID,
+            provider: provider
+        ) else { return .ignore }
         do {
             let snapshot = try discovery.discover()
             let previousSnapshot =
@@ -981,9 +1010,15 @@ actor AdaptiveMicrophoneSampleProvider:
     @discardableResult
     private func ingest(
         _ sample: MicrophoneSample,
-        token: UUID
+        token: UUID,
+        attemptID: UUID,
+        provider: any MicrophoneSampleProviding
     ) -> Bool {
-        guard activeToken == token else { return false }
+        guard isCurrentBackendAttempt(
+            token: token,
+            attemptID: attemptID,
+            provider: provider
+        ) else { return false }
         backendFrameCount += 1
         if runtime.telemetry.receivedFrameCount == 0 {
             MicrophoneDiagnosticLogger.firstFrameReceived()
@@ -996,6 +1031,18 @@ actor AdaptiveMicrophoneSampleProvider:
         let normalizedSample = timelineNormalizer.normalize(sample)
         relay?.yield(normalizedSample)
         return true
+    }
+
+    private func shouldReportNoFrames(
+        token: UUID,
+        attemptID: UUID,
+        provider: any MicrophoneSampleProviding
+    ) -> Bool {
+        isCurrentBackendAttempt(
+            token: token,
+            attemptID: attemptID,
+            provider: provider
+        ) && backendFrameCount == 0
     }
 
     private func updateTelemetry(
