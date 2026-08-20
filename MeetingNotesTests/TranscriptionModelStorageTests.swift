@@ -41,7 +41,7 @@ final class TranscriptionModelStorageTests: XCTestCase {
         )
         XCTAssertEqual(
             highAccuracy.pathComponents.suffix(2),
-            ["high-accuracy", "openai_whisper-large-v3-v20240930_626MB"]
+            ["high-accuracy", "openai_whisper-large-v3"]
         )
     }
 

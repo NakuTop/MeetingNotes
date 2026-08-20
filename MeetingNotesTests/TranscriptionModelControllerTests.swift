@@ -25,7 +25,7 @@ final class TranscriptionModelControllerTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    func testPreparePassesBalancedModelIDAndFolder() async throws {
+    func testPreparePreservesBalancedModelIDAndFolder() async throws {
         let storage = makeStorage()
         let spy = TranscriptionModelServiceFactorySpy()
         let controller = makeController(storage: storage, spy: spy)
@@ -45,6 +45,19 @@ final class TranscriptionModelControllerTests: XCTestCase {
                 )
             ]
         )
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(
+            request.descriptor.modelID,
+            "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page"
+        )
+        XCTAssertEqual(
+            request.descriptor.downloadSelector,
+            "openai_whisper-large-v3-v20240930_turbo"
+        )
+        XCTAssertEqual(
+            request.folder.lastPathComponent,
+            "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page"
+        )
     }
 
     func testHighAccuracyPassesExactLargeV3ModelID() async throws {
@@ -58,11 +71,40 @@ final class TranscriptionModelControllerTests: XCTestCase {
         let request = try XCTUnwrap(requests.first)
         XCTAssertEqual(
             request.descriptor.modelID,
-            "openai_whisper-large-v3-v20240930_626MB"
+            "openai_whisper-large-v3"
+        )
+        XCTAssertEqual(
+            request.descriptor.downloadSelector,
+            "openai_whisper-large-v3"
         )
         XCTAssertEqual(request.descriptor.mode, .highAccuracy)
         XCTAssertEqual(request.folder, storage.folder(for: .highAccuracy))
         XCTAssertTrue(request.download)
+    }
+
+    func testDefaultFactoryUsesDownloadSelectorAndPersistentFolder() throws {
+        let storage = makeStorage()
+        let descriptor = TranscriptionModelCatalog.descriptor(for: .balanced)
+        let folder = storage.folder(for: .balanced)
+        let request = TranscriptionModelLoadRequest(
+            descriptor: descriptor,
+            folder: folder,
+            download: true
+        )
+
+        let configuration = TranscriptionModelController
+            .defaultServiceConfiguration(for: request)
+
+        XCTAssertEqual(
+            configuration.modelSelector,
+            "openai_whisper-large-v3-v20240930_turbo"
+        )
+        XCTAssertEqual(configuration.persistentModelFolder, folder)
+        XCTAssertTrue(configuration.download)
+        XCTAssertEqual(
+            folder.lastPathComponent,
+            "openai_whisper-large-v3_turbo_v3_1747_1_10_256Page"
+        )
     }
 
     func testDownloadedModelLoadsOfflineFromItsOwnFolder() async throws {

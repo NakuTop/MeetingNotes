@@ -6,6 +6,12 @@ struct TranscriptionModelLoadRequest: Equatable, Sendable {
     let download: Bool
 }
 
+struct TranscriptionModelServiceConfiguration: Equatable, Sendable {
+    let modelSelector: String
+    let persistentModelFolder: URL
+    let download: Bool
+}
+
 protocol TranscriptionModelStatusControlling: Sendable {
     func status(
         for mode: TranscriptionQualityMode
@@ -44,15 +50,27 @@ actor TranscriptionModelController: TranscriptionModelControlling {
     init(
         storage: TranscriptionModelStorage,
         makeService: @escaping ServiceFactory = { request in
-            WhisperKitTranscriptionService(
-                model: request.descriptor.modelID,
-                persistentModelFolder: request.folder,
-                download: request.download
+            let configuration = TranscriptionModelController
+                .defaultServiceConfiguration(for: request)
+            return WhisperKitTranscriptionService(
+                model: configuration.modelSelector,
+                persistentModelFolder: configuration.persistentModelFolder,
+                download: configuration.download
             )
         }
     ) {
         self.storage = storage
         self.makeService = makeService
+    }
+
+    nonisolated static func defaultServiceConfiguration(
+        for request: TranscriptionModelLoadRequest
+    ) -> TranscriptionModelServiceConfiguration {
+        TranscriptionModelServiceConfiguration(
+            modelSelector: request.descriptor.downloadSelector,
+            persistentModelFolder: request.folder,
+            download: request.download
+        )
     }
 
     func status(
