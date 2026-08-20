@@ -358,6 +358,11 @@ actor AdaptiveMicrophoneSampleProvider:
         let error: Error
     }
 
+    private struct ProviderCleanup: Sendable {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+
     private enum BackendOutcome: Sendable {
         case completed
         case recoveryNeeded(BackendFailure)
@@ -376,10 +381,17 @@ actor AdaptiveMicrophoneSampleProvider:
     private let hardwareObserver: any CoreAudioInputHardwareObserving
     private let configuration: MicrophoneRecoveryConfiguration
     private let bufferCapacity: Int
+    private let beforeSampleIngest:
+        (@Sendable () async -> Void)?
+    private let afterSampleIngestAttempt:
+        (@Sendable () async -> Void)?
+    private let onWaitingForProviderCleanup:
+        (@Sendable () async -> Void)?
 
     private var activeToken: UUID?
     private var relay: AdaptiveMicrophoneSampleRelay?
     private var runTask: Task<Void, Never>?
+    private var providerCleanup: ProviderCleanup?
     private var startupContinuation:
         CheckedContinuation<Void, Error>?
     private var currentProvider: (any MicrophoneSampleProviding)?
@@ -410,7 +422,13 @@ actor AdaptiveMicrophoneSampleProvider:
             LiveCoreAudioInputHardwareObserver(),
         configuration: MicrophoneRecoveryConfiguration = .production,
         bufferCapacity: Int =
-            AdaptiveMicrophoneSampleProvider.productionBufferCapacity
+            AdaptiveMicrophoneSampleProvider.productionBufferCapacity,
+        beforeSampleIngest:
+            (@Sendable () async -> Void)? = nil,
+        afterSampleIngestAttempt:
+            (@Sendable () async -> Void)? = nil,
+        onWaitingForProviderCleanup:
+            (@Sendable () async -> Void)? = nil
     ) {
         self.avFoundationProvider = avFoundationProvider
         self.coreAudioProvider = coreAudioProvider
@@ -420,12 +438,21 @@ actor AdaptiveMicrophoneSampleProvider:
         self.hardwareObserver = hardwareObserver
         self.configuration = configuration
         self.bufferCapacity = max(1, bufferCapacity)
+        self.beforeSampleIngest = beforeSampleIngest
+        self.afterSampleIngestAttempt = afterSampleIngestAttempt
+        self.onWaitingForProviderCleanup = onWaitingForProviderCleanup
         runtime.telemetry = Self.makeInitialTelemetry()
     }
 
     func start(
         deviceID: String?
     ) async throws -> AsyncThrowingStream<MicrophoneSample, Error> {
+        try Task.checkCancellation()
+        if let cleanup = providerCleanup {
+            await onWaitingForProviderCleanup?()
+            await cleanup.task.value
+            try Task.checkCancellation()
+        }
         guard activeToken == nil else {
             throw AudioCaptureError.alreadyRunning
         }
@@ -502,7 +529,7 @@ actor AdaptiveMicrophoneSampleProvider:
             }
         } catch {
             if error is CancellationError {
-                await cancelStartup(token: token)
+                cancelStartup(token: token)
             }
             throw error
         }
@@ -542,7 +569,8 @@ actor AdaptiveMicrophoneSampleProvider:
         let relay = self.relay
         self.relay = nil
         continuation?.resume(throwing: CancellationError())
-        await provider?.stop()
+        let cleanupTask = provider.map(scheduleCleanup(for:))
+        await cleanupTask?.value
         if continuation == nil {
             await task?.value
         }
@@ -808,8 +836,13 @@ actor AdaptiveMicrophoneSampleProvider:
             guard let self else { return }
             do {
                 for try await sample in stream {
-                    guard await self.activeToken == token else { break }
-                    await self.ingest(sample)
+                    await self.beforeSampleIngest?()
+                    let accepted = await self.ingest(
+                        sample,
+                        token: token
+                    )
+                    await self.afterSampleIngestAttempt?()
+                    guard accepted else { break }
                 }
                 outcomeContinuation.yield(
                     .recoveryNeeded(
@@ -889,7 +922,12 @@ actor AdaptiveMicrophoneSampleProvider:
         }
     }
 
-    private func ingest(_ sample: MicrophoneSample) {
+    @discardableResult
+    private func ingest(
+        _ sample: MicrophoneSample,
+        token: UUID
+    ) -> Bool {
+        guard activeToken == token else { return false }
         backendFrameCount += 1
         if runtime.telemetry.receivedFrameCount == 0 {
             MicrophoneDiagnosticLogger.firstFrameReceived()
@@ -901,6 +939,7 @@ actor AdaptiveMicrophoneSampleProvider:
         )
         let normalizedSample = timelineNormalizer.normalize(sample)
         relay?.yield(normalizedSample)
+        return true
     }
 
     private func updateTelemetry(
@@ -956,7 +995,7 @@ actor AdaptiveMicrophoneSampleProvider:
         continuation.resume()
     }
 
-    private func cancelStartup(token: UUID) async {
+    private func cancelStartup(token: UUID) {
         guard activeToken == token else { return }
         activeToken = nil
         runtime.status = .stopped
@@ -970,9 +1009,32 @@ actor AdaptiveMicrophoneSampleProvider:
         isPaused = false
         let relay = self.relay
         self.relay = nil
+        if let provider {
+            scheduleCleanup(for: provider)
+        }
         continuation?.resume(throwing: CancellationError())
         relay?.finish(throwing: CancellationError())
-        await provider?.stop()
+    }
+
+    @discardableResult
+    private func scheduleCleanup(
+        for provider: any MicrophoneSampleProviding
+    ) -> Task<Void, Never> {
+        if let providerCleanup {
+            return providerCleanup.task
+        }
+        let id = UUID()
+        let task = Task { [weak self] in
+            await provider.stop()
+            await self?.providerCleanupDidFinish(id: id)
+        }
+        providerCleanup = ProviderCleanup(id: id, task: task)
+        return task
+    }
+
+    private func providerCleanupDidFinish(id: UUID) {
+        guard providerCleanup?.id == id else { return }
+        providerCleanup = nil
     }
 
     private func handleTermination(token: UUID) async {

@@ -1231,7 +1231,7 @@ final class AdaptiveMicrophoneSampleProviderTests: XCTestCase {
         XCTAssertEqual(sharedBackend.stopCount(), 2)
     }
 
-    func testConcurrentStopAndCallerCancellationDoesNotDoubleResume()
+    func testCallerCancellationThenStopDoesNotDoubleResume()
         async throws {
         let avf = BlockingStartMicrophoneProvider(blocksRemaining: 1)
         let coreAudio = FakeMicrophoneBackendProvider(
@@ -1252,14 +1252,48 @@ final class AdaptiveMicrophoneSampleProviderTests: XCTestCase {
         }
         await avf.waitUntilStartEntered()
 
-        let cancelTask = Task {
-            startTask.cancel()
+        startTask.cancel()
+        do {
+            _ = try await startTask.value
+            XCTFail("Expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
         }
-        let stopTask = Task {
-            await provider.stop()
+        await provider.stop()
+        let runtime = await provider.runtimeSnapshot()
+        XCTAssertEqual(runtime.status, .stopped)
+        avf.release()
+
+        let stream = try await provider.start(deviceID: nil)
+        var iterator = stream.makeAsyncIterator()
+        let sample = try await iterator.next()
+        XCTAssertNotNil(sample)
+        await provider.stop()
+    }
+
+    func testStopThenCallerCancellationDoesNotDoubleResume()
+        async throws {
+        let avf = BlockingStartMicrophoneProvider(blocksRemaining: 1)
+        let coreAudio = FakeMicrophoneBackendProvider(
+            mode: .yieldsSamples
+        )
+        let provider = makeProvider(
+            avfProvider: avf,
+            coreAudioProvider: coreAudio,
+            discovery: StaticAudioInputDiscoveryProvider(
+                snapshot: snapshotWithAVFDevices(
+                    defaultID: "A",
+                    ids: ["A"]
+                )
+            )
+        )
+        let startTask = Task {
+            try await provider.start(deviceID: nil)
         }
-        _ = await cancelTask.value
-        await stopTask.value
+        await avf.waitUntilStartEntered()
+
+        await provider.stop()
+        startTask.cancel()
 
         do {
             _ = try await startTask.value
@@ -1276,6 +1310,126 @@ final class AdaptiveMicrophoneSampleProviderTests: XCTestCase {
         let sample = try await iterator.next()
         XCTAssertNotNil(sample)
         await provider.stop()
+    }
+
+    func testInFlightOldSampleCannotMutateRestartedSession()
+        async throws {
+        let backend = ControllableMicrophoneBackendProvider()
+        let ingestBarrier = SampleIngestInterleavingBarrier()
+        let provider = makeProvider(
+            avfProvider: backend,
+            coreAudioProvider: FakeMicrophoneBackendProvider(
+                mode: .yieldsSamples
+            ),
+            discovery: StaticAudioInputDiscoveryProvider(
+                snapshot: snapshotWithAVFDevices(
+                    defaultID: "shared-avf",
+                    ids: ["shared-avf"]
+                )
+            ),
+            beforeSampleIngest: {
+                await ingestBarrier.beforeIngest()
+            },
+            afterSampleIngestAttempt: {
+                await ingestBarrier.afterIngestAttempt()
+            }
+        )
+
+        let oldStream = try await provider.start(deviceID: nil)
+        let oldConsumer = Task {
+            var iterator = oldStream.makeAsyncIterator()
+            return try await iterator.next()
+        }
+        await backend.yield(sampleTime: 48_000)
+        await ingestBarrier.waitUntilFirstIngestIsBlocked()
+
+        await provider.stop()
+
+        let newStream = try await provider.start(deviceID: nil)
+        var newIterator = newStream.makeAsyncIterator()
+        await backend.yield(sampleTime: 0)
+        let currentSample = try await newIterator.next()
+        XCTAssertEqual(
+            currentSample?.timestamp ?? -1,
+            0,
+            accuracy: 0.000_001
+        )
+        await ingestBarrier.waitUntilAttemptCount(1)
+        let runtimeBeforeRelease = await provider.runtimeSnapshot()
+
+        await ingestBarrier.releaseFirstIngest()
+        await ingestBarrier.waitUntilAttemptCount(2)
+
+        let runtimeAfterRelease = await provider.runtimeSnapshot()
+        XCTAssertEqual(runtimeAfterRelease, runtimeBeforeRelease)
+        XCTAssertEqual(runtimeAfterRelease.telemetry.receivedFrameCount, 1)
+
+        await provider.stop()
+        _ = try? await oldConsumer.value
+    }
+
+    func testRestartWaitsForCancelledStartupProviderCleanup()
+        async throws {
+        let events = AsyncStream<CleanupRestartEvent>.makeStream()
+        let backend = BlockingStopRestartMicrophoneProvider(
+            onSecondStart: {
+                events.continuation.yield(.backendStarted)
+            }
+        )
+        let observer = TerminationRecordingHardwareObserver()
+        let provider = makeProvider(
+            avfProvider: backend,
+            coreAudioProvider: FakeMicrophoneBackendProvider(
+                mode: .yieldsSamples
+            ),
+            discovery: StaticAudioInputDiscoveryProvider(
+                snapshot: snapshotWithAVFDevices(
+                    defaultID: "shared-avf",
+                    ids: ["shared-avf"]
+                )
+            ),
+            hardwareObserver: observer,
+            onWaitingForProviderCleanup: {
+                events.continuation.yield(.cleanupWaitObserved)
+            }
+        )
+        let cancelledStart = Task {
+            try await provider.start(deviceID: nil)
+        }
+        await backend.waitUntilFirstStartEntered()
+
+        cancelledStart.cancel()
+
+        do {
+            _ = try await cancelledStart.value
+            XCTFail("Expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        await backend.waitUntilFirstStopEntered()
+
+        let restarted = Task {
+            try await provider.start(deviceID: nil)
+        }
+        var eventIterator = events.stream.makeAsyncIterator()
+        let firstEvent = await eventIterator.next()
+        XCTAssertEqual(firstEvent, .cleanupWaitObserved)
+        XCTAssertEqual(backend.startCount(), 1)
+
+        backend.releaseFirstStop()
+
+        let newStream = try await restarted.value
+        XCTAssertEqual(backend.startCount(), 2)
+        var newIterator = newStream.makeAsyncIterator()
+        backend.yieldCurrent(sampleTime: 0)
+        let newSample = try await newIterator.next()
+        XCTAssertNotNil(newSample)
+
+        backend.releaseFirstStart()
+        await waitForHardwareObserverTermination(observer)
+        await provider.stop()
+        XCTAssertEqual(backend.stopCount(), 2)
+        events.continuation.finish()
     }
 
     func testAVFoundationReconnectClearsOnlyAVFAttemptForSamePhysicalDevice() {
@@ -1594,7 +1748,13 @@ final class AdaptiveMicrophoneSampleProviderTests: XCTestCase {
             MicrophoneRecoveryConfiguration(
                 firstFrameTimeout: .milliseconds(40),
                 maxAutomaticRecoveryAttempts: 2
-            )
+            ),
+        beforeSampleIngest:
+            (@Sendable () async -> Void)? = nil,
+        afterSampleIngestAttempt:
+            (@Sendable () async -> Void)? = nil,
+        onWaitingForProviderCleanup:
+            (@Sendable () async -> Void)? = nil
     ) -> AdaptiveMicrophoneSampleProvider {
         AdaptiveMicrophoneSampleProvider(
             avFoundationProvider: avfProvider,
@@ -1603,7 +1763,10 @@ final class AdaptiveMicrophoneSampleProviderTests: XCTestCase {
             permission: permission,
             preferredInputProvider: preferredInputProvider,
             hardwareObserver: hardwareObserver,
-            configuration: configuration
+            configuration: configuration,
+            beforeSampleIngest: beforeSampleIngest,
+            afterSampleIngestAttempt: afterSampleIngestAttempt,
+            onWaitingForProviderCleanup: onWaitingForProviderCleanup
         )
     }
 
@@ -2167,6 +2330,232 @@ private final class LateCompletingStartMicrophoneProvider:
             return value
         }
         continuation?.resume(returning: completion)
+    }
+}
+
+private actor SampleIngestInterleavingBarrier {
+    private var beforeCount = 0
+    private var afterCount = 0
+    private var firstEnteredWaiters:
+        [CheckedContinuation<Void, Never>] = []
+    private var firstReleaseContinuation:
+        CheckedContinuation<Void, Never>?
+    private var afterWaiters:
+        [(target: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func beforeIngest() async {
+        beforeCount += 1
+        guard beforeCount == 1 else { return }
+        let enteredWaiters = firstEnteredWaiters
+        firstEnteredWaiters.removeAll()
+        enteredWaiters.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            firstReleaseContinuation = continuation
+        }
+    }
+
+    func afterIngestAttempt() {
+        afterCount += 1
+        let ready = afterWaiters.filter { $0.target <= afterCount }
+        afterWaiters.removeAll { $0.target <= afterCount }
+        ready.forEach { $0.continuation.resume() }
+    }
+
+    func waitUntilFirstIngestIsBlocked() async {
+        guard beforeCount == 0 else { return }
+        await withCheckedContinuation { continuation in
+            firstEnteredWaiters.append(continuation)
+        }
+    }
+
+    func releaseFirstIngest() {
+        let continuation = firstReleaseContinuation
+        firstReleaseContinuation = nil
+        continuation?.resume()
+    }
+
+    func waitUntilAttemptCount(_ target: Int) async {
+        guard afterCount < target else { return }
+        await withCheckedContinuation { continuation in
+            afterWaiters.append((target, continuation))
+        }
+    }
+}
+
+private enum CleanupRestartEvent: Equatable, Sendable {
+    case cleanupWaitObserved
+    case backendStarted
+}
+
+private final class BlockingStopRestartMicrophoneProvider:
+    MicrophoneSampleProviding,
+    @unchecked Sendable {
+    private let lock = NSLock()
+    private let onSecondStart: @Sendable () -> Void
+    private var firstStartContinuation:
+        CheckedContinuation<Void, Never>?
+    private var firstStartEntered = false
+    private var firstStartWaiters:
+        [CheckedContinuation<Void, Never>] = []
+    private var firstStopContinuation:
+        CheckedContinuation<Void, Never>?
+    private var firstStopEntered = false
+    private var firstStopWaiters:
+        [CheckedContinuation<Void, Never>] = []
+    private var currentStreamContinuation:
+        AsyncThrowingStream<MicrophoneSample, Error>.Continuation?
+    private var starts = 0
+    private var stops = 0
+
+    init(onSecondStart: @escaping @Sendable () -> Void) {
+        self.onSecondStart = onSecondStart
+    }
+
+    func start(
+        deviceID: String?
+    ) async throws -> AsyncThrowingStream<MicrophoneSample, Error> {
+        _ = deviceID
+        let invocation = lock.withLock {
+            starts += 1
+            return starts
+        }
+        if invocation == 1 {
+            await withCheckedContinuation { continuation in
+                let waiters = lock.withLock {
+                    firstStartContinuation = continuation
+                    firstStartEntered = true
+                    let values = firstStartWaiters
+                    firstStartWaiters.removeAll()
+                    return values
+                }
+                waiters.forEach { $0.resume() }
+            }
+            return AsyncThrowingStream { _ in }
+        }
+
+        onSecondStart()
+        let pair = AsyncThrowingStream<
+            MicrophoneSample,
+            Error
+        >.makeStream()
+        lock.withLock {
+            currentStreamContinuation = pair.continuation
+        }
+        return pair.stream
+    }
+
+    func pause() async throws {}
+    func resume() async throws {}
+
+    func stop() async {
+        let invocation = lock.withLock {
+            stops += 1
+            return stops
+        }
+        if invocation == 1 {
+            await withCheckedContinuation { continuation in
+                let waiters = lock.withLock {
+                    firstStopContinuation = continuation
+                    firstStopEntered = true
+                    let values = firstStopWaiters
+                    firstStopWaiters.removeAll()
+                    return values
+                }
+                waiters.forEach { $0.resume() }
+            }
+            return
+        }
+        let continuation = lock.withLock {
+            let value = currentStreamContinuation
+            currentStreamContinuation = nil
+            return value
+        }
+        continuation?.finish()
+    }
+
+    func waitUntilFirstStartEntered() async {
+        await withCheckedContinuation { continuation in
+            let shouldResume = lock.withLock {
+                if firstStartEntered {
+                    return true
+                }
+                firstStartWaiters.append(continuation)
+                return false
+            }
+            if shouldResume {
+                continuation.resume()
+            }
+        }
+    }
+
+    func waitUntilFirstStopEntered() async {
+        await withCheckedContinuation { continuation in
+            let shouldResume = lock.withLock {
+                if firstStopEntered {
+                    return true
+                }
+                firstStopWaiters.append(continuation)
+                return false
+            }
+            if shouldResume {
+                continuation.resume()
+            }
+        }
+    }
+
+    func releaseFirstStart() {
+        let continuation = lock.withLock {
+            let value = firstStartContinuation
+            firstStartContinuation = nil
+            return value
+        }
+        continuation?.resume()
+    }
+
+    func releaseFirstStop() {
+        let continuation = lock.withLock {
+            let value = firstStopContinuation
+            firstStopContinuation = nil
+            return value
+        }
+        continuation?.resume()
+    }
+
+    func yieldCurrent(sampleTime: AVAudioFramePosition) {
+        let continuation = lock.withLock {
+            currentStreamContinuation
+        }
+        continuation?.yield(makeSample(sampleTime: sampleTime))
+    }
+
+    func startCount() -> Int {
+        lock.withLock { starts }
+    }
+
+    func stopCount() -> Int {
+        lock.withLock { stops }
+    }
+
+    private func makeSample(
+        sampleTime: AVAudioFramePosition
+    ) -> MicrophoneSample {
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 1,
+            interleaved: false
+        )!
+        let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: 1
+        )!
+        buffer.frameLength = 1
+        buffer.floatChannelData?.pointee[0] = 0.25
+        return MicrophoneSample(
+            buffer: buffer,
+            sampleTime: sampleTime,
+            sampleRate: 48_000
+        )
     }
 }
 
