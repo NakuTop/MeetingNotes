@@ -63,6 +63,9 @@ BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO_PLIST
 DISPLAY_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$INFO_PLIST")"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST")"
 BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO_PLIST")"
+MICROPHONE_USAGE_DESCRIPTION="$(/usr/libexec/PlistBuddy \
+    -c 'Print :NSMicrophoneUsageDescription' "$INFO_PLIST")"
+EXPECTED_MICROPHONE_USAGE_DESCRIPTION="用于录制并转录会议中的麦克风声音。"
 
 if [[ "$CONFIGURATION" == "Beta" ]]; then
     EXPECTED_BUNDLE_ID="com.shenminghao.MeetingNotes.beta"
@@ -84,6 +87,9 @@ fail_metadata() {
 [[ "$DISPLAY_NAME" == "$EXPECTED_DISPLAY_NAME" ]] || fail_metadata "display name"
 [[ "$VERSION" == "$EXPECTED_VERSION" ]] || fail_metadata "version"
 [[ "$BUILD" == "$EXPECTED_BUILD" ]] || fail_metadata "build"
+[[ "$MICROPHONE_USAGE_DESCRIPTION" == \
+    "$EXPECTED_MICROPHONE_USAGE_DESCRIPTION" ]] \
+    || fail_metadata "microphone usage description"
 
 echo "=== Step 3: Verify codesign, entitlements, hardened runtime ==="
 if [[ "$SIGNING_MODE" == "developer-id" ]]; then
@@ -139,6 +145,9 @@ grep -q '"com.apple.security.app-sandbox" => true' \
 grep -q '"com.apple.security.device.audio-input" => true' \
     <<<"$ENTITLEMENTS_PLIST" \
     || { echo "ERROR: audio-input entitlement missing" >&2; exit 1; }
+grep -q '"com.apple.security.network.client" => true' \
+    <<<"$ENTITLEMENTS_PLIST" \
+    || { echo "ERROR: network-client entitlement missing" >&2; exit 1; }
 
 echo "=== Step 4: Stage validated app and create DMG ==="
 STAGING="$(mktemp -d)"
@@ -158,6 +167,7 @@ hdiutil create -volname "$VOLUME_NAME" \
   -srcfolder "$STAGING" \
   -ov -format UDZO \
   "$DMG"
+hdiutil verify "$DMG"
 
 if [[ "$SIGNING_MODE" == "developer-id" ]]; then
     codesign --force --timestamp --sign "$DEVELOPER_ID_APPLICATION" "$DMG"
@@ -205,10 +215,15 @@ DMG_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$DMG_IN
 DMG_DISPLAY_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$DMG_INFO_PLIST")"
 DMG_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DMG_INFO_PLIST")"
 DMG_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$DMG_INFO_PLIST")"
+DMG_MICROPHONE_USAGE_DESCRIPTION="$(/usr/libexec/PlistBuddy \
+    -c 'Print :NSMicrophoneUsageDescription' "$DMG_INFO_PLIST")"
 [[ "$DMG_BUNDLE_ID" == "$EXPECTED_BUNDLE_ID" ]] || fail_metadata "mounted bundle id"
 [[ "$DMG_DISPLAY_NAME" == "$EXPECTED_DISPLAY_NAME" ]] || fail_metadata "mounted display name"
 [[ "$DMG_VERSION" == "$EXPECTED_VERSION" ]] || fail_metadata "mounted version"
 [[ "$DMG_BUILD" == "$EXPECTED_BUILD" ]] || fail_metadata "mounted build"
+[[ "$DMG_MICROPHONE_USAGE_DESCRIPTION" == \
+    "$EXPECTED_MICROPHONE_USAGE_DESCRIPTION" ]] \
+    || fail_metadata "mounted microphone usage description"
 
 DMG_ENTITLEMENTS_PLIST="$(codesign -d --entitlements :- "$DMG_APP" 2>/dev/null \
     | plutil -p - 2>/dev/null || true)"
@@ -218,6 +233,9 @@ grep -q '"com.apple.security.app-sandbox" => true' \
 grep -q '"com.apple.security.device.audio-input" => true' \
     <<<"$DMG_ENTITLEMENTS_PLIST" \
     || { echo "ERROR: mounted audio-input entitlement missing" >&2; exit 1; }
+grep -q '"com.apple.security.network.client" => true' \
+    <<<"$DMG_ENTITLEMENTS_PLIST" \
+    || { echo "ERROR: mounted network-client entitlement missing" >&2; exit 1; }
 
 GATEKEEPER_ASSESSMENT="NOT_RUN_OR_EXPECTED_UNNOTARIZED"
 if [[ "$NOTARIZATION_STATUS" == "accepted" ]]; then
