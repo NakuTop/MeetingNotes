@@ -474,17 +474,36 @@ actor AdaptiveMicrophoneSampleProvider:
         backendFrameCount = 0
         timelineNormalizer.reset()
         do {
-            try await withCheckedThrowingContinuation {
-                (continuation: CheckedContinuation<Void, Error>) in
-                startupContinuation = continuation
-                runTask = Task { [weak self] in
-                    await self?.recoveryLoop(
-                        token: token,
-                        deviceIDOverride: deviceID
-                    )
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await withCheckedThrowingContinuation {
+                    (continuation: CheckedContinuation<Void, Error>) in
+                    guard activeToken == token else {
+                        continuation.resume(
+                            throwing: CancellationError()
+                        )
+                        return
+                    }
+                    startupContinuation = continuation
+                    runTask = Task { [weak self] in
+                        await self?.recoveryLoop(
+                            token: token,
+                            deviceIDOverride: deviceID
+                        )
+                    }
+                }
+                // Handles the race where backend startup succeeded and
+                // caller cancellation arrived before start() returned.
+                try Task.checkCancellation()
+            } onCancel: { [weak self] in
+                Task {
+                    await self?.cancelStartup(token: token)
                 }
             }
         } catch {
+            if error is CancellationError {
+                await cancelStartup(token: token)
+            }
             throw error
         }
         return pair.stream
@@ -515,17 +534,19 @@ actor AdaptiveMicrophoneSampleProvider:
         let task = runTask
         runTask = nil
         task?.cancel()
-        if let continuation = startupContinuation {
-            startupContinuation = nil
-            continuation.resume(throwing: CancellationError())
-        }
+        let continuation = startupContinuation
+        startupContinuation = nil
         let provider = currentProvider
         currentProvider = nil
-        await provider?.stop()
-        await task?.value
-        relay?.finish()
-        relay = nil
         isPaused = false
+        let relay = self.relay
+        self.relay = nil
+        continuation?.resume(throwing: CancellationError())
+        await provider?.stop()
+        if continuation == nil {
+            await task?.value
+        }
+        relay?.finish()
     }
 
     func runtimeSnapshot() async -> MicrophoneRuntimeSnapshot {
@@ -558,6 +579,9 @@ actor AdaptiveMicrophoneSampleProvider:
             do {
                 let snapshot = try discovery.discover()
                 lastDiscoverySnapshot = snapshot
+                guard activeToken == token else {
+                    return
+                }
                 let inputs = AudioInputDeviceIdentityMatcher.mergedInputs(
                     from: snapshot
                 )
@@ -607,6 +631,9 @@ actor AdaptiveMicrophoneSampleProvider:
                     finish(token: token)
                     return
                 case let .rediscoveryNeeded(clearedAttempts):
+                    guard activeToken == token else {
+                        return
+                    }
                     if !clearedAttempts.isEmpty {
                         attemptedCaptures.subtract(clearedAttempts)
                     }
@@ -615,6 +642,9 @@ actor AdaptiveMicrophoneSampleProvider:
                     finish(token: token, throwing: failure.error)
                     return
                 case let .recoveryNeeded(failure):
+                    guard activeToken == token else {
+                        return
+                    }
                     recordFailure(
                         of: resolution,
                         error: failure.error
@@ -662,6 +692,7 @@ actor AdaptiveMicrophoneSampleProvider:
         preferred: PreferredAudioInput,
         token: UUID
     ) async -> BackendOutcome {
+        guard activeToken == token else { return .cancelled }
         let provider: any MicrophoneSampleProviding
         let deviceID: String?
         switch resolution.plan {
@@ -728,16 +759,27 @@ actor AdaptiveMicrophoneSampleProvider:
         let stream: AsyncThrowingStream<MicrophoneSample, Error>
         do {
             stream = try await provider.start(deviceID: deviceID)
+            guard activeToken == token else {
+                changeTask.cancel()
+                if !isCurrentProvider(provider) {
+                    await provider.stop()
+                }
+                return .cancelled
+            }
             runtime.telemetry.captureStarted = true
             signalStartupSuccess(token: token)
             timelineNormalizer.beginBackend()
         } catch {
             changeTask.cancel()
-            runtime.status = .captureStartFailed
-            if activeToken == token {
-                await provider.stop()
-                currentProvider = nil
+            guard activeToken == token else {
+                return .cancelled
             }
+            runtime.status = .captureStartFailed
+            await provider.stop()
+            guard activeToken == token else {
+                return .cancelled
+            }
+            currentProvider = nil
             return .recoveryNeeded(BackendFailure(error: error))
         }
 
@@ -789,11 +831,22 @@ actor AdaptiveMicrophoneSampleProvider:
         consumeTask.cancel()
         watchdog.cancel()
         changeTask.cancel()
-        if activeToken == token {
-            await provider.stop()
-            currentProvider = nil
+        guard activeToken == token else {
+            return .cancelled
         }
+        await provider.stop()
+        guard activeToken == token else {
+            return .cancelled
+        }
+        currentProvider = nil
         return outcome
+    }
+
+    private func isCurrentProvider(
+        _ provider: any MicrophoneSampleProviding
+    ) -> Bool {
+        guard let currentProvider else { return false }
+        return (currentProvider as AnyObject) === (provider as AnyObject)
     }
 
     private func hardwareDecision(
@@ -901,6 +954,25 @@ actor AdaptiveMicrophoneSampleProvider:
         }
         startupContinuation = nil
         continuation.resume()
+    }
+
+    private func cancelStartup(token: UUID) async {
+        guard activeToken == token else { return }
+        activeToken = nil
+        runtime.status = .stopped
+        let task = runTask
+        runTask = nil
+        task?.cancel()
+        let continuation = startupContinuation
+        startupContinuation = nil
+        let provider = currentProvider
+        currentProvider = nil
+        isPaused = false
+        let relay = self.relay
+        self.relay = nil
+        continuation?.resume(throwing: CancellationError())
+        relay?.finish(throwing: CancellationError())
+        await provider?.stop()
     }
 
     private func handleTermination(token: UUID) async {
