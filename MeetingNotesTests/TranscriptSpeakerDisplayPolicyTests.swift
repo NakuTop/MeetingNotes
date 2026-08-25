@@ -248,6 +248,54 @@ final class TranscriptSpeakerDisplayPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testMeetingDetailProjectionIncludesPersistedCorrections() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 2,
+                        endTime: 4,
+                        text: "生成文字"
+                    ),
+                    speakerID: "room-2",
+                    source: .room
+                )
+            ],
+            sourceRevision: 1
+        )
+        let transcriptID = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first?.id
+        )
+        try repository.saveTranscriptCorrection(
+            meetingID: meetingID,
+            transcriptIDs: [transcriptID],
+            anchorStartTime: 2,
+            anchorEndTime: 4,
+            source: .room,
+            originalText: "生成文字",
+            replacementText: "详情页手动修正文字"
+        )
+        let meeting = try repository.meeting(id: meetingID)
+
+        let projected = MeetingDetailTranscriptProjection.entries(
+            for: meeting
+        )
+        let displayed = try XCTUnwrap(
+            TranscriptDisplayPolicy.entries(from: projected).first
+        )
+
+        XCTAssertEqual(projected.count, 1)
+        XCTAssertEqual(displayed.text, "详情页手动修正文字")
+        XCTAssertEqual(displayed.transcriptIDs, [transcriptID])
+    }
+
+    @MainActor
     func testAdjacentSameSpeakerEntriesBecomeOneOrderedTurn() throws {
         let firstID = UUID()
         let secondID = UUID()

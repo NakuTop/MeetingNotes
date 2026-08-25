@@ -34,6 +34,18 @@ private struct TranscriptDisclosureContext: Equatable {
     }
 }
 
+@MainActor
+enum MeetingDetailTranscriptProjection {
+    static func entries(
+        for meeting: MeetingRecord
+    ) -> [CanonicalTranscriptEntry] {
+        TranscriptCorrectionResolver.resolve(
+            transcripts: meeting.transcripts,
+            corrections: meeting.transcriptCorrections
+        )
+    }
+}
+
 struct MeetingDetailView: View {
     @State private var viewModel: MeetingDetailViewModel
     @State private var isEditingTitle = false
@@ -98,6 +110,9 @@ struct MeetingDetailView: View {
     private func detailContent(_ meeting: MeetingRecord) -> some View {
         let playbackKey = MeetingPlaybackPreparationKey(meeting: meeting)
         let disclosureContext = TranscriptDisclosureContext(meeting: meeting)
+        let transcriptEntries = MeetingDetailTranscriptProjection.entries(
+            for: meeting
+        )
         return ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 AdaptiveGlassCard {
@@ -112,7 +127,7 @@ struct MeetingDetailView: View {
                         isExpanded: transcriptDisclosureBinding
                     ) {
                         TranscriptView(
-                            transcripts: meeting.transcripts,
+                            transcripts: transcriptEntries,
                             bookmarks: meeting.bookmarks,
                             customSpeakerNames: meeting.speakerDisplayNames,
                             frequentSpeakerNames: viewModel

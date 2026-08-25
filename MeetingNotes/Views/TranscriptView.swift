@@ -182,9 +182,8 @@ enum TranscriptDisplayPolicy {
 }
 
 struct TranscriptView: View {
-    let transcripts: [TranscriptRecord]
+    let transcripts: [CanonicalTranscriptEntry]
     let bookmarks: [BookmarkRecord]
-    var corrections: [TranscriptCorrectionRecord] = []
     var customSpeakerNames: [String: String] = [:]
     var frequentSpeakerNames: [String] = []
     var speakerNameErrorMessage: String?
@@ -196,10 +195,7 @@ struct TranscriptView: View {
 
     private var visibleTurns: [TranscriptDisplayTurn] {
         TranscriptDisplayPolicy.turns(
-            from: TranscriptCorrectionResolver.resolve(
-                transcripts: transcripts,
-                corrections: corrections
-            ),
+            from: transcripts,
             bookmarks: bookmarks
         )
     }
