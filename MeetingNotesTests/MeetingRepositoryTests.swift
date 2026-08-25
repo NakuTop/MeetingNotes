@@ -2232,6 +2232,45 @@ final class MeetingRepositoryTests: XCTestCase {
         }
     }
 
+    func testDeletingMeetingCascadesTranscriptCorrections() throws {
+        var capturedContext: ModelContext?
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                capturedContext = context
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let transcriptID = UUID(
+            uuidString: "00000000-0000-0000-0000-000000000051"
+        )!
+        let correction = TranscriptCorrectionRecord(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000052")!,
+            anchorStartTime: 1,
+            anchorEndTime: 2,
+            source: .microphone,
+            originalText: "生成文字",
+            replacementText: "手动文字",
+            transcriptIDs: [transcriptID],
+            createdAt: Date(timeIntervalSince1970: 101),
+            updatedAt: Date(timeIntervalSince1970: 102),
+            meeting: meeting
+        )
+        let context = try XCTUnwrap(capturedContext)
+        context.insert(correction)
+        meeting.transcriptCorrections.append(correction)
+        try context.save()
+        XCTAssertEqual(try repository.count(TranscriptCorrectionRecord.self), 1)
+
+        try repository.deleteMeeting(id: meetingID)
+
+        XCTAssertEqual(try repository.count(TranscriptCorrectionRecord.self), 0)
+    }
+
     func testMissingMeetingWritesFailWithoutCreatingOrphans() throws {
         let repository = try MeetingRepository.inMemory()
         let missingID = UUID()

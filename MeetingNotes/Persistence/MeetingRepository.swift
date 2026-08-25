@@ -35,6 +35,7 @@ final class MeetingRepository {
         Schema([
             MeetingRecord.self,
             TranscriptRecord.self,
+            TranscriptCorrectionRecord.self,
             SpeakerNameRecord.self,
             BookmarkRecord.self,
             SummaryRecord.self,

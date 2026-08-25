@@ -40,6 +40,9 @@ final class MeetingRecord {
     @Relationship(deleteRule: .cascade, inverse: \TranscriptRecord.meeting)
     var transcripts: [TranscriptRecord] = []
 
+    @Relationship(deleteRule: .cascade, inverse: \TranscriptCorrectionRecord.meeting)
+    var transcriptCorrections: [TranscriptCorrectionRecord] = []
+
     @Relationship(deleteRule: .cascade, inverse: \SpeakerNameRecord.meeting)
     var speakerNames: [SpeakerNameRecord] = []
 
