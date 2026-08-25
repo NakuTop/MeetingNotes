@@ -38,7 +38,12 @@ enum TranscriptCorrectionResolver {
                 transcriptIndexByID[$0]
             }.sorted()
             guard matchingIndices.count == targetIDs.count,
-                  matchingIndices.allSatisfy(availableIndices.contains) else {
+                  matchingIndices.allSatisfy(availableIndices.contains),
+                  exactMatchHasCompatibleSource(
+                      correction: orderedCorrections[correctionIndex],
+                      matchingIndices: matchingIndices,
+                      transcripts: orderedTranscripts
+                  ) else {
                 continue
             }
 
@@ -148,8 +153,39 @@ enum TranscriptCorrectionResolver {
         availableIndices: Set<Int>
     ) -> [[Int]] {
         guard expectedCount > 0 else { return [] }
+
+        let exactSourceCandidates = fallbackCandidateGroups(
+            correction: correction,
+            expectedCount: expectedCount,
+            source: correction.source,
+            transcripts: transcripts,
+            availableIndices: availableIndices
+        )
+        if !exactSourceCandidates.isEmpty {
+            return exactSourceCandidates
+        }
+        guard correction.source == .mixed else { return [] }
+
+        return [TranscriptAudioSource.microphone, .system, .room].flatMap {
+            fallbackCandidateGroups(
+                correction: correction,
+                expectedCount: expectedCount,
+                source: $0,
+                transcripts: transcripts,
+                availableIndices: availableIndices
+            )
+        }
+    }
+
+    private static func fallbackCandidateGroups(
+        correction: TranscriptCorrectionRecord,
+        expectedCount: Int,
+        source: TranscriptAudioSource,
+        transcripts: [TranscriptRecord],
+        availableIndices: Set<Int>
+    ) -> [[Int]] {
         let sameSourceIndices = transcripts.indices.filter {
-            transcripts[$0].source == correction.source
+            transcripts[$0].source == source
         }
         guard sameSourceIndices.count >= expectedCount else { return [] }
 
@@ -181,6 +217,16 @@ enum TranscriptCorrectionResolver {
                 return nil
             }
             return candidate
+        }
+    }
+
+    private static func exactMatchHasCompatibleSource(
+        correction: TranscriptCorrectionRecord,
+        matchingIndices: [Int],
+        transcripts: [TranscriptRecord]
+    ) -> Bool {
+        correction.source == .mixed || matchingIndices.allSatisfy {
+            transcripts[$0].source == correction.source
         }
     }
 
@@ -216,6 +262,10 @@ enum TranscriptCorrectionResolver {
         let speakerID = speakerIDs.count == 1
             ? speakerIDs.first.flatMap { $0 }
             : nil
+        let sources = Set(matchedTranscripts.map(\.source))
+        let source = sources.count == 1
+            ? sources.first ?? correction.source
+            : correction.source
         return CanonicalTranscriptEntry(
             id: correction.id,
             transcriptIDs: matchedTranscripts.map(\.id),
@@ -225,7 +275,7 @@ enum TranscriptCorrectionResolver {
                 ?? correction.anchorEndTime,
             text: correction.replacementText,
             speakerID: speakerID,
-            source: correction.source,
+            source: source,
             isManuallyEdited: true
         )
     }

@@ -1717,6 +1717,262 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(correction.transcriptIDs, [newTranscript.id])
     }
 
+    func testMixedLiveCorrectionRebindsToUniqueAttributedFinalRow() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 100)
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 10,
+            end: 12,
+            text: "实时生成错字"
+        )
+        let provisional = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first
+        )
+        XCTAssertEqual(provisional.source, .mixed)
+        try repository.saveTranscriptCorrection(
+            meetingID: meetingID,
+            transcriptIDs: [provisional.id],
+            anchorStartTime: 10,
+            anchorEndTime: 12,
+            source: .mixed,
+            originalText: "实时生成错字",
+            replacementText: "已确认的手动文字"
+        )
+        let correctionID = try XCTUnwrap(
+            repository.meeting(id: meetingID).transcriptCorrections.first?.id
+        )
+
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 9.8,
+                        endTime: 12.2,
+                        text: "最终生成文字"
+                    ),
+                    speakerID: "room-2",
+                    source: .room
+                )
+            ],
+            sourceRevision: 2
+        )
+
+        let finalTranscript = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first
+        )
+        let canonical = try repository.canonicalTranscripts(
+            meetingID: meetingID
+        )
+        let corrected = try XCTUnwrap(canonical.first)
+        XCTAssertEqual(canonical.count, 1)
+        XCTAssertEqual(corrected.id, correctionID)
+        XCTAssertEqual(corrected.transcriptIDs, [finalTranscript.id])
+        XCTAssertEqual(corrected.startTime, 9.8, accuracy: 0.001)
+        XCTAssertEqual(corrected.endTime, 12.2, accuracy: 0.001)
+        XCTAssertEqual(corrected.speakerID, "room-2")
+        XCTAssertEqual(corrected.source, .room)
+        XCTAssertEqual(corrected.text, "已确认的手动文字")
+
+        let stored = try XCTUnwrap(
+            repository.meeting(id: meetingID).transcriptCorrections.first
+        )
+        XCTAssertEqual(stored.id, correctionID)
+        XCTAssertEqual(stored.transcriptIDs, [finalTranscript.id])
+        XCTAssertEqual(stored.anchorStartTime, 9.8, accuracy: 0.001)
+        XCTAssertEqual(stored.anchorEndTime, 12.2, accuracy: 0.001)
+        XCTAssertEqual(stored.source, .room)
+        XCTAssertEqual(stored.originalText, "实时生成错字")
+        XCTAssertEqual(stored.replacementText, "已确认的手动文字")
+    }
+
+    func testAmbiguousMixedCorrectionDoesNotConsumeAttributedOnlineRows()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 200)
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 20,
+            end: 22,
+            text: "实时混合文字"
+        )
+        let provisionalID = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first?.id
+        )
+        try repository.saveTranscriptCorrection(
+            meetingID: meetingID,
+            transcriptIDs: [provisionalID],
+            anchorStartTime: 20,
+            anchorEndTime: 22,
+            source: .mixed,
+            originalText: "实时混合文字",
+            replacementText: "应独立保留的修正"
+        )
+        let correctionID = try XCTUnwrap(
+            repository.meeting(id: meetingID).transcriptCorrections.first?.id
+        )
+
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 20,
+                        endTime: 22,
+                        text: "麦克风候选"
+                    ),
+                    speakerID: "me",
+                    source: .microphone
+                ),
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 20,
+                        endTime: 22,
+                        text: "系统声音候选"
+                    ),
+                    speakerID: "remote",
+                    source: .system
+                )
+            ],
+            sourceRevision: 2
+        )
+
+        let generated = try repository.transcripts(meetingID: meetingID)
+        let generatedIDs = Set(generated.map(\.id))
+        let canonical = try repository.canonicalTranscripts(
+            meetingID: meetingID
+        )
+        XCTAssertEqual(canonical.count, 3)
+        XCTAssertEqual(
+            Set(canonical.filter { !$0.isManuallyEdited }.map(\.id)),
+            generatedIDs
+        )
+        let preserved = try XCTUnwrap(
+            canonical.first(where: { $0.id == correctionID })
+        )
+        XCTAssertEqual(preserved.transcriptIDs, [provisionalID])
+        XCTAssertEqual(preserved.startTime, 20, accuracy: 0.001)
+        XCTAssertEqual(preserved.endTime, 22, accuracy: 0.001)
+        XCTAssertEqual(preserved.source, .mixed)
+        XCTAssertEqual(preserved.text, "应独立保留的修正")
+
+        let stored = try XCTUnwrap(
+            repository.meeting(id: meetingID).transcriptCorrections.first
+        )
+        XCTAssertEqual(stored.transcriptIDs, [provisionalID])
+        XCTAssertEqual(stored.source, .mixed)
+    }
+
+    func testReboundAnchorSupportsSecondCompatibleBoundaryShift() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 300)
+        )
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 100,
+                        endTime: 104,
+                        text: "初始生成文字"
+                    ),
+                    speakerID: "room-1",
+                    source: .room
+                )
+            ],
+            sourceRevision: 1
+        )
+        let initialID = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first?.id
+        )
+        try repository.saveTranscriptCorrection(
+            meetingID: meetingID,
+            transcriptIDs: [initialID],
+            anchorStartTime: 100,
+            anchorEndTime: 104,
+            source: .room,
+            originalText: "初始生成文字",
+            replacementText: "跨阶段保留的手动文字"
+        )
+        let correctionID = try XCTUnwrap(
+            repository.meeting(id: meetingID).transcriptCorrections.first?.id
+        )
+
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 102,
+                        endTime: 106,
+                        text: "第一阶段生成文字"
+                    ),
+                    speakerID: "room-2",
+                    source: .room
+                )
+            ],
+            sourceRevision: 2
+        )
+        let stageOneStored = try XCTUnwrap(
+            repository.meeting(id: meetingID).transcriptCorrections.first
+        )
+        XCTAssertEqual(stageOneStored.anchorStartTime, 102, accuracy: 0.001)
+        XCTAssertEqual(stageOneStored.anchorEndTime, 106, accuracy: 0.001)
+
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 104,
+                        endTime: 108,
+                        text: "第二阶段生成文字"
+                    ),
+                    speakerID: "room-3",
+                    source: .room
+                )
+            ],
+            sourceRevision: 3
+        )
+
+        let finalTranscript = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first
+        )
+        let canonical = try repository.canonicalTranscripts(
+            meetingID: meetingID
+        )
+        let corrected = try XCTUnwrap(canonical.first)
+        XCTAssertEqual(canonical.count, 1)
+        XCTAssertEqual(corrected.id, correctionID)
+        XCTAssertEqual(corrected.transcriptIDs, [finalTranscript.id])
+        XCTAssertEqual(corrected.startTime, 104, accuracy: 0.001)
+        XCTAssertEqual(corrected.endTime, 108, accuracy: 0.001)
+        XCTAssertEqual(corrected.speakerID, "room-3")
+        XCTAssertEqual(corrected.source, .room)
+        XCTAssertEqual(corrected.text, "跨阶段保留的手动文字")
+
+        let finalStored = try XCTUnwrap(
+            repository.meeting(id: meetingID).transcriptCorrections.first
+        )
+        XCTAssertEqual(finalStored.transcriptIDs, [finalTranscript.id])
+        XCTAssertEqual(finalStored.anchorStartTime, 104, accuracy: 0.001)
+        XCTAssertEqual(finalStored.anchorEndTime, 108, accuracy: 0.001)
+        XCTAssertEqual(finalStored.originalText, "初始生成文字")
+        XCTAssertEqual(
+            finalStored.replacementText,
+            "跨阶段保留的手动文字"
+        )
+    }
+
     func testReplacementCanUpdateTimingAndSpeakerWithoutChangingManualText()
         throws {
         let repository = try MeetingRepository.inMemory()
@@ -2393,6 +2649,98 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(saveAttempts, 4)
     }
 
+    func testReplaceTranscriptsRollsBackCorrectionRebindWhenSaveFails()
+        throws {
+        let failure = RepositorySaveFailureSwitch()
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                if failure.shouldFail {
+                    failure.capturedMeeting = try context.fetch(
+                        FetchDescriptor<MeetingRecord>()
+                    ).first
+                    throw InjectedRepositorySaveError.forced
+                }
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 500)
+        )
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 50,
+                        endTime: 52,
+                        text: "旧生成文字"
+                    ),
+                    speakerID: "room-1",
+                    source: .room
+                )
+            ],
+            sourceRevision: 1
+        )
+        let oldTranscriptID = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first?.id
+        )
+        try repository.saveTranscriptCorrection(
+            meetingID: meetingID,
+            transcriptIDs: [oldTranscriptID],
+            anchorStartTime: 50,
+            anchorEndTime: 52,
+            source: .room,
+            originalText: "旧生成文字",
+            replacementText: "手动文字"
+        )
+        failure.shouldFail = true
+
+        XCTAssertThrowsError(
+            try repository.replaceTranscripts(
+                meetingID: meetingID,
+                drafts: [
+                    AttributedTranscriptDraft(
+                        transcript: TranscriptDraft(
+                            startTime: 49.8,
+                            endTime: 52.2,
+                            text: "不应保存的新文字"
+                        ),
+                        speakerID: "room-2",
+                        source: .room
+                    )
+                ],
+                sourceRevision: 2
+            )
+        ) { error in
+            XCTAssertEqual(error as? InjectedRepositorySaveError, .forced)
+        }
+
+        let stored = try XCTUnwrap(
+            repository.meeting(id: meetingID).transcriptCorrections.first
+        )
+        XCTAssertEqual(stored.transcriptIDs, [oldTranscriptID])
+        XCTAssertEqual(stored.anchorStartTime, 50, accuracy: 0.001)
+        XCTAssertEqual(stored.anchorEndTime, 52, accuracy: 0.001)
+        XCTAssertEqual(stored.source, .room)
+
+        let transactionCorrection = try XCTUnwrap(
+            failure.capturedMeeting?.transcriptCorrections.first
+        )
+        XCTAssertEqual(transactionCorrection.transcriptIDs, [oldTranscriptID])
+        XCTAssertEqual(
+            transactionCorrection.anchorStartTime,
+            50,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            transactionCorrection.anchorEndTime,
+            52,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(transactionCorrection.source, .room)
+    }
+
     func testReplaceTranscriptsFailurePreservesUnrelatedPendingInsertion() throws {
         var saveAttempts = 0
         var capturedContext: ModelContext?
@@ -2938,6 +3286,100 @@ final class MeetingRepositoryTests: XCTestCase {
             transactionMeeting.speakerDisplayNames,
             ["room-old": "原姓名"]
         )
+    }
+
+    func testSpeakerDiarizationRetryRollsBackCorrectionRebindWhenSaveFails()
+        throws {
+        let failure = RepositorySaveFailureSwitch()
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                if failure.shouldFail {
+                    failure.capturedMeeting = try context.fetch(
+                        FetchDescriptor<MeetingRecord>()
+                    ).first
+                    throw InjectedRepositorySaveError.forced
+                }
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 600),
+            speakerDiarizationRequested: true
+        )
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 60,
+                        endTime: 62,
+                        text: "旧生成文字"
+                    ),
+                    speakerID: "room-1",
+                    source: .room
+                )
+            ],
+            sourceRevision: 1
+        )
+        let oldTranscriptID = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first?.id
+        )
+        try repository.saveTranscriptCorrection(
+            meetingID: meetingID,
+            transcriptIDs: [oldTranscriptID],
+            anchorStartTime: 60,
+            anchorEndTime: 62,
+            source: .room,
+            originalText: "旧生成文字",
+            replacementText: "手动文字"
+        )
+        try repository.markSpeakerProcessingStarted(meetingID: meetingID)
+        failure.shouldFail = true
+
+        XCTAssertThrowsError(
+            try repository.completeSpeakerDiarizationRetry(
+                meetingID: meetingID,
+                drafts: [
+                    AttributedTranscriptDraft(
+                        transcript: TranscriptDraft(
+                            startTime: 59.8,
+                            endTime: 62.2,
+                            text: "不应保存的新文字"
+                        ),
+                        speakerID: "room-2",
+                        source: .room
+                    )
+                ],
+                sourceRevision: 2
+            )
+        ) { error in
+            XCTAssertEqual(error as? InjectedRepositorySaveError, .forced)
+        }
+
+        let stored = try XCTUnwrap(
+            repository.meeting(id: meetingID).transcriptCorrections.first
+        )
+        XCTAssertEqual(stored.transcriptIDs, [oldTranscriptID])
+        XCTAssertEqual(stored.anchorStartTime, 60, accuracy: 0.001)
+        XCTAssertEqual(stored.anchorEndTime, 62, accuracy: 0.001)
+        XCTAssertEqual(stored.source, .room)
+
+        let transactionCorrection = try XCTUnwrap(
+            failure.capturedMeeting?.transcriptCorrections.first
+        )
+        XCTAssertEqual(transactionCorrection.transcriptIDs, [oldTranscriptID])
+        XCTAssertEqual(
+            transactionCorrection.anchorStartTime,
+            60,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            transactionCorrection.anchorEndTime,
+            62,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(transactionCorrection.source, .room)
     }
 
     func testFailSpeakerDiarizationRetryPersistsStableCodeAndRollsBackOnSaveError()

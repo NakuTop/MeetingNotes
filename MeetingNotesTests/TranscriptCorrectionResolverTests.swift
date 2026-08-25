@@ -355,6 +355,139 @@ final class TranscriptCorrectionResolverTests: XCTestCase {
         XCTAssertEqual(preservedSecond.startTime, 70.2)
     }
 
+    func testMixedCorrectionPrefersExactMixedSourceCandidate() throws {
+        let oldID = uuid("00000000-0000-0000-0000-000000000081")
+        let mixedID = uuid("00000000-0000-0000-0000-000000000082")
+        let systemID = uuid("00000000-0000-0000-0000-000000000083")
+        let correction = correction(
+            id: uuid("00000000-0000-0000-0000-000000000084"),
+            anchorStart: 80,
+            anchorEnd: 82,
+            source: .mixed,
+            originalText: "旧混合文字",
+            replacementText: "优先绑定混合候选",
+            transcriptIDs: [oldID]
+        )
+        let transcripts = [
+            transcript(
+                id: mixedID,
+                start: 80,
+                end: 82,
+                text: "新混合候选",
+                speakerID: nil,
+                source: .mixed,
+                sequenceIndex: 0
+            ),
+            transcript(
+                id: systemID,
+                start: 80,
+                end: 82,
+                text: "属性化候选",
+                speakerID: "remote",
+                source: .system,
+                sequenceIndex: 1
+            )
+        ]
+
+        let resolved = TranscriptCorrectionResolver.resolve(
+            transcripts: transcripts,
+            corrections: [correction]
+        )
+
+        let edited = try XCTUnwrap(
+            resolved.first(where: { $0.isManuallyEdited })
+        )
+        XCTAssertEqual(edited.transcriptIDs, [mixedID])
+        XCTAssertEqual(edited.source, .mixed)
+        XCTAssertEqual(
+            resolved.filter { !$0.isManuallyEdited }.map(\.id),
+            [systemID]
+        )
+    }
+
+    func testAttributedCorrectionDoesNotFallbackToDifferentAttributedSource()
+        throws {
+        let oldID = uuid("00000000-0000-0000-0000-000000000091")
+        let systemID = uuid("00000000-0000-0000-0000-000000000092")
+        let correctionID = uuid(
+            "00000000-0000-0000-0000-000000000093"
+        )
+        let correction = correction(
+            id: correctionID,
+            anchorStart: 90,
+            anchorEnd: 92,
+            source: .microphone,
+            originalText: "旧麦克风文字",
+            replacementText: "不能误绑系统声音",
+            transcriptIDs: [oldID]
+        )
+        let systemTranscript = transcript(
+            id: systemID,
+            start: 90,
+            end: 92,
+            text: "同时间系统声音",
+            speakerID: "remote",
+            source: .system,
+            sequenceIndex: 0
+        )
+
+        let resolved = TranscriptCorrectionResolver.resolve(
+            transcripts: [systemTranscript],
+            corrections: [correction]
+        )
+
+        let preserved = try XCTUnwrap(
+            resolved.first(where: { $0.id == correctionID })
+        )
+        XCTAssertEqual(preserved.transcriptIDs, [oldID])
+        XCTAssertEqual(preserved.source, .microphone)
+        XCTAssertEqual(
+            resolved.first(where: { $0.id == systemID })?.text,
+            "同时间系统声音"
+        )
+    }
+
+    func testAttributedCorrectionDoesNotUseExactIDDifferentAttributedSource()
+        throws {
+        let systemID = uuid("00000000-0000-0000-0000-000000000094")
+        let correctionID = uuid(
+            "00000000-0000-0000-0000-000000000095"
+        )
+        let correction = correction(
+            id: correctionID,
+            anchorStart: 94,
+            anchorEnd: 96,
+            source: .microphone,
+            originalText: "旧麦克风文字",
+            replacementText: "不能用相同 ID 误绑系统声音",
+            transcriptIDs: [systemID]
+        )
+        let systemTranscript = transcript(
+            id: systemID,
+            start: 94,
+            end: 96,
+            text: "相同 ID 的系统声音",
+            speakerID: "remote",
+            source: .system,
+            sequenceIndex: 0
+        )
+
+        let resolved = TranscriptCorrectionResolver.resolve(
+            transcripts: [systemTranscript],
+            corrections: [correction]
+        )
+
+        XCTAssertEqual(resolved.count, 2)
+        XCTAssertEqual(
+            resolved.first(where: { $0.id == correctionID })?.source,
+            .microphone
+        )
+        XCTAssertEqual(
+            resolved.first(where: { $0.id == systemID })?.text,
+            "相同 ID 的系统声音"
+        )
+    }
+
     private func transcript(
         id: UUID,
         start: TimeInterval,

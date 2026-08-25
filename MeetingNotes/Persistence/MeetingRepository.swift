@@ -285,6 +285,7 @@ final class MeetingRepository {
             in: replacementContext
         )
         let previousTranscripts = meeting.transcripts
+        let previousUpdatedAt = meeting.updatedAt
         let replacements = drafts.enumerated().map { sequenceIndex, draft in
             TranscriptRecord(
                 startTime: draft.transcript.startTime,
@@ -298,7 +299,7 @@ final class MeetingRepository {
             )
         }
 
-        Self.rebindTranscriptCorrections(
+        let correctionRebinds = Self.rebindTranscriptCorrections(
             meeting.transcriptCorrections,
             to: replacements
         )
@@ -307,7 +308,16 @@ final class MeetingRepository {
         meeting.transcripts = replacements
         meeting.updatedAt = .now
         previousTranscripts.forEach(replacementContext.delete)
-        try contextSaver(replacementContext)
+        do {
+            try contextSaver(replacementContext)
+            synchronizeRegisteredCorrections(correctionRebinds)
+        } catch {
+            replacementContext.rollback()
+            correctionRebinds.forEach { $0.restore() }
+            meeting.transcripts = previousTranscripts
+            meeting.updatedAt = previousUpdatedAt
+            throw error
+        }
     }
 
     func speakerDisplayNames(meetingID: UUID) throws -> [String: String] {
@@ -1141,7 +1151,7 @@ final class MeetingRepository {
                 )
             }
 
-        Self.rebindTranscriptCorrections(
+        let correctionRebinds = Self.rebindTranscriptCorrections(
             meeting.transcriptCorrections,
             to: replacements
         )
@@ -1158,8 +1168,10 @@ final class MeetingRepository {
         previousSpeakerNames.forEach(transactionContext.delete)
         do {
             try contextSaver(transactionContext)
+            synchronizeRegisteredCorrections(correctionRebinds)
         } catch {
             transactionContext.rollback()
+            correctionRebinds.forEach { $0.restore() }
             meeting.transcripts = previousTranscripts
             meeting.speakerNames = previousSpeakerNames
             meeting.speakerProcessingStateRawValue = previousStateRawValue
@@ -1172,12 +1184,13 @@ final class MeetingRepository {
     private static func rebindTranscriptCorrections(
         _ corrections: [TranscriptCorrectionRecord],
         to replacements: [TranscriptRecord]
-    ) {
+    ) -> [TranscriptCorrectionRebind] {
         let resolvedCorrections = TranscriptCorrectionResolver.resolve(
             transcripts: replacements,
             corrections: corrections
         )
         let replacementIDs = Set(replacements.map(\.id))
+        var rebinds: [TranscriptCorrectionRebind] = []
         for correction in corrections {
             guard let resolved = resolvedCorrections.first(where: {
                 $0.id == correction.id
@@ -1188,7 +1201,26 @@ final class MeetingRepository {
                   ) else {
                 continue
             }
+            rebinds.append(TranscriptCorrectionRebind(correction))
             correction.transcriptIDs = resolved.transcriptIDs
+            correction.anchorStartTime = resolved.startTime
+            correction.anchorEndTime = resolved.endTime
+            correction.source = resolved.source
+        }
+        return rebinds
+    }
+
+    private func synchronizeRegisteredCorrections(
+        _ rebinds: [TranscriptCorrectionRebind]
+    ) {
+        for rebind in rebinds {
+            guard let correction: TranscriptCorrectionRecord =
+                context.registeredModel(
+                    for: rebind.persistentModelID
+                ) else {
+                continue
+            }
+            rebind.applyCurrentState(to: correction)
         }
     }
 
@@ -1680,6 +1712,40 @@ final class MeetingRepository {
             return lhs.endTime < rhs.endTime
         }
         return lhs.id.uuidString < rhs.id.uuidString
+    }
+}
+
+private struct TranscriptCorrectionRebind {
+    private let correction: TranscriptCorrectionRecord
+    private let transcriptIDsData: Data
+    private let anchorStartTime: TimeInterval
+    private let anchorEndTime: TimeInterval
+    private let sourceRawValue: String
+
+    init(_ correction: TranscriptCorrectionRecord) {
+        self.correction = correction
+        transcriptIDsData = correction.transcriptIDsData
+        anchorStartTime = correction.anchorStartTime
+        anchorEndTime = correction.anchorEndTime
+        sourceRawValue = correction.sourceRawValue
+    }
+
+    var persistentModelID: PersistentIdentifier {
+        correction.persistentModelID
+    }
+
+    func applyCurrentState(to target: TranscriptCorrectionRecord) {
+        target.transcriptIDsData = correction.transcriptIDsData
+        target.anchorStartTime = correction.anchorStartTime
+        target.anchorEndTime = correction.anchorEndTime
+        target.sourceRawValue = correction.sourceRawValue
+    }
+
+    func restore() {
+        correction.transcriptIDsData = transcriptIDsData
+        correction.anchorStartTime = anchorStartTime
+        correction.anchorEndTime = anchorEndTime
+        correction.sourceRawValue = sourceRawValue
     }
 }
 
