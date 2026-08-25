@@ -2271,6 +2271,70 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(try repository.count(TranscriptCorrectionRecord.self), 0)
     }
 
+    func testCurrentSchemaReopensLegacyDiskStoreWithEmptyCorrections() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "MeetingNotes-LegacyCorrection-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let storeURL = directory.appendingPathComponent("MeetingNotes.store")
+        let meetingID = UUID(
+            uuidString: "00000000-0000-0000-0000-000000000081"
+        )!
+        let transcriptID = UUID(
+            uuidString: "00000000-0000-0000-0000-000000000082"
+        )!
+
+        let legacySchema = Schema(
+            versionedSchema: LegacyTranscriptCorrectionStoreSchema.self
+        )
+        XCTAssertNil(legacySchema.entitiesByName["TranscriptCorrectionRecord"])
+        try writeLegacyMeetingStore(
+            schema: legacySchema,
+            storeURL: storeURL,
+            meetingID: meetingID,
+            transcriptID: transcriptID
+        )
+
+        let currentSchema = Schema([
+            MeetingRecord.self,
+            TranscriptRecord.self,
+            TranscriptCorrectionRecord.self,
+            SpeakerNameRecord.self,
+            BookmarkRecord.self,
+            SummaryRecord.self,
+            DetailedMinutesRecord.self,
+            ArchiveCheckpointRecord.self
+        ])
+        XCTAssertNotNil(currentSchema.entitiesByName["TranscriptCorrectionRecord"])
+        let configuration = ModelConfiguration(
+            schema: currentSchema,
+            url: storeURL,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(
+            for: currentSchema,
+            configurations: [configuration]
+        )
+        let repository = MeetingRepository(container: container)
+
+        let meeting = try repository.meeting(id: meetingID)
+        XCTAssertEqual(meeting.title, "旧版会议")
+        XCTAssertEqual(meeting.mode, .offline)
+        XCTAssertEqual(meeting.state, .ready)
+        XCTAssertTrue(meeting.transcriptCorrections.isEmpty)
+        let transcript = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first
+        )
+        XCTAssertEqual(transcript.id, transcriptID)
+        XCTAssertEqual(transcript.text, "旧版转录仍需保留")
+        XCTAssertEqual(transcript.source, .microphone)
+    }
+
     func testMissingMeetingWritesFailWithoutCreatingOrphans() throws {
         let repository = try MeetingRepository.inMemory()
         let missingID = UUID()
@@ -2652,6 +2716,53 @@ private func saveBothDocuments(
         model: "model",
         promptVersion: 1
     )
+}
+
+@MainActor
+private func writeLegacyMeetingStore(
+    schema: Schema,
+    storeURL: URL,
+    meetingID: UUID,
+    transcriptID: UUID
+) throws {
+    try autoreleasepool {
+        let configuration = ModelConfiguration(
+            schema: schema,
+            url: storeURL,
+            cloudKitDatabase: .none
+        )
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [configuration]
+        )
+        let context = ModelContext(container)
+        let timestamp = Date(timeIntervalSince1970: 1_000)
+        let meeting = LegacyTranscriptCorrectionStoreSchema.MeetingRecord(
+            id: meetingID,
+            title: "旧版会议",
+            modeRawValue: MeetingMode.offline.rawValue,
+            stateRawValue: RecordingState.ready.rawValue,
+            startedAt: timestamp,
+            createdAt: timestamp,
+            updatedAt: timestamp
+        )
+        let transcript = LegacyTranscriptCorrectionStoreSchema.TranscriptRecord(
+            id: transcriptID,
+            startTime: 1,
+            endTime: 3,
+            text: "旧版转录仍需保留",
+            isFinal: true,
+            speakerID: "speaker-legacy",
+            sourceRawValue: TranscriptAudioSource.microphone.rawValue,
+            sourceRevision: 2,
+            sequenceIndex: 0,
+            meeting: meeting
+        )
+        context.insert(meeting)
+        context.insert(transcript)
+        meeting.transcripts.append(transcript)
+        try context.save()
+    }
 }
 
 private func makeDetailedMinutes(

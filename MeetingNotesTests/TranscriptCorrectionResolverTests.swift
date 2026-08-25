@@ -253,6 +253,108 @@ final class TranscriptCorrectionResolverTests: XCTestCase {
         )
     }
 
+    func testTinyOverlapDoesNotAttachToMuchLargerRegeneratedTranscript() throws {
+        let oldID = uuid("00000000-0000-0000-0000-000000000061")
+        let regeneratedID = uuid("00000000-0000-0000-0000-000000000062")
+        let correctionID = uuid("00000000-0000-0000-0000-000000000063")
+        let generatedText = "一段远长于原锚点的重新生成文字"
+        let correction = correction(
+            id: correctionID,
+            anchorStart: 60,
+            anchorEnd: 61,
+            source: .microphone,
+            originalText: "旧文字",
+            replacementText: "手动修正",
+            transcriptIDs: [oldID]
+        )
+        let regenerated = transcript(
+            id: regeneratedID,
+            start: 60.95,
+            end: 80,
+            text: generatedText,
+            speakerID: "speaker-new",
+            source: .microphone,
+            sequenceIndex: 7
+        )
+
+        let resolved = TranscriptCorrectionResolver.resolve(
+            transcripts: [regenerated],
+            corrections: [correction]
+        )
+
+        let preservedCorrection = try XCTUnwrap(
+            resolved.first(where: { $0.id == correctionID })
+        )
+        XCTAssertEqual(preservedCorrection.transcriptIDs, [oldID])
+        XCTAssertEqual(preservedCorrection.startTime, 60)
+        XCTAssertEqual(preservedCorrection.endTime, 61)
+        XCTAssertEqual(preservedCorrection.text, "手动修正")
+        let visibleGenerated = try XCTUnwrap(
+            resolved.first(where: { $0.id == regeneratedID })
+        )
+        XCTAssertEqual(visibleGenerated.text, generatedText)
+        XCTAssertFalse(visibleGenerated.isManuallyEdited)
+    }
+
+    func testCompetingFallbackCorrectionsDoNotConsumeSharedTranscript() throws {
+        let firstOldID = uuid("00000000-0000-0000-0000-000000000071")
+        let secondOldID = uuid("00000000-0000-0000-0000-000000000072")
+        let regeneratedID = uuid("00000000-0000-0000-0000-000000000073")
+        let firstCorrectionID = uuid(
+            "00000000-0000-0000-0000-000000000074"
+        )
+        let secondCorrectionID = uuid(
+            "00000000-0000-0000-0000-000000000075"
+        )
+        let firstCorrection = correction(
+            id: firstCorrectionID,
+            anchorStart: 69.8,
+            anchorEnd: 71.8,
+            source: .microphone,
+            originalText: "旧文字一",
+            replacementText: "手动修正一",
+            transcriptIDs: [firstOldID]
+        )
+        let secondCorrection = correction(
+            id: secondCorrectionID,
+            anchorStart: 70.2,
+            anchorEnd: 72.2,
+            source: .microphone,
+            originalText: "旧文字二",
+            replacementText: "手动修正二",
+            transcriptIDs: [secondOldID]
+        )
+        let regenerated = transcript(
+            id: regeneratedID,
+            start: 70,
+            end: 72,
+            text: "共享候选生成文字",
+            speakerID: "speaker-new",
+            source: .microphone,
+            sequenceIndex: 8
+        )
+
+        let resolved = TranscriptCorrectionResolver.resolve(
+            transcripts: [regenerated],
+            corrections: [firstCorrection, secondCorrection]
+        )
+
+        let visibleGenerated = try XCTUnwrap(
+            resolved.first(where: { $0.id == regeneratedID })
+        )
+        XCTAssertFalse(visibleGenerated.isManuallyEdited)
+        let preservedFirst = try XCTUnwrap(
+            resolved.first(where: { $0.id == firstCorrectionID })
+        )
+        XCTAssertEqual(preservedFirst.transcriptIDs, [firstOldID])
+        XCTAssertEqual(preservedFirst.startTime, 69.8)
+        let preservedSecond = try XCTUnwrap(
+            resolved.first(where: { $0.id == secondCorrectionID })
+        )
+        XCTAssertEqual(preservedSecond.transcriptIDs, [secondOldID])
+        XCTAssertEqual(preservedSecond.startTime, 70.2)
+    }
+
     private func transcript(
         id: UUID,
         start: TimeInterval,

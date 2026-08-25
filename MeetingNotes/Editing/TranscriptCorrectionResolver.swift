@@ -11,53 +11,71 @@ struct CanonicalTranscriptEntry: Identifiable, Equatable, Sendable {
     let isManuallyEdited: Bool
 }
 
+@MainActor
 enum TranscriptCorrectionResolver {
+    private static let minimumMutualCoverage = 0.5
+
     static func resolve(
         transcripts: [TranscriptRecord],
         corrections: [TranscriptCorrectionRecord]
     ) -> [CanonicalTranscriptEntry] {
         let orderedTranscripts = transcripts.sorted(by: transcriptComesBefore)
         let orderedCorrections = corrections.sorted(by: correctionComesBefore)
+        let storedTranscriptIDs = orderedCorrections.map(\.transcriptIDs)
+        let transcriptIndexByID = orderedTranscripts.indices.reduce(
+            into: [UUID: Int]()
+        ) { result, index in
+            result[orderedTranscripts[index].id] = index
+        }
         var availableIndices = Set(orderedTranscripts.indices)
-        var matches: [UUID: [Int]] = [:]
+        var matches: [Int: [Int]] = [:]
 
-        for correction in orderedCorrections {
-            let targetIDs = Set(correction.transcriptIDs)
+        for correctionIndex in orderedCorrections.indices {
+            let targetIDs = Set(storedTranscriptIDs[correctionIndex])
             guard !targetIDs.isEmpty else { continue }
 
-            let matchingIndices = orderedTranscripts.indices.filter {
-                targetIDs.contains(orderedTranscripts[$0].id)
-            }
-            let foundIDs = Set(matchingIndices.map { orderedTranscripts[$0].id })
-            guard foundIDs == targetIDs,
+            let matchingIndices = targetIDs.compactMap {
+                transcriptIndexByID[$0]
+            }.sorted()
+            guard matchingIndices.count == targetIDs.count,
                   matchingIndices.allSatisfy(availableIndices.contains) else {
                 continue
             }
 
-            matches[correction.id] = matchingIndices
+            matches[correctionIndex] = matchingIndices
             availableIndices.subtract(matchingIndices)
         }
 
-        for correction in orderedCorrections where matches[correction.id] == nil {
-            let expectedCount = Set(correction.transcriptIDs).count
-            guard expectedCount > 0 else { continue }
-
-            let matchingIndices = availableIndices
-                .filter {
-                    let transcript = orderedTranscripts[$0]
-                    return transcript.source == correction.source
-                        && overlaps(
-                            transcriptStart: transcript.startTime,
-                            transcriptEnd: transcript.endTime,
-                            anchorStart: correction.anchorStartTime,
-                            anchorEnd: correction.anchorEndTime
-                        )
-                }
-                .sorted()
-
-            guard matchingIndices.count == expectedCount else { continue }
-            matches[correction.id] = matchingIndices
-            availableIndices.subtract(matchingIndices)
+        let fallbackCandidates = orderedCorrections.indices.reduce(
+            into: [Int: [[Int]]]()
+        ) { result, correctionIndex in
+            guard matches[correctionIndex] == nil else { return }
+            result[correctionIndex] = fallbackCandidateGroups(
+                correction: orderedCorrections[correctionIndex],
+                expectedCount: Set(storedTranscriptIDs[correctionIndex]).count,
+                transcripts: orderedTranscripts,
+                availableIndices: availableIndices
+            )
+        }
+        let candidateOwners = fallbackCandidates.reduce(
+            into: [Int: Set<Int>]()
+        ) { result, candidate in
+            let correctionIndex = candidate.key
+            for transcriptIndex in Set(candidate.value.flatMap { $0 }) {
+                result[transcriptIndex, default: []].insert(correctionIndex)
+            }
+        }
+        for correctionIndex in orderedCorrections.indices {
+            guard let candidateGroups = fallbackCandidates[correctionIndex],
+                  candidateGroups.count == 1,
+                  let candidate = candidateGroups.first,
+                  candidate.allSatisfy({
+                      candidateOwners[$0] == Set([correctionIndex])
+                  }) else {
+                continue
+            }
+            matches[correctionIndex] = candidate
+            availableIndices.subtract(candidate)
         }
 
         var entries: [PositionedEntry] = []
@@ -80,8 +98,9 @@ enum TranscriptCorrectionResolver {
             )
         }
 
-        for correction in orderedCorrections {
-            if let matchingIndices = matches[correction.id] {
+        for correctionIndex in orderedCorrections.indices {
+            let correction = orderedCorrections[correctionIndex]
+            if let matchingIndices = matches[correctionIndex] {
                 let matchedTranscripts = matchingIndices.map {
                     orderedTranscripts[$0]
                 }
@@ -101,7 +120,7 @@ enum TranscriptCorrectionResolver {
                     PositionedEntry(
                         entry: CanonicalTranscriptEntry(
                             id: correction.id,
-                            transcriptIDs: correction.transcriptIDs,
+                            transcriptIDs: storedTranscriptIDs[correctionIndex],
                             startTime: correction.anchorStartTime,
                             endTime: correction.anchorEndTime,
                             text: correction.replacementText,
@@ -116,6 +135,77 @@ enum TranscriptCorrectionResolver {
         }
 
         return entries.sorted(by: positionedEntryComesBefore).map(\.entry)
+    }
+
+    /// Fallback reattachment is deliberately conservative. A candidate must
+    /// contain the same number of rows as the stored correction, use consecutive
+    /// rows in that source's chronological/sequence order, and its combined
+    /// span must overlap at least half of both the old anchor and the new span.
+    private static func fallbackCandidateGroups(
+        correction: TranscriptCorrectionRecord,
+        expectedCount: Int,
+        transcripts: [TranscriptRecord],
+        availableIndices: Set<Int>
+    ) -> [[Int]] {
+        guard expectedCount > 0 else { return [] }
+        let sameSourceIndices = transcripts.indices.filter {
+            transcripts[$0].source == correction.source
+        }
+        guard sameSourceIndices.count >= expectedCount else { return [] }
+
+        return (0...(sameSourceIndices.count - expectedCount)).compactMap {
+            startIndex in
+            let endIndex = startIndex + expectedCount
+            let candidate = Array(sameSourceIndices[startIndex..<endIndex])
+            guard let candidateStart = candidate.map({
+                transcripts[$0].startTime
+            }).min(),
+                  let candidateEnd = candidate.map({
+                      transcripts[$0].endTime
+                  }).max(),
+                  candidate.allSatisfy(availableIndices.contains),
+                  candidate.allSatisfy({
+                      overlaps(
+                          transcriptStart: transcripts[$0].startTime,
+                          transcriptEnd: transcripts[$0].endTime,
+                          anchorStart: correction.anchorStartTime,
+                          anchorEnd: correction.anchorEndTime
+                      )
+                  }),
+                  hasCompatibleCoverage(
+                      anchorStart: correction.anchorStartTime,
+                      anchorEnd: correction.anchorEndTime,
+                      candidateStart: candidateStart,
+                      candidateEnd: candidateEnd
+                  ) else {
+                return nil
+            }
+            return candidate
+        }
+    }
+
+    private static func hasCompatibleCoverage(
+        anchorStart: TimeInterval,
+        anchorEnd: TimeInterval,
+        candidateStart: TimeInterval,
+        candidateEnd: TimeInterval
+    ) -> Bool {
+        guard anchorStart.isFinite,
+              anchorEnd.isFinite,
+              candidateStart.isFinite,
+              candidateEnd.isFinite else {
+            return false
+        }
+        let anchorDuration = anchorEnd - anchorStart
+        let candidateDuration = candidateEnd - candidateStart
+        guard anchorDuration > 0, candidateDuration > 0 else { return false }
+
+        let overlapDuration = max(
+            0,
+            min(anchorEnd, candidateEnd) - max(anchorStart, candidateStart)
+        )
+        return overlapDuration / anchorDuration >= minimumMutualCoverage
+            && overlapDuration / candidateDuration >= minimumMutualCoverage
     }
 
     private static func correctedEntry(
