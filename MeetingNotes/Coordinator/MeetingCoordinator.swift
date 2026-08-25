@@ -171,7 +171,6 @@ actor MeetingCoordinator {
         resetStrandedFinalizationBeforeNewStart()
         var preparingMachine = stateMachine
         try preparingMachine.send(.prepare)
-        stateMachine = preparingMachine
 
         let permissionStatuses = await dependencies.permissions
             .requestRequiredPermissions(for: mode)
@@ -192,16 +191,27 @@ actor MeetingCoordinator {
         var newTranscriber: (any MeetingTranscriptionQueueing)?
 
         do {
+            let createdTranscriber = try await dependencies.transcriptionFactory
+                .makeQueue()
+            newTranscriber = createdTranscriber
+            try Task.checkCancellation()
+
             let startedAt = await dependencies.clock.now()
+            try Task.checkCancellation()
             let speakerDiarizationRequested = await dependencies
                 .speakerDiarizationPreference
                 .isSpeakerDiarizationEnabled()
+            try Task.checkCancellation()
+
+            stateMachine = preparingMachine
+            try Task.checkCancellation()
             let createdID = try await dependencies.repository.createMeeting(
                 mode: mode,
                 startedAt: startedAt,
                 speakerDiarizationRequested: speakerDiarizationRequested
             )
             newMeetingID = createdID
+            try Task.checkCancellation()
             meetingID = createdID
             self.mode = mode
             self.speakerDiarizationRequested =
@@ -229,9 +239,6 @@ actor MeetingCoordinator {
                     try throwIfDiscardRequested(for: createdID)
                 }
             }
-            let createdTranscriber = try await dependencies.transcriptionFactory
-                .makeQueue()
-            newTranscriber = createdTranscriber
             transcriber = createdTranscriber
             try throwIfDiscardRequested(for: createdID)
             let createdFixedTranscriptionService =

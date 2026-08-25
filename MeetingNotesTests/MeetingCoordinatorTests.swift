@@ -285,6 +285,329 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertTrue(events.isEmpty)
     }
 
+    func testPendingTranscriptionModelDoesNotCreateOrLockMeeting()
+        async throws {
+        let fixture = makeFixture(
+            blockingTranscriptionFactoryOutcome: .success
+        )
+        let factory = try XCTUnwrap(
+            fixture.blockingTranscriptionFactory
+        )
+        let entrySignal = try XCTUnwrap(
+            fixture.transcriptionFactoryEntrySignal
+        )
+        let startCompletion = CoordinatorTestSignal(
+            description: "meeting start completes"
+        )
+        let startTask = Task {
+            defer { startCompletion.signal() }
+            return try await fixture.coordinator.start(mode: .offline)
+        }
+        await fulfillment(of: [entrySignal.expectation], timeout: 0.5)
+        guard entrySignal.count == 1 else {
+            startTask.cancel()
+            await factory.release()
+            await fulfillment(
+                of: [startCompletion.expectation],
+                timeout: 0.5
+            )
+            if startCompletion.count == 1,
+               case .success = await startTask.result {
+                try? await fixture.coordinator.stop()
+            }
+            return
+        }
+
+        let pendingSnapshot = await fixture.coordinator.snapshot()
+        let pendingMeetingIDs = await fixture.repository.createdMeetingIDs()
+        let pendingWriterRequests = await fixture.writerRequests.values()
+        let pendingCaptureModes = await fixture.captureModes.values()
+        let pendingPanelCalls = await fixture.panel.calls()
+        let pendingPresentationEvents =
+            await fixture.recordingPresentation.events()
+
+        XCTAssertEqual(pendingSnapshot.state, .idle)
+        XCTAssertNil(pendingSnapshot.meetingID)
+        XCTAssertFalse(pendingSnapshot.state.blocksCaptureSettingsChanges)
+        XCTAssertTrue(pendingMeetingIDs.isEmpty)
+        XCTAssertTrue(pendingWriterRequests.isEmpty)
+        XCTAssertTrue(pendingCaptureModes.isEmpty)
+        XCTAssertTrue(pendingPanelCalls.isEmpty)
+        XCTAssertTrue(pendingPresentationEvents.isEmpty)
+
+        await factory.release()
+        let meetingID = try await startTask.value
+
+        let startedSnapshot = await fixture.coordinator.snapshot()
+        let startedMeetingIDs = await fixture.repository.createdMeetingIDs()
+        let startedWriterRequests = await fixture.writerRequests.values()
+        let startedCaptureModes = await fixture.captureModes.values()
+        let startedPanelCalls = await fixture.panel.calls()
+        XCTAssertEqual(entrySignal.count, 1)
+        XCTAssertEqual(startedSnapshot.state, .recording)
+        XCTAssertEqual(startedSnapshot.meetingID, meetingID)
+        XCTAssertEqual(startedMeetingIDs, [meetingID])
+        XCTAssertEqual(startedWriterRequests.map(\.track), [.master])
+        XCTAssertEqual(startedCaptureModes, [.offline])
+        XCTAssertEqual(startedPanelCalls, ["show"])
+
+        try await fixture.coordinator.stop()
+    }
+
+    func testSecondStartWhileRecordingPreservesOriginalSession()
+        async throws {
+        let fixture = makeFixture()
+        let originalMeetingID = try await fixture.coordinator.start(
+            mode: .offline
+        )
+
+        do {
+            _ = try await fixture.coordinator.start(mode: .online)
+            XCTFail("Expected duplicate start to fail")
+        } catch {
+            XCTAssertEqual(
+                error as? RecordingStateError,
+                .invalidTransition(.recording, .prepare)
+            )
+        }
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let savedState = await fixture.repository.savedState(
+            for: originalMeetingID
+        )
+        let panelCalls = await fixture.panel.calls()
+        let events = await fixture.events.values()
+        XCTAssertEqual(snapshot.state, .recording)
+        XCTAssertEqual(snapshot.meetingID, originalMeetingID)
+        XCTAssertEqual(snapshot.mode, .offline)
+        XCTAssertEqual(savedState, .recording)
+        XCTAssertEqual(panelCalls, ["show"])
+        XCTAssertFalse(events.contains("capture.stop"))
+
+        do {
+            try await fixture.coordinator.stop()
+        } catch {
+            XCTFail("Original meeting must remain stoppable: \(error)")
+            await fixture.capture.stop()
+            await fixture.panel.hide()
+        }
+    }
+
+    func testTranscriptionModelFailureBeforeMeetingCreationLeavesNoMeeting()
+        async throws {
+        let fixture = makeFixture(
+            blockingTranscriptionFactoryOutcome: .failure
+        )
+        let factory = try XCTUnwrap(
+            fixture.blockingTranscriptionFactory
+        )
+        let entrySignal = try XCTUnwrap(
+            fixture.transcriptionFactoryEntrySignal
+        )
+        let startCompletion = CoordinatorTestSignal(
+            description: "failed meeting start completes"
+        )
+        let startTask = Task {
+            defer { startCompletion.signal() }
+            return try await fixture.coordinator.start(mode: .offline)
+        }
+        await fulfillment(of: [entrySignal.expectation], timeout: 0.5)
+        guard entrySignal.count == 1 else {
+            startTask.cancel()
+            await factory.release()
+            await fulfillment(
+                of: [startCompletion.expectation],
+                timeout: 0.5
+            )
+            if startCompletion.count == 1,
+               case .success = await startTask.result {
+                try? await fixture.coordinator.stop()
+            }
+            return
+        }
+        await factory.release()
+
+        do {
+            _ = try await startTask.value
+            XCTFail("Expected transcription model preparation failure")
+            try? await fixture.coordinator.stop()
+        } catch {
+            XCTAssertEqual(
+                error as? CoordinatorTestError,
+                .transcriptionFactory
+            )
+        }
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let createdMeetingIDs = await fixture.repository.createdMeetingIDs()
+        let writerRequests = await fixture.writerRequests.values()
+        let captureModes = await fixture.captureModes.values()
+        let panelCalls = await fixture.panel.calls()
+        let presentationEvents =
+            await fixture.recordingPresentation.events()
+        XCTAssertEqual(entrySignal.count, 1)
+        XCTAssertEqual(snapshot.state, .idle)
+        XCTAssertNil(snapshot.meetingID)
+        XCTAssertFalse(snapshot.state.blocksCaptureSettingsChanges)
+        XCTAssertTrue(createdMeetingIDs.isEmpty)
+        XCTAssertTrue(writerRequests.isEmpty)
+        XCTAssertTrue(captureModes.isEmpty)
+        XCTAssertTrue(panelCalls.isEmpty)
+        XCTAssertTrue(presentationEvents.isEmpty)
+    }
+
+    func testDeniedPermissionDoesNotPrepareTranscriptionModelOrCreateMeeting()
+        async throws {
+        let fixture = makeFixture(
+            permissions: [
+                .microphone: .authorized,
+                .screenRecording: .denied
+            ],
+            blockingTranscriptionFactoryOutcome: .success
+        )
+        let factory = try XCTUnwrap(
+            fixture.blockingTranscriptionFactory
+        )
+        let entrySignal = try XCTUnwrap(
+            fixture.transcriptionFactoryEntrySignal
+        )
+        await factory.release()
+
+        do {
+            _ = try await fixture.coordinator.start(mode: .online)
+            XCTFail("Expected denied screen-recording permission")
+            try? await fixture.coordinator.stop()
+        } catch {
+            XCTAssertEqual(
+                error as? MeetingCoordinatorError,
+                .permissionDenied([.screenRecording])
+            )
+        }
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let createdMeetingIDs = await fixture.repository.createdMeetingIDs()
+        let writerRequests = await fixture.writerRequests.values()
+        let captureModes = await fixture.captureModes.values()
+        let panelCalls = await fixture.panel.calls()
+        XCTAssertEqual(entrySignal.count, 0)
+        XCTAssertEqual(snapshot.state, .idle)
+        XCTAssertNil(snapshot.meetingID)
+        XCTAssertFalse(snapshot.state.blocksCaptureSettingsChanges)
+        XCTAssertTrue(createdMeetingIDs.isEmpty)
+        XCTAssertTrue(writerRequests.isEmpty)
+        XCTAssertTrue(captureModes.isEmpty)
+        XCTAssertTrue(panelCalls.isEmpty)
+    }
+
+    func testCallerCancellationAfterModelReadyBeforeMeetingCreationLeavesIdle()
+        async throws {
+        let fixture = makeFixture(
+            blockingTranscriptionFactoryOutcome: .success,
+            clockSuspendsNextDateRead: true
+        )
+        let factory = try XCTUnwrap(
+            fixture.blockingTranscriptionFactory
+        )
+        let factoryEntrySignal = try XCTUnwrap(
+            fixture.transcriptionFactoryEntrySignal
+        )
+        let clockEntrySignal = try XCTUnwrap(
+            fixture.clock.dateReadEntrySignal
+        )
+        let startCompletion = CoordinatorTestSignal(
+            description: "cancelled pre-creation start completes"
+        )
+        let startTask = Task {
+            defer { startCompletion.signal() }
+            return try await fixture.coordinator.start(mode: .offline)
+        }
+
+        await fulfillment(
+            of: [factoryEntrySignal.expectation],
+            timeout: 0.5
+        )
+        await factory.release()
+        await fulfillment(of: [clockEntrySignal.expectation], timeout: 0.5)
+        startTask.cancel()
+        await fixture.clock.releaseDateRead()
+        await fulfillment(of: [startCompletion.expectation], timeout: 0.5)
+
+        guard startCompletion.count == 1 else { return }
+        switch await startTask.result {
+        case .success:
+            XCTFail("Expected caller cancellation")
+            try? await fixture.coordinator.stop()
+        case let .failure(error):
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let createdMeetingIDs = await fixture.repository.createdMeetingIDs()
+        let savedMeetings = await fixture.repository.savedMeetings()
+        let writerRequests = await fixture.writerRequests.values()
+        let captureModes = await fixture.captureModes.values()
+        let panelCalls = await fixture.panel.calls()
+        let presentationEvents =
+            await fixture.recordingPresentation.events()
+        XCTAssertEqual(snapshot.state, .idle)
+        XCTAssertNil(snapshot.meetingID)
+        XCTAssertTrue(createdMeetingIDs.isEmpty)
+        XCTAssertTrue(savedMeetings.isEmpty)
+        XCTAssertTrue(writerRequests.isEmpty)
+        XCTAssertTrue(captureModes.isEmpty)
+        XCTAssertTrue(panelCalls.isEmpty)
+        XCTAssertTrue(presentationEvents.isEmpty)
+    }
+
+    func testCallerCancellationDuringRepositoryCreationRollsBackMeeting()
+        async throws {
+        let fixture = makeFixture(repositorySuspendsCreateMeeting: true)
+        let repositoryEntrySignal = try XCTUnwrap(
+            fixture.repository.createMeetingEntrySignal
+        )
+        let startCompletion = CoordinatorTestSignal(
+            description: "cancelled repository start completes"
+        )
+        let startTask = Task {
+            defer { startCompletion.signal() }
+            return try await fixture.coordinator.start(mode: .offline)
+        }
+
+        await fulfillment(
+            of: [repositoryEntrySignal.expectation],
+            timeout: 0.5
+        )
+        startTask.cancel()
+        await fixture.repository.releaseCreateMeeting()
+        await fulfillment(of: [startCompletion.expectation], timeout: 0.5)
+
+        guard startCompletion.count == 1 else { return }
+        switch await startTask.result {
+        case .success:
+            XCTFail("Expected caller cancellation")
+            try? await fixture.coordinator.stop()
+        case let .failure(error):
+            XCTAssertTrue(error is CancellationError)
+        }
+
+        let snapshot = await fixture.coordinator.snapshot()
+        let createdMeetingIDs = await fixture.repository.createdMeetingIDs()
+        let savedMeetings = await fixture.repository.savedMeetings()
+        let writerRequests = await fixture.writerRequests.values()
+        let captureModes = await fixture.captureModes.values()
+        let panelCalls = await fixture.panel.calls()
+        let presentationEvents =
+            await fixture.recordingPresentation.events()
+        XCTAssertEqual(snapshot.state, .idle)
+        XCTAssertNil(snapshot.meetingID)
+        XCTAssertEqual(createdMeetingIDs.count, 1)
+        XCTAssertTrue(savedMeetings.isEmpty)
+        XCTAssertTrue(writerRequests.isEmpty)
+        XCTAssertTrue(captureModes.isEmpty)
+        XCTAssertTrue(panelCalls.isEmpty)
+        XCTAssertTrue(presentationEvents.isEmpty)
+    }
+
     func testStartFailureRollsBackAndClosesStartedResources() async throws {
         let fixture = makeFixture(captureFailsToStart: true)
 
@@ -1873,7 +2196,11 @@ final class MeetingCoordinatorTests: XCTestCase {
         repositoryFailsFinalize: Bool = false,
         captureSuspendsPause: Bool = false,
         speakerDiarizationEnabled: Bool = false,
-        speakerFinalizationOutcome: SpeakerFinalizationOutcome? = nil
+        speakerFinalizationOutcome: SpeakerFinalizationOutcome? = nil,
+        blockingTranscriptionFactoryOutcome:
+            BlockingCoordinatorTranscriptionFactory.Outcome? = nil,
+        clockSuspendsNextDateRead: Bool = false,
+        repositorySuspendsCreateMeeting: Bool = false
     ) -> CoordinatorFixture {
         let events = CoordinatorEventLog()
         let captureModes = CoordinatorModeLog()
@@ -1907,6 +2234,24 @@ final class MeetingCoordinatorTests: XCTestCase {
             emitsDrafts: transcriberEmitsDrafts,
             fixedTranscriptionService: fixedTranscriptionService
         )
+        let blockingTranscriptionFactory =
+            blockingTranscriptionFactoryOutcome.map {
+                let entrySignal = CoordinatorTestSignal(
+                    description: "transcription factory entered"
+                )
+                return BlockingCoordinatorTranscriptionFactory(
+                    transcriber: transcriber,
+                    outcome: $0,
+                    entrySignal: entrySignal
+                )
+            }
+        let transcriptionFactoryEntrySignal =
+            blockingTranscriptionFactory?.entrySignal
+        let transcriptionFactory: any MeetingTranscriptionQueueFactory =
+            blockingTranscriptionFactory
+                ?? FakeCoordinatorTranscriptionFactory(
+                    transcriber: transcriber
+                )
         let repository = FakeCoordinatorRepository(
             events: events,
             degradationFailures: repositoryDegradationFailures,
@@ -1914,7 +2259,8 @@ final class MeetingCoordinatorTests: XCTestCase {
                 repositoryFailsSpeakerProcessingStart,
             failsFinalizingUpdate: repositoryFailsFinalizingUpdate,
             failsReplacement: repositoryFailsReplacement,
-            failsFinalize: repositoryFailsFinalize
+            failsFinalize: repositoryFailsFinalize,
+            suspendsCreateMeeting: repositorySuspendsCreateMeeting
         )
         let speakerFinalizer = FakeCoordinatorSpeakerFinalizer(
             events: events,
@@ -1924,7 +2270,8 @@ final class MeetingCoordinatorTests: XCTestCase {
         let panel = FakeCoordinatorPanel(events: events)
         let clock = ManualCoordinatorClock(
             date: Date(timeIntervalSince1970: 1_000),
-            monotonic: 100
+            monotonic: 100,
+            suspendsNextDateRead: clockSuspendsNextDateRead
         )
         let healthScheduler = ManualCaptureHealthScheduler()
         let recordingPresentation = RecordingPresentationSpy()
@@ -1944,9 +2291,7 @@ final class MeetingCoordinatorTests: XCTestCase {
                 requests: writerRequests,
                 failsForTrack: writerFactoryFailsForTrack
             ),
-            transcriptionFactory: FakeCoordinatorTranscriptionFactory(
-                transcriber: transcriber
-            ),
+            transcriptionFactory: transcriptionFactory,
             repository: repository,
             speakerDiarizationPreference: speakerDiarizationPreference,
             speakerFinalizer: speakerFinalizer,
@@ -1973,6 +2318,9 @@ final class MeetingCoordinatorTests: XCTestCase {
             capture: capture,
             writers: writers,
             transcriber: transcriber,
+            blockingTranscriptionFactory: blockingTranscriptionFactory,
+            transcriptionFactoryEntrySignal:
+                transcriptionFactoryEntrySignal,
             repository: repository,
             speakerDiarizationPreference: speakerDiarizationPreference,
             speakerFinalizer: speakerFinalizer,
@@ -2069,6 +2417,9 @@ private struct CoordinatorFixture {
     let capture: FakeCoordinatorCapture
     let writers: [AudioTrack: FakeCoordinatorWriter]
     let transcriber: FakeCoordinatorTranscriber
+    let blockingTranscriptionFactory:
+        BlockingCoordinatorTranscriptionFactory?
+    let transcriptionFactoryEntrySignal: CoordinatorTestSignal?
     let repository: FakeCoordinatorRepository
     let speakerDiarizationPreference: MutableSpeakerDiarizationPreference
     let speakerFinalizer: FakeCoordinatorSpeakerFinalizer
@@ -2123,6 +2474,7 @@ private struct RealRepositoryCoordinatorFixture {
 
 private enum CoordinatorTestError: Error, Equatable {
     case captureStart
+    case transcriptionFactory
     case repositoryUpdate
     case repositoryDegradation
     case repositorySpeakerProcessing
@@ -2402,6 +2754,75 @@ private struct FakeCoordinatorTranscriptionFactory: MeetingTranscriptionQueueFac
     }
 }
 
+private final class CoordinatorTestSignal: @unchecked Sendable {
+    let expectation: XCTestExpectation
+    private let lock = NSLock()
+    private var storedCount = 0
+
+    init(description: String) {
+        expectation = XCTestExpectation(description: description)
+        expectation.assertForOverFulfill = true
+    }
+
+    var count: Int {
+        lock.withLock { storedCount }
+    }
+
+    func signal() {
+        lock.withLock { storedCount += 1 }
+        expectation.fulfill()
+    }
+}
+
+private actor BlockingCoordinatorTranscriptionFactory:
+    MeetingTranscriptionQueueFactory {
+    enum Outcome: Sendable {
+        case success
+        case failure
+    }
+
+    private let transcriber: FakeCoordinatorTranscriber
+    private let outcome: Outcome
+    nonisolated let entrySignal: CoordinatorTestSignal
+    private var isReleased = false
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(
+        transcriber: FakeCoordinatorTranscriber,
+        outcome: Outcome,
+        entrySignal: CoordinatorTestSignal
+    ) {
+        self.transcriber = transcriber
+        self.outcome = outcome
+        self.entrySignal = entrySignal
+    }
+
+    func makeQueue() async throws -> any MeetingTranscriptionQueueing {
+        entrySignal.signal()
+
+        if !isReleased {
+            await withCheckedContinuation { continuation in
+                releaseWaiters.append(continuation)
+            }
+        }
+
+        switch outcome {
+        case .success:
+            return transcriber
+        case .failure:
+            throw CoordinatorTestError.transcriptionFactory
+        }
+    }
+
+    func release() {
+        guard !isReleased else { return }
+        isReleased = true
+        let releaseWaiters = releaseWaiters
+        self.releaseWaiters.removeAll(keepingCapacity: false)
+        releaseWaiters.forEach { $0.resume() }
+    }
+}
+
 private actor FakeCoordinatorTranscriber: MeetingTranscriptionQueueing {
     struct Chunk: Equatable, Sendable {
         let samples: [Float]
@@ -2652,7 +3073,11 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
     private let failsFinalizingUpdate: Bool
     private let failsReplacement: Bool
     private let failsFinalize: Bool
+    nonisolated let createMeetingEntrySignal: CoordinatorTestSignal?
+    private var suspendsCreateMeeting: Bool
+    private var createMeetingWaiters: [CheckedContinuation<Void, Never>] = []
     private var meetings: [SavedMeeting] = []
+    private var allCreatedMeetingIDs: [UUID] = []
     private var bookmarks: [TimeInterval] = []
     private var transcripts: [TranscriptDraft] = []
     private var degradationCodes: [String] = []
@@ -2670,7 +3095,8 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
         failsSpeakerProcessingStart: Bool,
         failsFinalizingUpdate: Bool,
         failsReplacement: Bool,
-        failsFinalize: Bool
+        failsFinalize: Bool,
+        suspendsCreateMeeting: Bool = false
     ) {
         self.events = events
         remainingDegradationFailures = degradationFailures
@@ -2678,6 +3104,12 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
         self.failsFinalizingUpdate = failsFinalizingUpdate
         self.failsReplacement = failsReplacement
         self.failsFinalize = failsFinalize
+        self.suspendsCreateMeeting = suspendsCreateMeeting
+        createMeetingEntrySignal = suspendsCreateMeeting
+            ? CoordinatorTestSignal(
+                description: "repository create meeting entered"
+            )
+            : nil
     }
 
     func createMeeting(
@@ -2687,7 +3119,14 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
     ) async throws -> UUID {
         _ = startedAt
         await events.append("repository.create")
+        if suspendsCreateMeeting {
+            createMeetingEntrySignal?.signal()
+            await withCheckedContinuation { continuation in
+                createMeetingWaiters.append(continuation)
+            }
+        }
         let meetingID = UUID()
+        allCreatedMeetingIDs.append(meetingID)
         meetings.append(
             SavedMeeting(
                 id: meetingID,
@@ -2697,6 +3136,14 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
             )
         )
         return meetingID
+    }
+
+    func releaseCreateMeeting() {
+        guard suspendsCreateMeeting else { return }
+        suspendsCreateMeeting = false
+        let waiters = createMeetingWaiters
+        createMeetingWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
     }
 
     func updateState(meetingID: UUID, state: RecordingState) async throws {
@@ -2855,6 +3302,10 @@ private actor FakeCoordinatorRepository: MeetingLifecycleRepository {
         meetings
     }
 
+    func createdMeetingIDs() -> [UUID] {
+        allCreatedMeetingIDs
+    }
+
     func savedState(for meetingID: UUID) -> RecordingState? {
         meetings.first(where: { $0.id == meetingID })?.state
     }
@@ -2913,14 +3364,39 @@ private actor FakeCoordinatorPanel: RecordingPanelPresenting {
 private actor ManualCoordinatorClock: MeetingClock {
     private var currentDate: Date
     private var currentMonotonic: TimeInterval
+    nonisolated let dateReadEntrySignal: CoordinatorTestSignal?
+    private var suspendsNextDateRead: Bool
+    private var dateReadWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(date: Date, monotonic: TimeInterval) {
+    init(
+        date: Date,
+        monotonic: TimeInterval,
+        suspendsNextDateRead: Bool = false
+    ) {
         currentDate = date
         currentMonotonic = monotonic
+        self.suspendsNextDateRead = suspendsNextDateRead
+        dateReadEntrySignal = suspendsNextDateRead
+            ? CoordinatorTestSignal(description: "clock date read entered")
+            : nil
     }
 
     func now() async -> Date {
-        currentDate
+        if suspendsNextDateRead {
+            dateReadEntrySignal?.signal()
+            await withCheckedContinuation { continuation in
+                dateReadWaiters.append(continuation)
+            }
+        }
+        return currentDate
+    }
+
+    func releaseDateRead() {
+        guard suspendsNextDateRead else { return }
+        suspendsNextDateRead = false
+        let waiters = dateReadWaiters
+        dateReadWaiters.removeAll(keepingCapacity: false)
+        waiters.forEach { $0.resume() }
     }
 
     func monotonicNow() async -> TimeInterval {

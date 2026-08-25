@@ -71,7 +71,7 @@ if [[ "$CONFIGURATION" == "Beta" ]]; then
     EXPECTED_BUNDLE_ID="com.shenminghao.MeetingNotes.beta"
     EXPECTED_DISPLAY_NAME="会议记录 Beta"
     EXPECTED_VERSION="1.2.0"
-    EXPECTED_BUILD="12"
+    EXPECTED_BUILD="13"
 else
     EXPECTED_BUNDLE_ID="com.shenminghao.MeetingNotes"
     EXPECTED_DISPLAY_NAME="会议记录"
