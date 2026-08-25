@@ -201,6 +201,29 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         )
     }
 
+    func testDocumentInputBuilderUsesCanonicalCorrectedText() throws {
+        let fixture = try makeFixture(notionEnabled: false)
+        let meetingID = try fixture.makeMeeting()
+        try fixture.addFinalTranscript(to: meetingID)
+        let meeting = try fixture.repository.meeting(id: meetingID)
+        let transcript = try XCTUnwrap(meeting.transcripts.first)
+        let correction = TranscriptCorrectionRecord(
+            anchorStartTime: transcript.startTime,
+            anchorEndTime: transcript.endTime,
+            source: transcript.source,
+            originalText: transcript.text,
+            replacementText: "确认下周正式启动",
+            transcriptIDs: [transcript.id],
+            meeting: meeting
+        )
+        meeting.transcriptCorrections.append(correction)
+
+        let input = MeetingDocumentInputBuilder.inputs(for: meeting)
+
+        XCTAssertEqual(input.transcripts.map(\.text), ["确认下周正式启动"])
+        XCTAssertEqual(input.bookmarks.map(\.excerpt), ["确认下周正式启动"])
+    }
+
     func testCustomSpeakerNamesReachBothGeneratedDocumentInputs() async throws {
         let fixture = try makeFixture(notionEnabled: false)
         let meetingID = try fixture.makeMeeting(mode: .online)

@@ -136,6 +136,82 @@ final class MeetingRepository {
         )
     }
 
+    func saveTranscriptCorrection(
+        meetingID: UUID,
+        transcriptIDs: [UUID],
+        anchorStartTime: TimeInterval,
+        anchorEndTime: TimeInterval,
+        source: TranscriptAudioSource,
+        originalText: String,
+        replacementText: String,
+        now: Date = .now
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+        let previousUpdatedAt = meeting.updatedAt
+        let targetIDs = Set(transcriptIDs)
+        if !targetIDs.isEmpty,
+           let correction = meeting.transcriptCorrections.first(where: {
+               $0.source == source && Set($0.transcriptIDs) == targetIDs
+           }) {
+            let previousAnchorStartTime = correction.anchorStartTime
+            let previousAnchorEndTime = correction.anchorEndTime
+            let previousReplacementText = correction.replacementText
+            let previousTranscriptIDs = correction.transcriptIDs
+            let previousCorrectionUpdatedAt = correction.updatedAt
+            correction.anchorStartTime = anchorStartTime
+            correction.anchorEndTime = anchorEndTime
+            correction.replacementText = replacementText
+            correction.transcriptIDs = transcriptIDs
+            correction.updatedAt = now
+            meeting.updatedAt = now
+            do {
+                try saveContext()
+            } catch {
+                correction.anchorStartTime = previousAnchorStartTime
+                correction.anchorEndTime = previousAnchorEndTime
+                correction.replacementText = previousReplacementText
+                correction.transcriptIDs = previousTranscriptIDs
+                correction.updatedAt = previousCorrectionUpdatedAt
+                meeting.updatedAt = previousUpdatedAt
+                throw error
+            }
+            return
+        }
+
+        let correction = TranscriptCorrectionRecord(
+            anchorStartTime: anchorStartTime,
+            anchorEndTime: anchorEndTime,
+            source: source,
+            originalText: originalText,
+            replacementText: replacementText,
+            transcriptIDs: transcriptIDs,
+            createdAt: now,
+            updatedAt: now,
+            meeting: meeting
+        )
+        context.insert(correction)
+        meeting.transcriptCorrections.append(correction)
+        meeting.updatedAt = now
+        do {
+            try saveContext()
+        } catch {
+            meeting.transcriptCorrections.removeAll { $0 === correction }
+            context.delete(correction)
+            meeting.updatedAt = previousUpdatedAt
+            throw error
+        }
+    }
+
+    func canonicalTranscripts(
+        meetingID: UUID
+    ) throws -> [CanonicalTranscriptEntry] {
+        let meeting = try meeting(id: meetingID)
+        return TranscriptCorrectionResolver.resolve(
+            transcripts: meeting.transcripts,
+            corrections: meeting.transcriptCorrections
+        )
+    }
+
     private func meeting(
         id: UUID,
         in modelContext: ModelContext
@@ -221,6 +297,11 @@ final class MeetingRepository {
                 sequenceIndex: sequenceIndex
             )
         }
+
+        Self.rebindTranscriptCorrections(
+            meeting.transcriptCorrections,
+            to: replacements
+        )
 
         replacements.forEach(replacementContext.insert)
         meeting.transcripts = replacements
@@ -1060,6 +1141,10 @@ final class MeetingRepository {
                 )
             }
 
+        Self.rebindTranscriptCorrections(
+            meeting.transcriptCorrections,
+            to: replacements
+        )
         replacements.forEach(transactionContext.insert)
         replacementSpeakerNames.forEach(transactionContext.insert)
         meeting.transcripts = replacements
@@ -1081,6 +1166,29 @@ final class MeetingRepository {
             meeting.speakerProcessingErrorCode = previousErrorCode
             meeting.updatedAt = previousUpdatedAt
             throw error
+        }
+    }
+
+    private static func rebindTranscriptCorrections(
+        _ corrections: [TranscriptCorrectionRecord],
+        to replacements: [TranscriptRecord]
+    ) {
+        let resolvedCorrections = TranscriptCorrectionResolver.resolve(
+            transcripts: replacements,
+            corrections: corrections
+        )
+        let replacementIDs = Set(replacements.map(\.id))
+        for correction in corrections {
+            guard let resolved = resolvedCorrections.first(where: {
+                $0.id == correction.id
+            }),
+                  !resolved.transcriptIDs.isEmpty,
+                  resolved.transcriptIDs.allSatisfy(
+                    replacementIDs.contains
+                  ) else {
+                continue
+            }
+            correction.transcriptIDs = resolved.transcriptIDs
         }
     }
 

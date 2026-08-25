@@ -586,6 +586,7 @@ final class MeetingDocumentsUseCase: MeetingDocumentManaging {
     }
 }
 
+@MainActor
 enum MeetingDocumentInputBuilder {
     static func inputs(
         for meeting: MeetingRecord
@@ -593,11 +594,12 @@ enum MeetingDocumentInputBuilder {
         transcripts: [MeetingTranscriptInput],
         bookmarks: [MeetingBookmarkInput]
     ) {
-        let transcriptRecords = meeting.transcripts
-            .filter(\.isFinal)
-            .sorted(by: transcriptComesBefore)
+        let canonicalTranscripts = TranscriptCorrectionResolver.resolve(
+            transcripts: meeting.transcripts.filter(\.isFinal),
+            corrections: meeting.transcriptCorrections
+        )
         let customSpeakerNames = meeting.speakerDisplayNames
-        let transcripts = transcriptRecords.compactMap {
+        let transcripts = canonicalTranscripts.compactMap {
             transcript -> MeetingTranscriptInput? in
             guard let text = TranscriptTextSanitizer.nonEmpty(
                 transcript.text
@@ -634,29 +636,5 @@ enum MeetingDocumentInputBuilder {
                 )
             }
         return (transcripts, bookmarks)
-    }
-
-    private static func transcriptComesBefore(
-        _ lhs: TranscriptRecord,
-        _ rhs: TranscriptRecord
-    ) -> Bool {
-        if lhs.startTime != rhs.startTime {
-            return lhs.startTime < rhs.startTime
-        }
-        switch (lhs.sequenceIndex, rhs.sequenceIndex) {
-        case let (lhsSequence?, rhsSequence?)
-            where lhsSequence != rhsSequence:
-            return lhsSequence < rhsSequence
-        case (_?, nil):
-            return true
-        case (nil, _?):
-            return false
-        default:
-            break
-        }
-        if lhs.endTime != rhs.endTime {
-            return lhs.endTime < rhs.endTime
-        }
-        return lhs.id.uuidString < rhs.id.uuidString
     }
 }

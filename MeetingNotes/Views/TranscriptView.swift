@@ -2,6 +2,7 @@ import SwiftUI
 
 struct TranscriptDisplayEntry: Identifiable, Equatable {
     let id: UUID
+    let transcriptIDs: [UUID]
     let startTime: TimeInterval
     let endTime: TimeInterval
     let text: String
@@ -57,11 +58,23 @@ enum TranscriptSpeakerDisplayPolicy {
     }
 }
 
+@MainActor
 enum TranscriptDisplayPolicy {
     private static let maximumTurnGap: TimeInterval = 5
 
     static func entries(
         from transcripts: [TranscriptRecord]
+    ) -> [TranscriptDisplayEntry] {
+        entries(
+            from: TranscriptCorrectionResolver.resolve(
+                transcripts: transcripts,
+                corrections: []
+            )
+        )
+    }
+
+    static func entries(
+        from transcripts: [CanonicalTranscriptEntry]
     ) -> [TranscriptDisplayEntry] {
         transcripts
             .sorted {
@@ -78,6 +91,9 @@ enum TranscriptDisplayPolicy {
                 }
                 return TranscriptDisplayEntry(
                     id: transcript.id,
+                    transcriptIDs: transcript.transcriptIDs.isEmpty
+                        ? [transcript.id]
+                        : transcript.transcriptIDs,
                     startTime: transcript.startTime,
                     endTime: transcript.endTime,
                     text: text,
@@ -91,6 +107,19 @@ enum TranscriptDisplayPolicy {
         from transcripts: [TranscriptRecord],
         bookmarks: [BookmarkRecord]
     ) -> [TranscriptDisplayTurn] {
+        turns(
+            from: TranscriptCorrectionResolver.resolve(
+                transcripts: transcripts,
+                corrections: []
+            ),
+            bookmarks: bookmarks
+        )
+    }
+
+    static func turns(
+        from transcripts: [CanonicalTranscriptEntry],
+        bookmarks: [BookmarkRecord]
+    ) -> [TranscriptDisplayTurn] {
         entries(from: transcripts).reduce(into: []) { turns, entry in
             let highlighted = isHighlighted(entry, bookmarks: bookmarks)
             if let previous = turns.last,
@@ -100,7 +129,8 @@ enum TranscriptDisplayPolicy {
                 highlighted: highlighted
                ) {
                 turns[turns.count - 1] = TranscriptDisplayTurn(
-                    transcriptIDs: previous.transcriptIDs + [entry.id],
+                    transcriptIDs: previous.transcriptIDs
+                        + entry.transcriptIDs,
                     startTime: previous.startTime,
                     endTime: max(previous.endTime, entry.endTime),
                     text: [previous.text, entry.text].joined(separator: " "),
@@ -111,7 +141,7 @@ enum TranscriptDisplayPolicy {
             } else {
                 turns.append(
                     TranscriptDisplayTurn(
-                        transcriptIDs: [entry.id],
+                        transcriptIDs: entry.transcriptIDs,
                         startTime: entry.startTime,
                         endTime: entry.endTime,
                         text: entry.text,
@@ -154,6 +184,7 @@ enum TranscriptDisplayPolicy {
 struct TranscriptView: View {
     let transcripts: [TranscriptRecord]
     let bookmarks: [BookmarkRecord]
+    var corrections: [TranscriptCorrectionRecord] = []
     var customSpeakerNames: [String: String] = [:]
     var frequentSpeakerNames: [String] = []
     var speakerNameErrorMessage: String?
@@ -165,7 +196,10 @@ struct TranscriptView: View {
 
     private var visibleTurns: [TranscriptDisplayTurn] {
         TranscriptDisplayPolicy.turns(
-            from: transcripts,
+            from: TranscriptCorrectionResolver.resolve(
+                transcripts: transcripts,
+                corrections: corrections
+            ),
             bookmarks: bookmarks
         )
     }

@@ -222,6 +222,32 @@ final class TranscriptSpeakerDisplayPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testTranscriptDisplayUsesCanonicalCorrectedText() throws {
+        let generatedID = UUID()
+        let correctionID = UUID()
+        let canonical = CanonicalTranscriptEntry(
+            id: correctionID,
+            transcriptIDs: [generatedID],
+            startTime: 2,
+            endTime: 4,
+            text: "手动修正后的文字",
+            speakerID: "room-2",
+            source: .room,
+            isManuallyEdited: true
+        )
+
+        let entry = try XCTUnwrap(
+            TranscriptDisplayPolicy.entries(from: [canonical]).first
+        )
+
+        XCTAssertEqual(entry.id, correctionID)
+        XCTAssertEqual(entry.transcriptIDs, [generatedID])
+        XCTAssertEqual(entry.text, "手动修正后的文字")
+        XCTAssertEqual(entry.speakerID, "room-2")
+        XCTAssertEqual(entry.source, .room)
+    }
+
+    @MainActor
     func testAdjacentSameSpeakerEntriesBecomeOneOrderedTurn() throws {
         let firstID = UUID()
         let secondID = UUID()
