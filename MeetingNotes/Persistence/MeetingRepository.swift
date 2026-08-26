@@ -8,6 +8,7 @@ enum MeetingRepositoryError: Error, Equatable, Sendable {
 
 enum MeetingDocumentRepositoryError: Error, Equatable, Sendable {
     case missingDocument(MeetingDocumentKind)
+    case existingDocumentRequiresGuardedSave(MeetingDocumentKind)
     case missingArchiveCheckpoint
     case invalidMetadataArchiveCheckpoint
     case invalidArchiveRun(MeetingDocumentKind)
@@ -149,13 +150,19 @@ final class MeetingRepository {
         now: Date = .now
     ) throws {
         let meeting = try meeting(id: meetingID)
-        let previousUpdatedAt = meeting.updatedAt
-        let contentSnapshot = try beginContentMutation(for: meeting)
         let targetIDs = Set(transcriptIDs)
         if !targetIDs.isEmpty,
            let correction = meeting.transcriptCorrections.first(where: {
                $0.source == source && Set($0.transcriptIDs) == targetIDs
            }) {
+            let isUnchanged = correction.anchorStartTime == anchorStartTime
+                && correction.anchorEndTime == anchorEndTime
+                && correction.replacementText == replacementText
+            guard !isUnchanged else {
+                return
+            }
+            let previousUpdatedAt = meeting.updatedAt
+            let contentSnapshot = try beginContentMutation(for: meeting)
             let previousAnchorStartTime = correction.anchorStartTime
             let previousAnchorEndTime = correction.anchorEndTime
             let previousReplacementText = correction.replacementText
@@ -182,6 +189,8 @@ final class MeetingRepository {
             return
         }
 
+        let previousUpdatedAt = meeting.updatedAt
+        let contentSnapshot = try beginContentMutation(for: meeting)
         let correction = TranscriptCorrectionRecord(
             anchorStartTime: anchorStartTime,
             anchorEndTime: anchorEndTime,
@@ -369,11 +378,16 @@ final class MeetingRepository {
             throw SpeakerNameRepositoryError.speakerNotFound(speakerID)
         }
 
+        let existingRecord = meeting.speakerNames.first(where: {
+            $0.speakerID == speakerID
+        })
+        if existingRecord?.displayName == normalizedName {
+            return
+        }
+
         let previousMeetingUpdatedAt = meeting.updatedAt
         let contentSnapshot = try beginContentMutation(for: meeting)
-        if let record = meeting.speakerNames.first(where: {
-            $0.speakerID == speakerID
-        }) {
+        if let record = existingRecord {
             let previous = SpeakerNameSnapshot(record)
             record.displayName = normalizedName
             record.evidenceStartTime = evidenceStartTime
@@ -505,57 +519,34 @@ final class MeetingRepository {
         createdAt: Date = .now
     ) throws {
         let meeting = try meeting(id: meetingID)
+        guard meeting.summary == nil else {
+            throw MeetingDocumentRepositoryError
+                .existingDocumentRequiresGuardedSave(.summary)
+        }
         let previousUpdatedAt = meeting.updatedAt
         let contentSnapshot = try beginContentMutation(for: meeting)
 
-        if let summary = meeting.summary {
-            let previous = SummarySnapshot(summary)
-            do {
-                try summary.update(
-                    overview: overview,
-                    keyPoints: keyPoints,
-                    decisions: decisions,
-                    actionItems: structuredActionItems,
-                    bookmarkInsights: bookmarkInsights,
-                    model: model,
-                    createdAt: createdAt
-                )
-            } catch {
-                contentSnapshot.restore(meeting)
-                throw error
-            }
-            meeting.updatedAt = .now
-            do {
-                try saveContext()
-            } catch {
-                previous.restore(summary)
-                meeting.updatedAt = previousUpdatedAt
-                contentSnapshot.restore(meeting)
-                throw error
-            }
-        } else {
-            let summary = SummaryRecord(
-                overview: overview,
-                keyPoints: keyPoints,
-                decisions: decisions,
-                actionItems: structuredActionItems,
-                bookmarkInsights: bookmarkInsights,
-                model: model,
-                createdAt: createdAt,
-                meeting: meeting
-            )
-            context.insert(summary)
-            meeting.summary = summary
-            meeting.updatedAt = .now
-            do {
-                try saveContext()
-            } catch {
-                meeting.summary = nil
-                context.delete(summary)
-                meeting.updatedAt = previousUpdatedAt
-                contentSnapshot.restore(meeting)
-                throw error
-            }
+        let summary = SummaryRecord(
+            overview: overview,
+            keyPoints: keyPoints,
+            decisions: decisions,
+            actionItems: structuredActionItems,
+            bookmarkInsights: bookmarkInsights,
+            model: model,
+            createdAt: createdAt,
+            meeting: meeting
+        )
+        context.insert(summary)
+        meeting.summary = summary
+        meeting.updatedAt = .now
+        do {
+            try saveContext()
+        } catch {
+            meeting.summary = nil
+            context.delete(summary)
+            meeting.updatedAt = previousUpdatedAt
+            contentSnapshot.restore(meeting)
+            throw error
         }
     }
 
@@ -567,68 +558,37 @@ final class MeetingRepository {
         createdAt: Date = .now
     ) throws {
         let meeting = try meeting(id: meetingID)
+        guard meeting.detailedMinutes == nil else {
+            throw MeetingDocumentRepositoryError
+                .existingDocumentRequiresGuardedSave(.detailedMinutes)
+        }
         let encoded = try detailedMinutesEncoder(generated)
         let previousUpdatedAt = meeting.updatedAt
-        let nextDocumentRevision: Int?
-        if let minutes = meeting.detailedMinutes {
-            nextDocumentRevision = try MeetingDocumentRevision.next(
-                after: minutes.contentRevision
-            )
-        } else {
-            nextDocumentRevision = nil
-        }
         let contentSnapshot = try beginContentMutation(for: meeting)
 
-        if let minutes = meeting.detailedMinutes,
-           let nextDocumentRevision {
-            let previous = DetailedMinutesSnapshot(minutes)
-            minutes.overview = generated.overview
-            minutes.sectionsData = encoded.sections
-            minutes.decisionsData = encoded.decisions
-            minutes.actionItemsData = encoded.actionItems
-            minutes.openQuestionsData = encoded.openQuestions
-            minutes.model = model
-            minutes.promptVersion = promptVersion
-            minutes.createdAt = createdAt
-            minutes.contentRevision = nextDocumentRevision
-            minutes.isManuallyEdited = false
-            minutes.archiveState = .localOnly
-            minutes.archivedContentRevision = nil
-            minutes.lastArchiveErrorCode = nil
-            meeting.updatedAt = .now
-            do {
-                try saveContext()
-            } catch {
-                previous.restore(minutes)
-                meeting.updatedAt = previousUpdatedAt
-                contentSnapshot.restore(meeting)
-                throw error
-            }
-        } else {
-            let minutes = DetailedMinutesRecord(
-                overview: generated.overview,
-                sectionsData: encoded.sections,
-                decisionsData: encoded.decisions,
-                actionItemsData: encoded.actionItems,
-                openQuestionsData: encoded.openQuestions,
-                model: model,
-                promptVersion: promptVersion,
-                createdAt: createdAt,
-                contentRevision: 1,
-                meeting: meeting
-            )
-            context.insert(minutes)
-            meeting.detailedMinutes = minutes
-            meeting.updatedAt = .now
-            do {
-                try saveContext()
-            } catch {
-                meeting.detailedMinutes = nil
-                context.delete(minutes)
-                meeting.updatedAt = previousUpdatedAt
-                contentSnapshot.restore(meeting)
-                throw error
-            }
+        let minutes = DetailedMinutesRecord(
+            overview: generated.overview,
+            sectionsData: encoded.sections,
+            decisionsData: encoded.decisions,
+            actionItemsData: encoded.actionItems,
+            openQuestionsData: encoded.openQuestions,
+            model: model,
+            promptVersion: promptVersion,
+            createdAt: createdAt,
+            contentRevision: 1,
+            meeting: meeting
+        )
+        context.insert(minutes)
+        meeting.detailedMinutes = minutes
+        meeting.updatedAt = .now
+        do {
+            try saveContext()
+        } catch {
+            meeting.detailedMinutes = nil
+            context.delete(minutes)
+            meeting.updatedAt = previousUpdatedAt
+            contentSnapshot.restore(meeting)
+            throw error
         }
     }
 

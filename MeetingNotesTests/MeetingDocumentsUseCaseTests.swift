@@ -141,6 +141,124 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         XCTAssertEqual(meeting.state, .summaryReady)
     }
 
+    func testOrdinaryGenerationCannotOverwriteManualMinutes() async throws {
+        let fixture = try makeFixture(notionEnabled: false)
+        let meetingID = try fixture.makeMeeting()
+        try fixture.addFinalTranscript(to: meetingID)
+        try fixture.repository.saveGeneratedDetailedMinutes(
+            meetingID: meetingID,
+            generated: Self.minutes,
+            model: "old-model",
+            promptVersion: 1
+        )
+        let manual = Self.detailedMinutes(overview: "人工纪要")
+        try fixture.repository.updateDetailedMinutesManually(
+            meetingID: meetingID,
+            value: manual
+        )
+        let beforeRevision = try fixture.repository.meeting(
+            id: meetingID
+        ).contentRevision
+
+        await assertRepositoryThrows(.manualEditProtected(.detailedMinutes)) {
+            try await fixture.useCase.generate(
+                meetingID: meetingID,
+                kind: .detailedMinutes
+            )
+        }
+
+        let meeting = try fixture.repository.meeting(id: meetingID)
+        XCTAssertEqual(meeting.detailedMinutes?.overview, manual.overview)
+        XCTAssertTrue(meeting.detailedMinutes?.isManuallyEdited == true)
+        XCTAssertEqual(meeting.contentRevision, beforeRevision)
+        XCTAssertEqual(meeting.state, .summaryReady)
+    }
+
+    func testConfirmedRegenerationCanReplaceManualMinutes() async throws {
+        let fixture = try makeFixture(notionEnabled: false)
+        let meetingID = try fixture.makeMeeting()
+        try fixture.addFinalTranscript(to: meetingID)
+        try fixture.repository.saveGeneratedDetailedMinutes(
+            meetingID: meetingID,
+            generated: Self.minutes,
+            model: "old-model",
+            promptVersion: 1
+        )
+        try fixture.repository.updateDetailedMinutesManually(
+            meetingID: meetingID,
+            value: Self.detailedMinutes(overview: "人工纪要")
+        )
+        let beforeRevision = try fixture.repository.meeting(
+            id: meetingID
+        ).contentRevision
+
+        try await fixture.useCase.generate(
+            meetingID: meetingID,
+            kind: .detailedMinutes,
+            replacingManualEdits: true
+        )
+
+        let meeting = try fixture.repository.meeting(id: meetingID)
+        XCTAssertEqual(meeting.detailedMinutes?.overview, Self.minutes.overview)
+        XCTAssertFalse(meeting.detailedMinutes?.isManuallyEdited == true)
+        XCTAssertEqual(meeting.contentRevision, beforeRevision + 1)
+        XCTAssertEqual(meeting.state, .summaryReady)
+    }
+
+    func testMinutesGenerationStartedBeforeLaterEditIsRejectedAsStale()
+        async throws {
+        let fixture = try makeFixture(
+            notionEnabled: false,
+            blockMinutesGeneration: true
+        )
+        let meetingID = try fixture.makeMeeting()
+        try fixture.addFinalTranscript(to: meetingID)
+        try fixture.repository.saveGeneratedDetailedMinutes(
+            meetingID: meetingID,
+            generated: Self.minutes,
+            model: "old-model",
+            promptVersion: 1
+        )
+        let observedRevision = try fixture.repository.meeting(
+            id: meetingID
+        ).contentRevision
+        let generation = Task {
+            try await fixture.useCase.generate(
+                meetingID: meetingID,
+                kind: .detailedMinutes,
+                replacingManualEdits: true
+            )
+        }
+        await fixture.minutesGenerator.waitUntilStarted()
+        let laterEdit = Self.detailedMinutes(
+            overview: "生成进行中的人工纪要"
+        )
+        try fixture.repository.updateDetailedMinutesManually(
+            meetingID: meetingID,
+            value: laterEdit
+        )
+        await fixture.minutesGenerator.finishBlockingCall()
+
+        do {
+            try await generation.value
+            XCTFail("Expected stale revision rejection")
+        } catch {
+            XCTAssertEqual(
+                error as? MeetingDocumentRepositoryError,
+                .staleMeetingContentRevision(
+                    expected: observedRevision,
+                    actual: observedRevision + 1
+                )
+            )
+        }
+
+        let meeting = try fixture.repository.meeting(id: meetingID)
+        XCTAssertEqual(meeting.detailedMinutes?.overview, laterEdit.overview)
+        XCTAssertTrue(meeting.detailedMinutes?.isManuallyEdited == true)
+        XCTAssertEqual(meeting.contentRevision, observedRevision + 1)
+        XCTAssertEqual(meeting.state, .summaryReady)
+    }
+
     func testExistentialManagerReceivesExplicitReplacementIntent()
         async throws {
         let spy = ReplacementIntentDocumentManagerSpy()
@@ -941,7 +1059,8 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         notionEnabled: Bool = true,
         operationGate: MeetingOperationGate = MeetingOperationGate(),
         saveFailureController: DocumentSaveFailureController? = nil,
-        blockSummaryGeneration: Bool = false
+        blockSummaryGeneration: Bool = false,
+        blockMinutesGeneration: Bool = false
     ) throws -> DocumentFixture {
         let repository = try MeetingRepository.inMemory { context in
             if saveFailureController?.consumeFailure() == true {
@@ -966,7 +1085,10 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
             result: summaryResult,
             shouldBlock: blockSummaryGeneration
         )
-        let minutesGenerator = DocumentMinutesGeneratorSpy(result: minutesResult)
+        let minutesGenerator = DocumentMinutesGeneratorSpy(
+            result: minutesResult,
+            shouldBlock: blockMinutesGeneration
+        )
         let archiver = DocumentArchiverSpy(
             repository: repository,
             results: archiveResults
@@ -1038,6 +1160,18 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         actionItems: [ActionItem(task: "落实 A", owner: "小王", dueDate: nil)],
         openQuestions: ["预算待确认"]
     )
+
+    private static func detailedMinutes(
+        overview: String
+    ) -> GeneratedDetailedMinutes {
+        GeneratedDetailedMinutes(
+            overview: overview,
+            sections: minutes.sections,
+            decisions: minutes.decisions,
+            actionItems: minutes.actionItems,
+            openQuestions: minutes.openQuestions
+        )
+    }
 }
 
 @MainActor
@@ -1188,9 +1322,17 @@ private actor DocumentMinutesGeneratorSpy: MeetingDetailedMinutesGenerating {
     let result: Result<GeneratedDetailedMinutes, Error>
     private var calls = 0
     private var inputs: [MeetingSummaryInput] = []
+    private let shouldBlock: Bool
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var finishContinuation: CheckedContinuation<Void, Never>?
 
-    init(result: Result<GeneratedDetailedMinutes, Error>) {
+    init(
+        result: Result<GeneratedDetailedMinutes, Error>,
+        shouldBlock: Bool = false
+    ) {
         self.result = result
+        self.shouldBlock = shouldBlock
     }
 
     func detailedMinutes(
@@ -1202,11 +1344,31 @@ private actor DocumentMinutesGeneratorSpy: MeetingDetailedMinutesGenerating {
         _ = model
         calls += 1
         inputs.append(input)
+        if shouldBlock {
+            started = true
+            startWaiters.forEach { $0.resume() }
+            startWaiters.removeAll()
+            await withCheckedContinuation { continuation in
+                finishContinuation = continuation
+            }
+        }
         return try result.get()
     }
 
     func callCount() -> Int { calls }
     func lastInput() -> MeetingSummaryInput? { inputs.last }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func finishBlockingCall() {
+        finishContinuation?.resume()
+        finishContinuation = nil
+    }
 }
 
 @MainActor
