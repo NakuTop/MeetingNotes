@@ -4,6 +4,79 @@ import SwiftData
 
 @MainActor
 final class MeetingRepositoryTests: XCTestCase {
+    func testReplacementCapableSummarySaveRequiresObservedRevision() throws {
+        let repository = try MeetingRepository.inMemory()
+
+        let observedRevisionType = observedRevisionParameterType(
+            of: repository.saveGeneratedSummary
+        )
+
+        XCTAssertEqual(String(reflecting: observedRevisionType), "Swift.Int")
+    }
+
+    func testReplacementCapableMinutesSaveRequiresObservedRevision() throws {
+        let repository = try MeetingRepository.inMemory()
+
+        let observedRevisionType = observedMinutesRevisionParameterType(
+            of: repository.saveGeneratedDetailedMinutes
+        )
+
+        XCTAssertEqual(String(reflecting: observedRevisionType), "Swift.Int")
+    }
+
+    func testConfirmedRepositoryRegenerationRejectsLaterEditAsStale() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let generated = GeneratedMeetingSummary(
+            suggestedTitle: "自动标题",
+            overview: "自动总结",
+            keyPoints: [],
+            decisions: [],
+            actionItems: [],
+            bookmarkInsights: []
+        )
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: generated,
+            model: "test-model"
+        )
+        let observedRevision = try repository.meeting(
+            id: meetingID
+        ).contentRevision
+        try repository.updateSummaryManually(
+            meetingID: meetingID,
+            value: GeneratedMeetingSummary(
+                suggestedTitle: "人工标题",
+                overview: "稍后的人工修改",
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            )
+        )
+
+        XCTAssertThrowsError(
+            try repository.saveGeneratedSummary(
+                meetingID: meetingID,
+                generated: generated,
+                model: "test-model",
+                observedMeetingContentRevision: observedRevision,
+                replacingManualEdits: true
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? MeetingDocumentRepositoryError,
+                .staleMeetingContentRevision(
+                    expected: observedRevision,
+                    actual: observedRevision + 1
+                )
+            )
+        }
+    }
+
     func testEditingSummaryMarksManualAndAdvancesMeetingRevision() throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(
@@ -3695,6 +3768,35 @@ private func writeLegacyMeetingStore(
         meeting.transcripts.append(transcript)
         try context.save()
     }
+}
+
+private func observedRevisionParameterType<Revision>(
+    of save: (
+        UUID,
+        GeneratedMeetingSummary,
+        String,
+        Revision,
+        Bool,
+        Date
+    ) throws -> Void
+) -> Revision.Type {
+    _ = save
+    return Revision.self
+}
+
+private func observedMinutesRevisionParameterType<Revision>(
+    of save: (
+        UUID,
+        GeneratedDetailedMinutes,
+        String,
+        Int,
+        Revision,
+        Bool,
+        Date
+    ) throws -> Void
+) -> Revision.Type {
+    _ = save
+    return Revision.self
 }
 
 private func makeDetailedMinutes(

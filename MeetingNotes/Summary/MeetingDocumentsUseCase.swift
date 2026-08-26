@@ -49,7 +49,6 @@ protocol MeetingDocumentArchiving: AnyObject {
 
 @MainActor
 protocol MeetingDocumentManaging: AnyObject {
-    func generate(meetingID: UUID, kind: MeetingDocumentKind) async throws
     func generate(
         meetingID: UUID,
         kind: MeetingDocumentKind,
@@ -72,11 +71,13 @@ protocol MeetingDocumentManaging: AnyObject {
 extension MeetingDocumentManaging {
     func generate(
         meetingID: UUID,
-        kind: MeetingDocumentKind,
-        replacingManualEdits: Bool
+        kind: MeetingDocumentKind
     ) async throws {
-        _ = replacingManualEdits
-        try await generate(meetingID: meetingID, kind: kind)
+        try await generate(
+            meetingID: meetingID,
+            kind: kind,
+            replacingManualEdits: false
+        )
     }
 
     func generate(

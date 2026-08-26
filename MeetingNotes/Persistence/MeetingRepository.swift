@@ -726,18 +726,35 @@ final class MeetingRepository {
         meetingID: UUID,
         generated: GeneratedMeetingSummary,
         model: String,
-        observedMeetingContentRevision: Int? = nil,
+        createdAt: Date = .now
+    ) throws {
+        let observedMeetingContentRevision = try meeting(
+            id: meetingID
+        ).contentRevision
+        try saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: generated,
+            model: model,
+            observedMeetingContentRevision: observedMeetingContentRevision,
+            replacingManualEdits: false,
+            createdAt: createdAt
+        )
+    }
+
+    func saveGeneratedSummary(
+        meetingID: UUID,
+        generated: GeneratedMeetingSummary,
+        model: String,
+        observedMeetingContentRevision: Int,
         replacingManualEdits: Bool = false,
         createdAt: Date = .now
     ) throws {
         let meeting = try meeting(id: meetingID)
         let actualContentRevision = meeting.contentRevision
-        let expectedContentRevision = observedMeetingContentRevision
-            ?? actualContentRevision
-        guard expectedContentRevision == actualContentRevision else {
+        guard observedMeetingContentRevision == actualContentRevision else {
             throw MeetingDocumentRepositoryError
                 .staleMeetingContentRevision(
-                    expected: expectedContentRevision,
+                    expected: observedMeetingContentRevision,
                     actual: actualContentRevision
                 )
         }
@@ -812,18 +829,37 @@ final class MeetingRepository {
         generated: GeneratedDetailedMinutes,
         model: String,
         promptVersion: Int,
-        observedMeetingContentRevision: Int? = nil,
+        createdAt: Date = .now
+    ) throws {
+        let observedMeetingContentRevision = try meeting(
+            id: meetingID
+        ).contentRevision
+        try saveGeneratedDetailedMinutes(
+            meetingID: meetingID,
+            generated: generated,
+            model: model,
+            promptVersion: promptVersion,
+            observedMeetingContentRevision: observedMeetingContentRevision,
+            replacingManualEdits: false,
+            createdAt: createdAt
+        )
+    }
+
+    func saveGeneratedDetailedMinutes(
+        meetingID: UUID,
+        generated: GeneratedDetailedMinutes,
+        model: String,
+        promptVersion: Int,
+        observedMeetingContentRevision: Int,
         replacingManualEdits: Bool = false,
         createdAt: Date = .now
     ) throws {
         let meeting = try meeting(id: meetingID)
         let actualContentRevision = meeting.contentRevision
-        let expectedContentRevision = observedMeetingContentRevision
-            ?? actualContentRevision
-        guard expectedContentRevision == actualContentRevision else {
+        guard observedMeetingContentRevision == actualContentRevision else {
             throw MeetingDocumentRepositoryError
                 .staleMeetingContentRevision(
-                    expected: expectedContentRevision,
+                    expected: observedMeetingContentRevision,
                     actual: actualContentRevision
                 )
         }

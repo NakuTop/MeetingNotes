@@ -141,6 +141,20 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         XCTAssertEqual(meeting.state, .summaryReady)
     }
 
+    func testExistentialManagerReceivesExplicitReplacementIntent()
+        async throws {
+        let spy = ReplacementIntentDocumentManagerSpy()
+        let manager: any MeetingDocumentManaging = spy
+
+        try await manager.generate(
+            meetingID: UUID(),
+            kind: .summary,
+            replacingManualEdits: true
+        )
+
+        XCTAssertEqual(spy.receivedReplacingManualEdits, true)
+    }
+
     func testOperationCallbackReportsGenerationThenAutomaticArchive()
         async throws {
         let fixture = try makeFixture()
@@ -1024,6 +1038,30 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         actionItems: [ActionItem(task: "落实 A", owner: "小王", dueDate: nil)],
         openQuestions: ["预算待确认"]
     )
+}
+
+@MainActor
+private final class ReplacementIntentDocumentManagerSpy:
+    MeetingDocumentManaging {
+    private(set) var receivedReplacingManualEdits: Bool?
+
+    func generate(
+        meetingID: UUID,
+        kind: MeetingDocumentKind,
+        replacingManualEdits: Bool
+    ) async throws {
+        _ = meetingID
+        _ = kind
+        receivedReplacingManualEdits = replacingManualEdits
+    }
+
+    func retryArchive(
+        meetingID: UUID,
+        kind: MeetingDocumentKind
+    ) async throws {
+        _ = meetingID
+        _ = kind
+    }
 }
 
 @MainActor

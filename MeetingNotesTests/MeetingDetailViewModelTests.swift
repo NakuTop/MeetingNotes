@@ -1335,8 +1335,13 @@ private final class DetailDocumentManagerSpy: MeetingDocumentManaging {
     private(set) var generatedKinds: [MeetingDocumentKind] = []
     private(set) var retriedKinds: [MeetingDocumentKind] = []
 
-    func generate(meetingID: UUID, kind: MeetingDocumentKind) async throws {
+    func generate(
+        meetingID: UUID,
+        kind: MeetingDocumentKind,
+        replacingManualEdits: Bool
+    ) async throws {
         _ = meetingID
+        _ = replacingManualEdits
         generatedKinds.append(kind)
     }
 
@@ -1355,9 +1360,14 @@ private final class BlockingDetailDocumentManager: MeetingDocumentManaging {
     private var startWaiters: [CheckedContinuation<Void, Never>] = []
     private var finishContinuation: CheckedContinuation<Void, Never>?
 
-    func generate(meetingID: UUID, kind: MeetingDocumentKind) async throws {
+    func generate(
+        meetingID: UUID,
+        kind: MeetingDocumentKind,
+        replacingManualEdits: Bool
+    ) async throws {
         _ = meetingID
         _ = kind
+        _ = replacingManualEdits
         started = true
         startWaiters.forEach { $0.resume() }
         startWaiters.removeAll()
@@ -1397,9 +1407,14 @@ private final class CapturedKindDetailDocumentManager:
     private var beginArchiveContinuation: CheckedContinuation<Void, Never>?
     private var failContinuation: CheckedContinuation<Void, Never>?
 
-    func generate(meetingID: UUID, kind: MeetingDocumentKind) async throws {
+    func generate(
+        meetingID: UUID,
+        kind: MeetingDocumentKind,
+        replacingManualEdits: Bool
+    ) async throws {
         _ = meetingID
         _ = kind
+        _ = replacingManualEdits
     }
 
     func generate(
