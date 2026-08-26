@@ -504,7 +504,11 @@ Modify the existing summary and minutes rendering in place. Replace each
 read-only value with `InlineEditableMeetingText` while preserving the existing
 card/material, headings, typography, spacing, wrapping, disclosure behavior,
 structure, and list order. Cover overview, key points, decisions, action
-tasks/owners, bookmark insights, minutes sections, and open questions.
+tasks/owners, minutes sections, and open questions where those values already
+appear in the original detail view. Do not expose a previously hidden field or
+add a new section solely to make it editable; bookmark-insight persistence and
+replacement support remains available in the domain layer without a new Task 6
+surface.
 
 Do not add a separate editor view, boxed form, persistent add/remove controls,
 or general rich-text editor. There is no visual transition into an edit mode.
