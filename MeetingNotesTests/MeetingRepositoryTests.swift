@@ -4083,6 +4083,162 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertNil(meeting.speakerProcessingErrorCode)
         XCTAssertEqual(meeting.updatedAt, priorUpdatedAt)
     }
+
+    func testPersistenceFailureRollsBackEveryExactReplacementTarget() throws {
+        let failure = RepositorySaveFailureSwitch()
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                if failure.shouldFail {
+                    throw InjectedRepositorySaveError.forced
+                }
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 5_000)
+        )
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 1,
+                        endTime: 2,
+                        text: "旧名未修正"
+                    ),
+                    speakerID: "room-1",
+                    source: .room
+                ),
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 3,
+                        endTime: 4,
+                        text: "旧名已修正底稿"
+                    ),
+                    speakerID: "room-2",
+                    source: .room
+                )
+            ],
+            sourceRevision: 1
+        )
+        let transcripts = try repository.transcripts(meetingID: meetingID)
+        let correctedTranscript = try XCTUnwrap(transcripts.last)
+        try repository.saveTranscriptCorrection(
+            meetingID: meetingID,
+            transcriptIDs: [correctedTranscript.id],
+            anchorStartTime: correctedTranscript.startTime,
+            anchorEndTime: correctedTranscript.endTime,
+            source: correctedTranscript.source,
+            originalText: correctedTranscript.text,
+            replacementText: "人工旧名",
+            now: Date(timeIntervalSince1970: 5_010)
+        )
+        try repository.setSpeakerDisplayName(
+            meetingID: meetingID,
+            speakerID: "room-1",
+            displayName: "旧名",
+            now: Date(timeIntervalSince1970: 5_020)
+        )
+        try repository.saveSummary(
+            meetingID: meetingID,
+            overview: "旧名总结",
+            keyPoints: ["旧名重点"],
+            decisions: ["旧名决定"],
+            structuredActionItems: [
+                ActionItem(task: "旧名任务", owner: "旧名", dueDate: nil)
+            ],
+            bookmarkInsights: ["旧名书签"],
+            model: "test"
+        )
+        try repository.saveDetailedMinutes(
+            meetingID: meetingID,
+            generated: GeneratedDetailedMinutes(
+                overview: "旧名纪要",
+                sections: [
+                    DetailedMinutesSection(
+                        title: "旧名议题",
+                        timeRange: nil,
+                        speakers: ["旧名"],
+                        content: "旧名内容"
+                    )
+                ],
+                decisions: ["旧名决定"],
+                actionItems: [
+                    ActionItem(task: "旧名任务", owner: "旧名", dueDate: nil)
+                ],
+                openQuestions: ["旧名问题"]
+            ),
+            model: "test",
+            promptVersion: 1
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let correction = try XCTUnwrap(meeting.transcriptCorrections.first)
+        let speaker = try XCTUnwrap(meeting.speakerNames.first)
+        let summary = try XCTUnwrap(meeting.summary)
+        let minutes = try XCTUnwrap(meeting.detailedMinutes)
+        summary.archiveState = .archived
+        summary.archivedContentRevision = summary.contentRevision
+        summary.lastArchiveErrorCode = "summary-archive-error"
+        minutes.archiveState = .archived
+        minutes.archivedContentRevision = minutes.contentRevision
+        minutes.lastArchiveErrorCode = "minutes-archive-error"
+        meeting.notionSyncState = .synced
+        meeting.notionSyncedContentRevision = meeting.contentRevision
+        meeting.notionSyncErrorCode = "meeting-sync-error"
+        try repository.updateMeetingState(id: meetingID, state: .summaryReady)
+
+        let meetingRevisionBacking = meeting.contentRevisionBacking
+        let meetingUpdatedAt = meeting.updatedAt
+        let notionSyncStateRawValue = meeting.notionSyncStateRawValue
+        let notionSyncedContentRevision = meeting.notionSyncedContentRevision
+        let notionSyncErrorCode = meeting.notionSyncErrorCode
+        let correctionCount = meeting.transcriptCorrections.count
+        let correctionReplacementText = correction.replacementText
+        let correctionUpdatedAt = correction.updatedAt
+        let speakerDisplayName = speaker.displayName
+        let speakerUpdatedAt = speaker.updatedAt
+        let summarySnapshot = ExactReplacementSummaryTestSnapshot(summary)
+        let minutesSnapshot = ExactReplacementMinutesTestSnapshot(minutes)
+        let canonicalText = try repository.canonicalTranscripts(
+            meetingID: meetingID
+        ).map(\.text)
+
+        failure.shouldFail = true
+        XCTAssertThrowsError(
+            try MeetingExactReplacement(repository: repository).apply(
+                meetingID: meetingID,
+                old: "旧名",
+                new: "新名"
+            )
+        ) { error in
+            XCTAssertEqual(error as? InjectedRepositorySaveError, .forced)
+        }
+
+        XCTAssertEqual(meeting.contentRevisionBacking, meetingRevisionBacking)
+        XCTAssertEqual(meeting.updatedAt, meetingUpdatedAt)
+        XCTAssertEqual(meeting.notionSyncStateRawValue, notionSyncStateRawValue)
+        XCTAssertEqual(
+            meeting.notionSyncedContentRevision,
+            notionSyncedContentRevision
+        )
+        XCTAssertEqual(meeting.notionSyncErrorCode, notionSyncErrorCode)
+        XCTAssertEqual(meeting.transcriptCorrections.count, correctionCount)
+        XCTAssertEqual(correction.replacementText, correctionReplacementText)
+        XCTAssertEqual(correction.updatedAt, correctionUpdatedAt)
+        XCTAssertEqual(speaker.displayName, speakerDisplayName)
+        XCTAssertEqual(speaker.updatedAt, speakerUpdatedAt)
+        XCTAssertEqual(ExactReplacementSummaryTestSnapshot(summary), summarySnapshot)
+        XCTAssertEqual(ExactReplacementMinutesTestSnapshot(minutes), minutesSnapshot)
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID).map(\.text),
+            canonicalText
+        )
+        XCTAssertEqual(
+            try repository.transcripts(meetingID: meetingID).map(\.text),
+            ["旧名未修正", "旧名已修正底稿"]
+        )
+    }
 }
 
 @MainActor
@@ -4252,5 +4408,57 @@ private struct TranscriptMetadata: Equatable {
         sourceRevision = transcript.sourceRevision
         sourceRawValue = transcript.sourceRawValue
         sequenceIndex = transcript.sequenceIndex
+    }
+}
+
+private struct ExactReplacementSummaryTestSnapshot: Equatable {
+    let overview: String
+    let keyPointsData: Data
+    let decisionsData: Data
+    let actionItemsData: Data
+    let bookmarkInsightsData: Data
+    let contentRevisionBacking: Int?
+    let archiveStateRawValue: String?
+    let archivedContentRevision: Int?
+    let lastArchiveErrorCode: String?
+    let isManuallyEditedBacking: Bool?
+
+    init(_ summary: SummaryRecord) {
+        overview = summary.overview
+        keyPointsData = summary.keyPointsData
+        decisionsData = summary.decisionsData
+        actionItemsData = summary.actionItemsData
+        bookmarkInsightsData = summary.bookmarkInsightsData
+        contentRevisionBacking = summary.contentRevisionBacking
+        archiveStateRawValue = summary.archiveStateRawValue
+        archivedContentRevision = summary.archivedContentRevision
+        lastArchiveErrorCode = summary.lastArchiveErrorCode
+        isManuallyEditedBacking = summary.isManuallyEditedBacking
+    }
+}
+
+private struct ExactReplacementMinutesTestSnapshot: Equatable {
+    let overview: String
+    let sectionsData: Data
+    let decisionsData: Data
+    let actionItemsData: Data
+    let openQuestionsData: Data
+    let contentRevisionBacking: Int?
+    let archiveStateRawValue: String?
+    let archivedContentRevision: Int?
+    let lastArchiveErrorCode: String?
+    let isManuallyEditedBacking: Bool?
+
+    init(_ minutes: DetailedMinutesRecord) {
+        overview = minutes.overview
+        sectionsData = minutes.sectionsData
+        decisionsData = minutes.decisionsData
+        actionItemsData = minutes.actionItemsData
+        openQuestionsData = minutes.openQuestionsData
+        contentRevisionBacking = minutes.contentRevisionBacking
+        archiveStateRawValue = minutes.archiveStateRawValue
+        archivedContentRevision = minutes.archivedContentRevision
+        lastArchiveErrorCode = minutes.lastArchiveErrorCode
+        isManuallyEditedBacking = minutes.isManuallyEditedBacking
     }
 }

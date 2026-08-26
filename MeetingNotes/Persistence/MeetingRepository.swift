@@ -226,6 +226,411 @@ final class MeetingRepository {
         )
     }
 
+    func previewExactReplacement(
+        meetingID: UUID,
+        old: String,
+        new: String
+    ) throws -> MeetingExactReplacementPreview {
+        try MeetingExactTextReplacement.validate(old: old, new: new)
+        let meeting = try meeting(id: meetingID)
+        return try exactReplacementPlan(
+            meeting: meeting,
+            old: old,
+            new: new
+        ).preview
+    }
+
+    func applyExactReplacement(
+        meetingID: UUID,
+        old: String,
+        new: String,
+        now: Date = .now
+    ) throws -> MeetingExactReplacementPreview {
+        try MeetingExactTextReplacement.validate(old: old, new: new)
+        let meeting = try meeting(id: meetingID)
+        let plan = try exactReplacementPlan(
+            meeting: meeting,
+            old: old,
+            new: new
+        )
+        guard plan.preview.totalMatches > 0 else {
+            return plan.preview
+        }
+
+        let nextSummaryRevision = try plan.summary.map {
+            try MeetingDocumentRevision.next(after: $0.record.contentRevision)
+        }
+        let nextMinutesRevision = try plan.detailedMinutes.map {
+            try MeetingDocumentRevision.next(after: $0.record.contentRevision)
+        }
+        let encodedMinutes = try plan.detailedMinutes.map {
+            try detailedMinutesEncoder($0.value)
+        }
+        let summaryData = try plan.summary.map {
+            try ExactSummaryReplacementData($0.value)
+        }
+
+        let previousMeetingUpdatedAt = meeting.updatedAt
+        let contentSnapshot = try beginContentMutation(for: meeting)
+        let correctionSnapshots = plan.transcripts.compactMap {
+            $0.correction.map(ExactTranscriptCorrectionSnapshot.init)
+        }
+        let speakerSnapshots = plan.speakers.map {
+            SpeakerNameSnapshot($0.record)
+        }
+        let summarySnapshot = plan.summary.map {
+            SummarySnapshot($0.record)
+        }
+        let minutesSnapshot = plan.detailedMinutes.map {
+            DetailedMinutesSnapshot($0.record)
+        }
+        var insertedCorrections: [TranscriptCorrectionRecord] = []
+
+        for replacement in plan.transcripts {
+            if let correction = replacement.correction {
+                correction.replacementText = replacement.replacementText
+                correction.updatedAt = now
+            } else {
+                let entry = replacement.entry
+                let correction = TranscriptCorrectionRecord(
+                    anchorStartTime: entry.startTime,
+                    anchorEndTime: entry.endTime,
+                    source: entry.source,
+                    originalText: entry.text,
+                    replacementText: replacement.replacementText,
+                    transcriptIDs: entry.transcriptIDs,
+                    createdAt: now,
+                    updatedAt: now,
+                    meeting: meeting
+                )
+                context.insert(correction)
+                meeting.transcriptCorrections.append(correction)
+                insertedCorrections.append(correction)
+            }
+        }
+        for replacement in plan.speakers {
+            replacement.record.displayName = replacement.displayName
+            replacement.record.updatedAt = now
+        }
+        if let replacement = plan.summary,
+           let summaryData,
+           let nextSummaryRevision {
+            let summary = replacement.record
+            summary.overview = replacement.value.overview
+            summary.keyPointsData = summaryData.keyPoints
+            summary.decisionsData = summaryData.decisions
+            summary.actionItemsData = summaryData.actionItems
+            summary.bookmarkInsightsData = summaryData.bookmarkInsights
+            summary.contentRevision = nextSummaryRevision
+            summary.isManuallyEdited = true
+            summary.archiveState = .localOnly
+            summary.archivedContentRevision = nil
+            summary.lastArchiveErrorCode = nil
+        }
+        if let replacement = plan.detailedMinutes,
+           let encodedMinutes,
+           let nextMinutesRevision {
+            let minutes = replacement.record
+            minutes.overview = replacement.value.overview
+            minutes.sectionsData = encodedMinutes.sections
+            minutes.decisionsData = encodedMinutes.decisions
+            minutes.actionItemsData = encodedMinutes.actionItems
+            minutes.openQuestionsData = encodedMinutes.openQuestions
+            minutes.contentRevision = nextMinutesRevision
+            minutes.isManuallyEdited = true
+            minutes.archiveState = .localOnly
+            minutes.archivedContentRevision = nil
+            minutes.lastArchiveErrorCode = nil
+        }
+        meeting.updatedAt = now
+
+        do {
+            try saveContext()
+        } catch {
+            for (replacement, snapshot) in zip(
+                plan.transcripts.compactMap(\.correction),
+                correctionSnapshots
+            ) {
+                snapshot.restore(replacement)
+            }
+            for correction in insertedCorrections {
+                meeting.transcriptCorrections.removeAll { $0 === correction }
+                context.delete(correction)
+            }
+            for (replacement, snapshot) in zip(plan.speakers, speakerSnapshots) {
+                snapshot.restore(replacement.record)
+            }
+            if let summary = plan.summary?.record, let summarySnapshot {
+                summarySnapshot.restore(summary)
+            }
+            if let minutes = plan.detailedMinutes?.record, let minutesSnapshot {
+                minutesSnapshot.restore(minutes)
+            }
+            meeting.updatedAt = previousMeetingUpdatedAt
+            contentSnapshot.restore(meeting)
+            throw error
+        }
+        return plan.preview
+    }
+
+    private func exactReplacementPlan(
+        meeting: MeetingRecord,
+        old: String,
+        new: String
+    ) throws -> ExactMeetingReplacementPlan {
+        let canonicalTranscripts = TranscriptCorrectionResolver.resolve(
+            transcripts: meeting.transcripts,
+            corrections: meeting.transcriptCorrections
+        )
+        var transcriptMatches = 0
+        var transcriptReplacements: [ExactTranscriptReplacement] = []
+        for entry in canonicalTranscripts {
+            let result = MeetingExactTextReplacement.replacing(
+                entry.text,
+                old: old,
+                new: new
+            )
+            transcriptMatches = MeetingExactTextReplacement.saturatingAdd(
+                transcriptMatches,
+                result.matches
+            )
+            guard result.matches > 0 else { continue }
+            transcriptReplacements.append(
+                ExactTranscriptReplacement(
+                    entry: entry,
+                    correction: entry.isManuallyEdited
+                        ? meeting.transcriptCorrections.first {
+                            $0.id == entry.id
+                        }
+                        : nil,
+                    replacementText: result.value
+                )
+            )
+        }
+
+        var speakerMatches = 0
+        var speakerReplacements: [ExactSpeakerReplacement] = []
+        for record in meeting.speakerNames {
+            let result = MeetingExactTextReplacement.replacing(
+                record.displayName,
+                old: old,
+                new: new
+            )
+            speakerMatches = MeetingExactTextReplacement.saturatingAdd(
+                speakerMatches,
+                result.matches
+            )
+            guard result.matches > 0 else { continue }
+            speakerReplacements.append(
+                ExactSpeakerReplacement(
+                    record: record,
+                    displayName: result.value
+                )
+            )
+        }
+
+        let summaryReplacement = meeting.summary.flatMap {
+            exactSummaryReplacement(record: $0, old: old, new: new)
+        }
+        let minutesReplacement = try meeting.detailedMinutes.flatMap {
+            try exactDetailedMinutesReplacement(
+                record: $0,
+                old: old,
+                new: new
+            )
+        }
+        let preview = MeetingExactReplacementPreview(
+            transcriptMatches: transcriptMatches,
+            speakerMatches: speakerMatches,
+            summaryMatches: summaryReplacement?.matches ?? 0,
+            detailedMinutesMatches: minutesReplacement?.matches ?? 0
+        )
+        return ExactMeetingReplacementPlan(
+            preview: preview,
+            transcripts: transcriptReplacements,
+            speakers: speakerReplacements,
+            summary: summaryReplacement,
+            detailedMinutes: minutesReplacement
+        )
+    }
+
+    private func exactSummaryReplacement(
+        record: SummaryRecord,
+        old: String,
+        new: String
+    ) -> ExactSummaryReplacement? {
+        var matches = 0
+        let overview = exactReplacement(
+            record.overview,
+            old: old,
+            new: new,
+            matches: &matches
+        )
+        let keyPoints = exactReplacements(
+            record.keyPoints,
+            old: old,
+            new: new,
+            matches: &matches
+        )
+        let decisions = exactReplacements(
+            record.decisions,
+            old: old,
+            new: new,
+            matches: &matches
+        )
+        let actionItems = record.actionItemRecords.map { item in
+            ActionItem(
+                task: exactReplacement(
+                    item.task,
+                    old: old,
+                    new: new,
+                    matches: &matches
+                ),
+                owner: item.owner.map {
+                    exactReplacement(
+                        $0,
+                        old: old,
+                        new: new,
+                        matches: &matches
+                    )
+                },
+                dueDate: item.dueDate
+            )
+        }
+        let bookmarkInsights = exactReplacements(
+            record.bookmarkInsights,
+            old: old,
+            new: new,
+            matches: &matches
+        )
+        guard matches > 0 else { return nil }
+        return ExactSummaryReplacement(
+            record: record,
+            value: ExactSummaryValue(
+                overview: overview,
+                keyPoints: keyPoints,
+                decisions: decisions,
+                actionItems: actionItems,
+                bookmarkInsights: bookmarkInsights
+            ),
+            matches: matches
+        )
+    }
+
+    private func exactDetailedMinutesReplacement(
+        record: DetailedMinutesRecord,
+        old: String,
+        new: String
+    ) throws -> ExactDetailedMinutesReplacement? {
+        var matches = 0
+        let overview = exactReplacement(
+            record.overview,
+            old: old,
+            new: new,
+            matches: &matches
+        )
+        let sections = try record.sections.map { section in
+            DetailedMinutesSection(
+                title: exactReplacement(
+                    section.title,
+                    old: old,
+                    new: new,
+                    matches: &matches
+                ),
+                timeRange: section.timeRange,
+                speakers: exactReplacements(
+                    section.speakers,
+                    old: old,
+                    new: new,
+                    matches: &matches
+                ),
+                content: exactReplacement(
+                    section.content,
+                    old: old,
+                    new: new,
+                    matches: &matches
+                )
+            )
+        }
+        let decisions = try exactReplacements(
+            record.decisions,
+            old: old,
+            new: new,
+            matches: &matches
+        )
+        let actionItems = try record.actionItems.map { item in
+            ActionItem(
+                task: exactReplacement(
+                    item.task,
+                    old: old,
+                    new: new,
+                    matches: &matches
+                ),
+                owner: item.owner.map {
+                    exactReplacement(
+                        $0,
+                        old: old,
+                        new: new,
+                        matches: &matches
+                    )
+                },
+                dueDate: item.dueDate
+            )
+        }
+        let openQuestions = try exactReplacements(
+            record.openQuestions,
+            old: old,
+            new: new,
+            matches: &matches
+        )
+        guard matches > 0 else { return nil }
+        return ExactDetailedMinutesReplacement(
+            record: record,
+            value: GeneratedDetailedMinutes(
+                overview: overview,
+                sections: sections,
+                decisions: decisions,
+                actionItems: actionItems,
+                openQuestions: openQuestions
+            ),
+            matches: matches
+        )
+    }
+
+    private func exactReplacements(
+        _ values: [String],
+        old: String,
+        new: String,
+        matches: inout Int
+    ) -> [String] {
+        values.map {
+            exactReplacement(
+                $0,
+                old: old,
+                new: new,
+                matches: &matches
+            )
+        }
+    }
+
+    private func exactReplacement(
+        _ value: String,
+        old: String,
+        new: String,
+        matches: inout Int
+    ) -> String {
+        let result = MeetingExactTextReplacement.replacing(
+            value,
+            old: old,
+            new: new
+        )
+        matches = MeetingExactTextReplacement.saturatingAdd(
+            matches,
+            result.matches
+        )
+        return result.value
+    }
+
     private func meeting(
         id: UUID,
         in modelContext: ModelContext
@@ -1955,6 +2360,75 @@ private struct TranscriptCorrectionRebind {
         correction.anchorStartTime = anchorStartTime
         correction.anchorEndTime = anchorEndTime
         correction.sourceRawValue = sourceRawValue
+    }
+}
+
+private struct ExactMeetingReplacementPlan {
+    let preview: MeetingExactReplacementPreview
+    let transcripts: [ExactTranscriptReplacement]
+    let speakers: [ExactSpeakerReplacement]
+    let summary: ExactSummaryReplacement?
+    let detailedMinutes: ExactDetailedMinutesReplacement?
+}
+
+private struct ExactTranscriptReplacement {
+    let entry: CanonicalTranscriptEntry
+    let correction: TranscriptCorrectionRecord?
+    let replacementText: String
+}
+
+private struct ExactSpeakerReplacement {
+    let record: SpeakerNameRecord
+    let displayName: String
+}
+
+private struct ExactSummaryReplacement {
+    let record: SummaryRecord
+    let value: ExactSummaryValue
+    let matches: Int
+}
+
+private struct ExactSummaryValue {
+    let overview: String
+    let keyPoints: [String]
+    let decisions: [String]
+    let actionItems: [ActionItem]
+    let bookmarkInsights: [String]
+}
+
+private struct ExactSummaryReplacementData {
+    let keyPoints: Data
+    let decisions: Data
+    let actionItems: Data
+    let bookmarkInsights: Data
+
+    init(_ value: ExactSummaryValue) throws {
+        let encoder = JSONEncoder()
+        keyPoints = try encoder.encode(value.keyPoints)
+        decisions = try encoder.encode(value.decisions)
+        actionItems = try encoder.encode(value.actionItems)
+        bookmarkInsights = try encoder.encode(value.bookmarkInsights)
+    }
+}
+
+private struct ExactDetailedMinutesReplacement {
+    let record: DetailedMinutesRecord
+    let value: GeneratedDetailedMinutes
+    let matches: Int
+}
+
+private struct ExactTranscriptCorrectionSnapshot {
+    let replacementText: String
+    let updatedAt: Date
+
+    init(_ correction: TranscriptCorrectionRecord) {
+        replacementText = correction.replacementText
+        updatedAt = correction.updatedAt
+    }
+
+    func restore(_ correction: TranscriptCorrectionRecord) {
+        correction.replacementText = replacementText
+        correction.updatedAt = updatedAt
     }
 }
 
