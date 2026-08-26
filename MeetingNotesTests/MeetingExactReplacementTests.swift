@@ -17,15 +17,14 @@ final class MeetingExactReplacementTests: XCTestCase {
             new: "新名"
         )
 
-        XCTAssertEqual(
-            preview,
-            MeetingExactReplacementPreview(
-                transcriptMatches: 4,
-                speakerMatches: 2,
-                summaryMatches: 10,
-                detailedMinutesMatches: 11
-            )
-        )
+        XCTAssertEqual(preview.meetingID, fixture.meetingID)
+        XCTAssertEqual(preview.observedContentRevision, revisionBeforePreview)
+        XCTAssertEqual(preview.searchText, "旧名")
+        XCTAssertEqual(preview.replacementText, "新名")
+        XCTAssertEqual(preview.transcriptMatches, 4)
+        XCTAssertEqual(preview.speakerMatches, 2)
+        XCTAssertEqual(preview.summaryMatches, 10)
+        XCTAssertEqual(preview.detailedMinutesMatches, 11)
         XCTAssertEqual(preview.totalMatches, 27)
         XCTAssertEqual(meeting.contentRevision, revisionBeforePreview)
         XCTAssertEqual(meeting.updatedAt, updatedAtBeforePreview)
@@ -44,13 +43,14 @@ final class MeetingExactReplacementTests: XCTestCase {
         let minutesRevision = minutes.contentRevision
         let syncedRevision = meeting.notionSyncedContentRevision
 
-        let applied = try operation.apply(
+        let preview = try operation.preview(
             meetingID: fixture.meetingID,
             old: "旧名",
             new: "新名"
         )
+        let applied = try operation.apply(preview)
 
-        XCTAssertEqual(applied.totalMatches, 27)
+        XCTAssertEqual(applied, preview)
         XCTAssertEqual(
             try fixture.repository.canonicalTranscripts(
                 meetingID: fixture.meetingID
@@ -175,11 +175,13 @@ final class MeetingExactReplacementTests: XCTestCase {
         let otherRevision = other.contentRevision
         let otherUpdatedAt = other.updatedAt
 
-        _ = try MeetingExactReplacement(repository: repository).apply(
+        let operation = MeetingExactReplacement(repository: repository)
+        let preview = try operation.preview(
             meetingID: target.meetingID,
             old: "旧名",
             new: "新名"
         )
+        _ = try operation.apply(preview)
 
         XCTAssertEqual(
             try repository.canonicalTranscripts(meetingID: otherID).map(\.text),
@@ -202,13 +204,13 @@ final class MeetingExactReplacementTests: XCTestCase {
         let minutesRevision = minutes.contentRevision
         let correctionCount = meeting.transcriptCorrections.count
 
-        let result = try MeetingExactReplacement(
-            repository: fixture.repository
-        ).apply(
+        let operation = MeetingExactReplacement(repository: fixture.repository)
+        let preview = try operation.preview(
             meetingID: fixture.meetingID,
             old: "不存在",
             new: "也不存在"
         )
+        let result = try operation.apply(preview)
 
         XCTAssertEqual(result.totalMatches, 0)
         XCTAssertEqual(meeting.contentRevision, meetingRevision)
@@ -275,11 +277,13 @@ final class MeetingExactReplacementTests: XCTestCase {
             ["旧名原始行", "另一行的人工修正"]
         )
 
-        _ = try MeetingExactReplacement(repository: repository).apply(
+        let operation = MeetingExactReplacement(repository: repository)
+        let preview = try operation.preview(
             meetingID: meetingID,
             old: "旧名",
             new: "新名"
         )
+        _ = try operation.apply(preview)
 
         XCTAssertEqual(
             try repository.canonicalTranscripts(meetingID: meetingID).map(\.text),
@@ -290,6 +294,229 @@ final class MeetingExactReplacementTests: XCTestCase {
             collidingCorrection.replacementText,
             "另一行的人工修正"
         )
+    }
+
+    func testConfirmedPreviewRejectsLaterMeetingRevisionWithoutMutation()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 4_000)
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 1,
+            end: 2,
+            text: "旧名第一段"
+        )
+        let operation = MeetingExactReplacement(repository: repository)
+        let confirmedPreview = try operation.preview(
+            meetingID: meetingID,
+            old: "旧名",
+            new: "新名"
+        )
+        let confirmedRevision = confirmedPreview.observedContentRevision
+
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 3,
+            end: 4,
+            text: "旧名第二段"
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let revisionAfterMutation = meeting.contentRevision
+        let updatedAtAfterMutation = meeting.updatedAt
+
+        XCTAssertThrowsError(try operation.apply(confirmedPreview)) { error in
+            XCTAssertEqual(
+                error as? MeetingExactReplacementError,
+                .stalePreview(
+                    expectedContentRevision: confirmedRevision,
+                    actualContentRevision: revisionAfterMutation
+                )
+            )
+        }
+
+        XCTAssertEqual(meeting.contentRevision, revisionAfterMutation)
+        XCTAssertEqual(meeting.updatedAt, updatedAtAfterMutation)
+        XCTAssertTrue(meeting.transcriptCorrections.isEmpty)
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID).map(\.text),
+            ["旧名第一段", "旧名第二段"]
+        )
+        let refreshed = try operation.preview(
+            meetingID: meetingID,
+            old: "旧名",
+            new: "新名"
+        )
+        XCTAssertEqual(refreshed.observedContentRevision, revisionAfterMutation)
+        XCTAssertEqual(refreshed.transcriptMatches, 2)
+    }
+
+    func testWhitespaceSpeakerResultIsRejectedWithoutMutation() throws {
+        let fixture = try makeSpeakerFixture(displayName: "旧名")
+        let meeting = try fixture.repository.meeting(id: fixture.meetingID)
+        let revision = meeting.contentRevision
+        let updatedAt = meeting.updatedAt
+
+        XCTAssertThrowsError(
+            try MeetingExactReplacement(repository: fixture.repository).preview(
+                meetingID: fixture.meetingID,
+                old: "旧名",
+                new: "  \n "
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SpeakerNameRepositoryError,
+                .invalidDisplayName
+            )
+        }
+
+        XCTAssertEqual(meeting.speakerDisplayNames, ["room-1": "旧名"])
+        XCTAssertEqual(meeting.contentRevision, revision)
+        XCTAssertEqual(meeting.updatedAt, updatedAt)
+        XCTAssertEqual(meeting.notionSyncState, .synced)
+    }
+
+    func testOverlongSpeakerResultIsRejectedAtomically() throws {
+        let fixture = try makeSpeakerFixture(displayName: "旧名")
+        let meeting = try fixture.repository.meeting(id: fixture.meetingID)
+        let revision = meeting.contentRevision
+        let updatedAt = meeting.updatedAt
+        let replacement = String(repeating: "新", count: 41)
+
+        XCTAssertThrowsError(
+            try MeetingExactReplacement(repository: fixture.repository).preview(
+                meetingID: fixture.meetingID,
+                old: "旧名",
+                new: replacement
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SpeakerNameRepositoryError,
+                .invalidDisplayName
+            )
+        }
+
+        XCTAssertEqual(meeting.speakerDisplayNames, ["room-1": "旧名"])
+        XCTAssertEqual(meeting.contentRevision, revision)
+        XCTAssertEqual(meeting.updatedAt, updatedAt)
+        XCTAssertEqual(meeting.notionSyncState, .synced)
+        XCTAssertTrue(meeting.transcriptCorrections.isEmpty)
+    }
+
+    func testValidSpeakerResultUsesExistingNormalizationRule() throws {
+        let fixture = try makeSpeakerFixture(displayName: "旧名")
+        let meeting = try fixture.repository.meeting(id: fixture.meetingID)
+        let revision = meeting.contentRevision
+        let operation = MeetingExactReplacement(repository: fixture.repository)
+
+        let preview = try operation.preview(
+            meetingID: fixture.meetingID,
+            old: "旧名",
+            new: "  新名  "
+        )
+        let applied = try operation.apply(preview)
+
+        XCTAssertEqual(preview.speakerMatches, 1)
+        XCTAssertEqual(preview.totalMatches, 1)
+        XCTAssertEqual(applied, preview)
+        XCTAssertEqual(meeting.speakerDisplayNames, ["room-1": "新名"])
+        XCTAssertEqual(meeting.contentRevision, revision + 1)
+        XCTAssertEqual(meeting.notionSyncState, .localOnly)
+    }
+
+    func testOverviewOnlyReplacementPreservesUnknownStructuredData() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 6_000)
+        )
+        try repository.saveSummary(
+            meetingID: meetingID,
+            overview: "旧名概览",
+            keyPoints: ["原重点"],
+            decisions: [],
+            actionItems: [String](),
+            bookmarkInsights: [],
+            model: "test"
+        )
+        try repository.saveDetailedMinutes(
+            meetingID: meetingID,
+            generated: GeneratedDetailedMinutes(
+                overview: "无匹配纪要",
+                sections: [],
+                decisions: [],
+                actionItems: [],
+                openQuestions: []
+            ),
+            model: "test",
+            promptVersion: 1
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let summary = try XCTUnwrap(meeting.summary)
+        let minutes = try XCTUnwrap(meeting.detailedMinutes)
+        let unknownSummaryData = Data("future-summary-v2".utf8)
+        let unknownMinutesData = Data("future-minutes-v2".utf8)
+        summary.keyPointsData = unknownSummaryData
+        minutes.sectionsData = unknownMinutesData
+        try repository.updateMeetingState(id: meetingID, state: .summaryReady)
+        let minutesRevision = minutes.contentRevision
+
+        let operation = MeetingExactReplacement(repository: repository)
+        let preview = try operation.preview(
+            meetingID: meetingID,
+            old: "旧名",
+            new: "新名"
+        )
+        _ = try operation.apply(preview)
+
+        XCTAssertEqual(summary.overview, "新名概览")
+        XCTAssertEqual(summary.keyPointsData, unknownSummaryData)
+        XCTAssertEqual(minutes.sectionsData, unknownMinutesData)
+        XCTAssertEqual(minutes.contentRevision, minutesRevision)
+        XCTAssertFalse(minutes.isManuallyEdited)
+    }
+
+    func testMatchedMalformedStructuredFieldRejectsWithoutMutation() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 7_000)
+        )
+        try repository.saveSummary(
+            meetingID: meetingID,
+            overview: "概览",
+            keyPoints: ["原重点"],
+            decisions: [],
+            actionItems: [String](),
+            bookmarkInsights: [],
+            model: "test"
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let summary = try XCTUnwrap(meeting.summary)
+        let malformedData = Data("[\"旧名\"".utf8)
+        summary.keyPointsData = malformedData
+        try repository.updateMeetingState(id: meetingID, state: .summaryReady)
+        let revision = meeting.contentRevision
+        let updatedAt = meeting.updatedAt
+
+        XCTAssertThrowsError(
+            try MeetingExactReplacement(repository: repository).preview(
+                meetingID: meetingID,
+                old: "旧名",
+                new: "新名"
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? MeetingExactReplacementError,
+                .invalidStructuredField("summary.keyPoints")
+            )
+        }
+
+        XCTAssertEqual(summary.keyPointsData, malformedData)
+        XCTAssertEqual(meeting.contentRevision, revision)
+        XCTAssertEqual(meeting.updatedAt, updatedAt)
     }
 
     func testRejectsEmptySearchAndIdenticalReplacement() throws {
@@ -309,7 +536,7 @@ final class MeetingExactReplacementTests: XCTestCase {
             )
         }
         XCTAssertThrowsError(
-            try operation.apply(
+            try operation.preview(
                 meetingID: fixture.meetingID,
                 old: "旧名",
                 new: "旧名"
@@ -320,6 +547,40 @@ final class MeetingExactReplacementTests: XCTestCase {
                 .identicalSearchAndReplacement
             )
         }
+    }
+
+    private func makeSpeakerFixture(
+        displayName: String
+    ) throws -> ExactReplacementFixture {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 5_000)
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 1,
+            end: 2,
+            text: "普通发言",
+            speakerID: "room-1"
+        )
+        try repository.setSpeakerDisplayName(
+            meetingID: meetingID,
+            speakerID: "room-1",
+            displayName: displayName
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        meeting.notionSyncState = .synced
+        meeting.notionSyncedContentRevision = meeting.contentRevision
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        return ExactReplacementFixture(
+            repository: repository,
+            meetingID: meetingID,
+            uncorrectedTranscriptID: try XCTUnwrap(
+                meeting.transcripts.first?.id
+            ),
+            existingCorrectionID: UUID()
+        )
     }
 
     private func makeFixture(

@@ -4203,14 +4203,16 @@ final class MeetingRepositoryTests: XCTestCase {
         let canonicalText = try repository.canonicalTranscripts(
             meetingID: meetingID
         ).map(\.text)
+        let operation = MeetingExactReplacement(repository: repository)
+        let preview = try operation.preview(
+            meetingID: meetingID,
+            old: "旧名",
+            new: "新名"
+        )
 
         failure.shouldFail = true
         XCTAssertThrowsError(
-            try MeetingExactReplacement(repository: repository).apply(
-                meetingID: meetingID,
-                old: "旧名",
-                new: "新名"
-            )
+            try operation.apply(preview)
         ) { error in
             XCTAssertEqual(error as? InjectedRepositorySaveError, .forced)
         }

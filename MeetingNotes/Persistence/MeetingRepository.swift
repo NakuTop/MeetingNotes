@@ -241,18 +241,34 @@ final class MeetingRepository {
     }
 
     func applyExactReplacement(
-        meetingID: UUID,
-        old: String,
-        new: String,
+        _ confirmedPreview: MeetingExactReplacementPreview,
         now: Date = .now
     ) throws -> MeetingExactReplacementPreview {
-        try MeetingExactTextReplacement.validate(old: old, new: new)
-        let meeting = try meeting(id: meetingID)
+        try MeetingExactTextReplacement.validate(
+            old: confirmedPreview.searchText,
+            new: confirmedPreview.replacementText
+        )
+        let meeting = try meeting(id: confirmedPreview.meetingID)
+        guard meeting.contentRevision
+            == confirmedPreview.observedContentRevision else {
+            throw MeetingExactReplacementError.stalePreview(
+                expectedContentRevision:
+                    confirmedPreview.observedContentRevision,
+                actualContentRevision: meeting.contentRevision
+            )
+        }
         let plan = try exactReplacementPlan(
             meeting: meeting,
-            old: old,
-            new: new
+            old: confirmedPreview.searchText,
+            new: confirmedPreview.replacementText
         )
+        guard plan.preview == confirmedPreview else {
+            throw MeetingExactReplacementError.stalePreview(
+                expectedContentRevision:
+                    confirmedPreview.observedContentRevision,
+                actualContentRevision: meeting.contentRevision
+            )
+        }
         guard plan.preview.totalMatches > 0 else {
             return plan.preview
         }
@@ -262,12 +278,6 @@ final class MeetingRepository {
         }
         let nextMinutesRevision = try plan.detailedMinutes.map {
             try MeetingDocumentRevision.next(after: $0.record.contentRevision)
-        }
-        let encodedMinutes = try plan.detailedMinutes.map {
-            try detailedMinutesEncoder($0.value)
-        }
-        let summaryData = try plan.summary.map {
-            try ExactSummaryReplacementData($0.value)
         }
 
         let previousMeetingUpdatedAt = meeting.updatedAt
@@ -313,14 +323,23 @@ final class MeetingRepository {
             replacement.record.updatedAt = now
         }
         if let replacement = plan.summary,
-           let summaryData,
            let nextSummaryRevision {
             let summary = replacement.record
-            summary.overview = replacement.value.overview
-            summary.keyPointsData = summaryData.keyPoints
-            summary.decisionsData = summaryData.decisions
-            summary.actionItemsData = summaryData.actionItems
-            summary.bookmarkInsightsData = summaryData.bookmarkInsights
+            if let overview = replacement.overview {
+                summary.overview = overview
+            }
+            if let keyPointsData = replacement.keyPointsData {
+                summary.keyPointsData = keyPointsData
+            }
+            if let decisionsData = replacement.decisionsData {
+                summary.decisionsData = decisionsData
+            }
+            if let actionItemsData = replacement.actionItemsData {
+                summary.actionItemsData = actionItemsData
+            }
+            if let bookmarkInsightsData = replacement.bookmarkInsightsData {
+                summary.bookmarkInsightsData = bookmarkInsightsData
+            }
             summary.contentRevision = nextSummaryRevision
             summary.isManuallyEdited = true
             summary.archiveState = .localOnly
@@ -328,14 +347,23 @@ final class MeetingRepository {
             summary.lastArchiveErrorCode = nil
         }
         if let replacement = plan.detailedMinutes,
-           let encodedMinutes,
            let nextMinutesRevision {
             let minutes = replacement.record
-            minutes.overview = replacement.value.overview
-            minutes.sectionsData = encodedMinutes.sections
-            minutes.decisionsData = encodedMinutes.decisions
-            minutes.actionItemsData = encodedMinutes.actionItems
-            minutes.openQuestionsData = encodedMinutes.openQuestions
+            if let overview = replacement.overview {
+                minutes.overview = overview
+            }
+            if let sectionsData = replacement.sectionsData {
+                minutes.sectionsData = sectionsData
+            }
+            if let decisionsData = replacement.decisionsData {
+                minutes.decisionsData = decisionsData
+            }
+            if let actionItemsData = replacement.actionItemsData {
+                minutes.actionItemsData = actionItemsData
+            }
+            if let openQuestionsData = replacement.openQuestionsData {
+                minutes.openQuestionsData = openQuestionsData
+            }
             minutes.contentRevision = nextMinutesRevision
             minutes.isManuallyEdited = true
             minutes.archiveState = .localOnly
@@ -382,6 +410,10 @@ final class MeetingRepository {
             transcripts: meeting.transcripts,
             corrections: meeting.transcriptCorrections
         )
+        let correctionsByID = Dictionary(
+            meeting.transcriptCorrections.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         var transcriptMatches = 0
         var transcriptReplacements: [ExactTranscriptReplacement] = []
         for entry in canonicalTranscripts {
@@ -399,9 +431,7 @@ final class MeetingRepository {
                 ExactTranscriptReplacement(
                     entry: entry,
                     correction: entry.isManuallyEdited
-                        ? meeting.transcriptCorrections.first {
-                            $0.id == entry.id
-                        }
+                        ? correctionsByID[entry.id]
                         : nil,
                     replacementText: result.value
                 )
@@ -421,16 +451,19 @@ final class MeetingRepository {
                 result.matches
             )
             guard result.matches > 0 else { continue }
+            let normalizedDisplayName = try Self.normalizedSpeakerDisplayName(
+                result.value
+            )
             speakerReplacements.append(
                 ExactSpeakerReplacement(
                     record: record,
-                    displayName: result.value
+                    displayName: normalizedDisplayName
                 )
             )
         }
 
-        let summaryReplacement = meeting.summary.flatMap {
-            exactSummaryReplacement(record: $0, old: old, new: new)
+        let summaryReplacement = try meeting.summary.flatMap {
+            try exactSummaryReplacement(record: $0, old: old, new: new)
         }
         let minutesReplacement = try meeting.detailedMinutes.flatMap {
             try exactDetailedMinutesReplacement(
@@ -440,6 +473,10 @@ final class MeetingRepository {
             )
         }
         let preview = MeetingExactReplacementPreview(
+            meetingID: meeting.id,
+            observedContentRevision: meeting.contentRevision,
+            searchText: old,
+            replacementText: new,
             transcriptMatches: transcriptMatches,
             speakerMatches: speakerMatches,
             summaryMatches: summaryReplacement?.matches ?? 0,
@@ -458,61 +495,77 @@ final class MeetingRepository {
         record: SummaryRecord,
         old: String,
         new: String
-    ) -> ExactSummaryReplacement? {
-        var matches = 0
-        let overview = exactReplacement(
+    ) throws -> ExactSummaryReplacement? {
+        let overviewResult = MeetingExactTextReplacement.replacing(
             record.overview,
             old: old,
-            new: new,
-            matches: &matches
+            new: new
         )
-        let keyPoints = exactReplacements(
-            record.keyPoints,
+        let keyPoints = try exactEncodedReplacement(
+            record.keyPointsData,
+            as: [String].self,
+            field: "summary.keyPoints",
             old: old,
-            new: new,
-            matches: &matches
-        )
-        let decisions = exactReplacements(
-            record.decisions,
-            old: old,
-            new: new,
-            matches: &matches
-        )
-        let actionItems = record.actionItemRecords.map { item in
-            ActionItem(
-                task: exactReplacement(
-                    item.task,
-                    old: old,
-                    new: new,
-                    matches: &matches
-                ),
-                owner: item.owner.map {
-                    exactReplacement(
-                        $0,
-                        old: old,
-                        new: new,
-                        matches: &matches
-                    )
-                },
-                dueDate: item.dueDate
+            new: new
+        ) { values, matches in
+            exactReplacements(
+                values,
+                old: old,
+                new: new,
+                matches: &matches
             )
         }
-        let bookmarkInsights = exactReplacements(
-            record.bookmarkInsights,
+        let decisions = try exactEncodedReplacement(
+            record.decisionsData,
+            as: [String].self,
+            field: "summary.decisions",
             old: old,
-            new: new,
-            matches: &matches
+            new: new
+        ) { values, matches in
+            exactReplacements(
+                values,
+                old: old,
+                new: new,
+                matches: &matches
+            )
+        }
+        let actionItems = try exactSummaryActionItemsReplacement(
+            record.actionItemsData,
+            field: "summary.actionItems",
+            old: old,
+            new: new
         )
+        let bookmarkInsights = try exactEncodedReplacement(
+            record.bookmarkInsightsData,
+            as: [String].self,
+            field: "summary.bookmarkInsights",
+            old: old,
+            new: new
+        ) { values, matches in
+            exactReplacements(
+                values,
+                old: old,
+                new: new,
+                matches: &matches
+            )
+        }
+        let matches = [
+            overviewResult.matches,
+            keyPoints.matches,
+            decisions.matches,
+            actionItems.matches,
+            bookmarkInsights.matches
+        ].reduce(0, MeetingExactTextReplacement.saturatingAdd)
         guard matches > 0 else { return nil }
         return ExactSummaryReplacement(
             record: record,
-            value: ExactSummaryValue(
-                overview: overview,
-                keyPoints: keyPoints,
-                decisions: decisions,
-                actionItems: actionItems,
-                bookmarkInsights: bookmarkInsights
-            ),
+            overview: overviewResult.matches > 0
+                ? overviewResult.value
+                : nil,
+            keyPointsData: keyPoints.data,
+            decisionsData: decisions.data,
+            actionItemsData: actionItems.data,
+            bookmarkInsightsData: bookmarkInsights.data,
             matches: matches
         )
     }
@@ -522,43 +575,264 @@ final class MeetingRepository {
         old: String,
         new: String
     ) throws -> ExactDetailedMinutesReplacement? {
-        var matches = 0
-        let overview = exactReplacement(
+        let overviewResult = MeetingExactTextReplacement.replacing(
             record.overview,
             old: old,
-            new: new,
-            matches: &matches
+            new: new
         )
-        let sections = try record.sections.map { section in
-            DetailedMinutesSection(
-                title: exactReplacement(
-                    section.title,
-                    old: old,
-                    new: new,
-                    matches: &matches
-                ),
-                timeRange: section.timeRange,
-                speakers: exactReplacements(
-                    section.speakers,
-                    old: old,
-                    new: new,
-                    matches: &matches
-                ),
-                content: exactReplacement(
-                    section.content,
-                    old: old,
-                    new: new,
-                    matches: &matches
+        let sections = try exactEncodedReplacement(
+            record.sectionsData,
+            as: [DetailedMinutesSection].self,
+            field: "detailedMinutes.sections",
+            old: old,
+            new: new
+        ) { sections, matches in
+            sections.map { section in
+                DetailedMinutesSection(
+                    title: exactReplacement(
+                        section.title,
+                        old: old,
+                        new: new,
+                        matches: &matches
+                    ),
+                    timeRange: section.timeRange,
+                    speakers: exactReplacements(
+                        section.speakers,
+                        old: old,
+                        new: new,
+                        matches: &matches
+                    ),
+                    content: exactReplacement(
+                        section.content,
+                        old: old,
+                        new: new,
+                        matches: &matches
+                    )
                 )
+            }
+        }
+        let decisions = try exactEncodedReplacement(
+            record.decisionsData,
+            as: [String].self,
+            field: "detailedMinutes.decisions",
+            old: old,
+            new: new
+        ) { values, matches in
+            exactReplacements(
+                values,
+                old: old,
+                new: new,
+                matches: &matches
             )
         }
-        let decisions = try exactReplacements(
-            record.decisions,
+        let actionItems = try exactEncodedReplacement(
+            record.actionItemsData,
+            as: [ActionItem].self,
+            field: "detailedMinutes.actionItems",
             old: old,
-            new: new,
-            matches: &matches
+            new: new
+        ) { items, matches in
+            exactActionItemReplacements(
+                items,
+                old: old,
+                new: new,
+                matches: &matches
+            )
+        }
+        let openQuestions = try exactEncodedReplacement(
+            record.openQuestionsData,
+            as: [String].self,
+            field: "detailedMinutes.openQuestions",
+            old: old,
+            new: new
+        ) { values, matches in
+            exactReplacements(
+                values,
+                old: old,
+                new: new,
+                matches: &matches
+            )
+        }
+        let matches = [
+            overviewResult.matches,
+            sections.matches,
+            decisions.matches,
+            actionItems.matches,
+            openQuestions.matches
+        ].reduce(0, MeetingExactTextReplacement.saturatingAdd)
+        guard matches > 0 else { return nil }
+        return ExactDetailedMinutesReplacement(
+            record: record,
+            overview: overviewResult.matches > 0
+                ? overviewResult.value
+                : nil,
+            sectionsData: sections.data,
+            decisionsData: decisions.data,
+            actionItemsData: actionItems.data,
+            openQuestionsData: openQuestions.data,
+            matches: matches
         )
-        let actionItems = try record.actionItems.map { item in
+    }
+
+    private func exactSummaryActionItemsReplacement(
+        _ data: Data,
+        field: String,
+        old: String,
+        new: String
+    ) throws -> ExactStructuredDataReplacement {
+        let candidateMatches = try structuredStringMatchCount(
+            in: data,
+            old: old,
+            field: field
+        )
+        guard candidateMatches > 0 else {
+            return ExactStructuredDataReplacement(data: nil, matches: 0)
+        }
+
+        let decoder = JSONDecoder()
+        if let values = try? decoder.decode([ActionItem].self, from: data) {
+            var matches = 0
+            let replacements = exactActionItemReplacements(
+                values,
+                old: old,
+                new: new,
+                matches: &matches
+            )
+            return try encodedStructuredReplacement(
+                replacements,
+                matches: matches,
+                field: field
+            )
+        }
+        if let values = try? decoder.decode([String].self, from: data) {
+            var matches = 0
+            let replacements = exactReplacements(
+                values,
+                old: old,
+                new: new,
+                matches: &matches
+            )
+            return try encodedStructuredReplacement(
+                replacements,
+                matches: matches,
+                field: field
+            )
+        }
+        throw MeetingExactReplacementError.invalidStructuredField(field)
+    }
+
+    private func exactEncodedReplacement<Value: Codable>(
+        _ data: Data,
+        as type: Value.Type,
+        field: String,
+        old: String,
+        new: String,
+        transform: (Value, inout Int) -> Value
+    ) throws -> ExactStructuredDataReplacement {
+        let candidateMatches = try structuredStringMatchCount(
+            in: data,
+            old: old,
+            field: field
+        )
+        guard candidateMatches > 0 else {
+            return ExactStructuredDataReplacement(data: nil, matches: 0)
+        }
+
+        let decoded: Value
+        do {
+            decoded = try JSONDecoder().decode(type, from: data)
+        } catch {
+            throw MeetingExactReplacementError.invalidStructuredField(field)
+        }
+        var matches = 0
+        let replacement = transform(decoded, &matches)
+        return try encodedStructuredReplacement(
+            replacement,
+            matches: matches,
+            field: field
+        )
+    }
+
+    private func encodedStructuredReplacement<Value: Encodable>(
+        _ value: Value,
+        matches: Int,
+        field: String
+    ) throws -> ExactStructuredDataReplacement {
+        guard matches > 0 else {
+            return ExactStructuredDataReplacement(data: nil, matches: 0)
+        }
+        do {
+            return ExactStructuredDataReplacement(
+                data: try JSONEncoder().encode(value),
+                matches: matches
+            )
+        } catch {
+            throw MeetingExactReplacementError.invalidStructuredField(field)
+        }
+    }
+
+    private func structuredStringMatchCount(
+        in data: Data,
+        old: String,
+        field: String
+    ) throws -> Int {
+        do {
+            let value = try JSONSerialization.jsonObject(
+                with: data,
+                options: [.fragmentsAllowed]
+            )
+            return structuredStringMatchCount(in: value, old: old)
+        } catch {
+            let rawValue = String(decoding: data, as: UTF8.self)
+            let rawMatches = MeetingExactTextReplacement.replacing(
+                rawValue,
+                old: old,
+                new: old
+            ).matches
+            guard rawMatches == 0 else {
+                throw MeetingExactReplacementError.invalidStructuredField(field)
+            }
+            return 0
+        }
+    }
+
+    private func structuredStringMatchCount(
+        in value: Any,
+        old: String
+    ) -> Int {
+        if let string = value as? String {
+            return MeetingExactTextReplacement.replacing(
+                string,
+                old: old,
+                new: old
+            ).matches
+        }
+        if let values = value as? [Any] {
+            return values.reduce(0) { count, value in
+                MeetingExactTextReplacement.saturatingAdd(
+                    count,
+                    structuredStringMatchCount(in: value, old: old)
+                )
+            }
+        }
+        if let values = value as? [String: Any] {
+            return values.values.reduce(0) { count, value in
+                MeetingExactTextReplacement.saturatingAdd(
+                    count,
+                    structuredStringMatchCount(in: value, old: old)
+                )
+            }
+        }
+        return 0
+    }
+
+    private func exactActionItemReplacements(
+        _ values: [ActionItem],
+        old: String,
+        new: String,
+        matches: inout Int
+    ) -> [ActionItem] {
+        values.map { item in
             ActionItem(
                 task: exactReplacement(
                     item.task,
@@ -577,24 +851,6 @@ final class MeetingRepository {
                 dueDate: item.dueDate
             )
         }
-        let openQuestions = try exactReplacements(
-            record.openQuestions,
-            old: old,
-            new: new,
-            matches: &matches
-        )
-        guard matches > 0 else { return nil }
-        return ExactDetailedMinutesReplacement(
-            record: record,
-            value: GeneratedDetailedMinutes(
-                overview: overview,
-                sections: sections,
-                decisions: decisions,
-                actionItems: actionItems,
-                openQuestions: openQuestions
-            ),
-            matches: matches
-        )
     }
 
     private func exactReplacements(
@@ -764,11 +1020,7 @@ final class MeetingRepository {
         displayName: String,
         now: Date = .now
     ) throws {
-        guard let normalizedName = AppSettingsStore.normalizedSpeakerNames(
-            [displayName]
-        ).first else {
-            throw SpeakerNameRepositoryError.invalidDisplayName
-        }
+        let normalizedName = try Self.normalizedSpeakerDisplayName(displayName)
 
         let meeting = try meeting(id: meetingID)
         let matchingTranscripts = meeting.transcripts.filter {
@@ -830,6 +1082,17 @@ final class MeetingRepository {
                 throw error
             }
         }
+    }
+
+    private static func normalizedSpeakerDisplayName(
+        _ displayName: String
+    ) throws -> String {
+        guard let normalizedName = AppSettingsStore.normalizedSpeakerNames(
+            [displayName]
+        ).first else {
+            throw SpeakerNameRepositoryError.invalidDisplayName
+        }
+        return normalizedName
     }
 
     func clearSpeakerDisplayName(
@@ -2384,36 +2647,26 @@ private struct ExactSpeakerReplacement {
 
 private struct ExactSummaryReplacement {
     let record: SummaryRecord
-    let value: ExactSummaryValue
+    let overview: String?
+    let keyPointsData: Data?
+    let decisionsData: Data?
+    let actionItemsData: Data?
+    let bookmarkInsightsData: Data?
     let matches: Int
-}
-
-private struct ExactSummaryValue {
-    let overview: String
-    let keyPoints: [String]
-    let decisions: [String]
-    let actionItems: [ActionItem]
-    let bookmarkInsights: [String]
-}
-
-private struct ExactSummaryReplacementData {
-    let keyPoints: Data
-    let decisions: Data
-    let actionItems: Data
-    let bookmarkInsights: Data
-
-    init(_ value: ExactSummaryValue) throws {
-        let encoder = JSONEncoder()
-        keyPoints = try encoder.encode(value.keyPoints)
-        decisions = try encoder.encode(value.decisions)
-        actionItems = try encoder.encode(value.actionItems)
-        bookmarkInsights = try encoder.encode(value.bookmarkInsights)
-    }
 }
 
 private struct ExactDetailedMinutesReplacement {
     let record: DetailedMinutesRecord
-    let value: GeneratedDetailedMinutes
+    let overview: String?
+    let sectionsData: Data?
+    let decisionsData: Data?
+    let actionItemsData: Data?
+    let openQuestionsData: Data?
+    let matches: Int
+}
+
+private struct ExactStructuredDataReplacement {
+    let data: Data?
     let matches: Int
 }
 

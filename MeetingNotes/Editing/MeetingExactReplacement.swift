@@ -3,9 +3,18 @@ import Foundation
 enum MeetingExactReplacementError: Error, Equatable, Sendable {
     case emptySearchText
     case identicalSearchAndReplacement
+    case stalePreview(
+        expectedContentRevision: Int,
+        actualContentRevision: Int
+    )
+    case invalidStructuredField(String)
 }
 
 struct MeetingExactReplacementPreview: Equatable, Sendable {
+    let meetingID: UUID
+    let observedContentRevision: Int
+    let searchText: String
+    let replacementText: String
     let transcriptMatches: Int
     let speakerMatches: Int
     let summaryMatches: Int
@@ -47,14 +56,10 @@ final class MeetingExactReplacement {
     }
 
     func apply(
-        meetingID: UUID,
-        old: String,
-        new: String
+        _ confirmedPreview: MeetingExactReplacementPreview
     ) throws -> MeetingExactReplacementPreview {
         try repository.applyExactReplacement(
-            meetingID: meetingID,
-            old: old,
-            new: new
+            confirmedPreview
         )
     }
 }
