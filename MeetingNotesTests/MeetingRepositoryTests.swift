@@ -4,6 +4,202 @@ import SwiftData
 
 @MainActor
 final class MeetingRepositoryTests: XCTestCase {
+    func testUpdatingCorrectionByIDPreservesReboundTargetAndMarksContentDirty()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 10,
+                        endTime: 12,
+                        text: "旧生成文字"
+                    ),
+                    speakerID: "room-old",
+                    source: .room
+                )
+            ],
+            sourceRevision: 1
+        )
+        let oldTranscriptID = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first?.id
+        )
+        try repository.saveTranscriptCorrection(
+            meetingID: meetingID,
+            transcriptIDs: [oldTranscriptID],
+            anchorStartTime: 10,
+            anchorEndTime: 12,
+            source: .room,
+            originalText: "旧生成文字",
+            replacementText: "旧人工文字"
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let correction = try XCTUnwrap(meeting.transcriptCorrections.first)
+        let correctionID = correction.id
+
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 9.75,
+                        endTime: 12.25,
+                        text: "最终生成文字"
+                    ),
+                    speakerID: "room-new",
+                    source: .room
+                )
+            ],
+            sourceRevision: 2
+        )
+        let reboundTranscriptID = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first?.id
+        )
+        meeting.notionSyncState = .synced
+        meeting.notionSyncErrorCode = "old-sync-error"
+        try repository.updateMeetingState(id: meetingID, state: meeting.state)
+        let revisionBeforeUpdate = meeting.contentRevision
+        let updateTime = Date(timeIntervalSince1970: 1_100)
+
+        try repository.updateTranscriptCorrection(
+            meetingID: meetingID,
+            correctionID: correctionID,
+            replacementText: "最新人工文字",
+            now: updateTime
+        )
+
+        XCTAssertEqual(meeting.transcriptCorrections.count, 1)
+        XCTAssertEqual(correction.id, correctionID)
+        XCTAssertEqual(correction.replacementText, "最新人工文字")
+        XCTAssertEqual(correction.updatedAt, updateTime)
+        XCTAssertEqual(correction.transcriptIDs, [reboundTranscriptID])
+        XCTAssertEqual(correction.anchorStartTime, 9.75, accuracy: 0.001)
+        XCTAssertEqual(correction.anchorEndTime, 12.25, accuracy: 0.001)
+        XCTAssertEqual(correction.source, .room)
+        XCTAssertEqual(meeting.contentRevision, revisionBeforeUpdate + 1)
+        XCTAssertEqual(meeting.notionSyncState, .localOnly)
+        XCTAssertNil(meeting.notionSyncErrorCode)
+        XCTAssertEqual(meeting.updatedAt, updateTime)
+    }
+
+    func testUpdatingCorrectionByIDValidatesMeetingOwnership() throws {
+        let repository = try MeetingRepository.inMemory()
+        let ownerMeetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 2_000)
+        )
+        let otherMeetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 2_100)
+        )
+        try repository.appendTranscript(
+            meetingID: ownerMeetingID,
+            start: 1,
+            end: 2,
+            text: "生成文字"
+        )
+        let transcriptID = try XCTUnwrap(
+            repository.transcripts(meetingID: ownerMeetingID).first?.id
+        )
+        try repository.saveTranscriptCorrection(
+            meetingID: ownerMeetingID,
+            transcriptIDs: [transcriptID],
+            anchorStartTime: 1,
+            anchorEndTime: 2,
+            source: .mixed,
+            originalText: "生成文字",
+            replacementText: "原人工文字"
+        )
+        let ownerMeeting = try repository.meeting(id: ownerMeetingID)
+        let correction = try XCTUnwrap(ownerMeeting.transcriptCorrections.first)
+        let otherMeeting = try repository.meeting(id: otherMeetingID)
+        let otherRevision = otherMeeting.contentRevision
+
+        XCTAssertThrowsError(
+            try repository.updateTranscriptCorrection(
+                meetingID: otherMeetingID,
+                correctionID: correction.id,
+                replacementText: "不应写入"
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? TranscriptCorrectionRepositoryError,
+                .correctionNotFound(correction.id)
+            )
+        }
+
+        XCTAssertEqual(correction.replacementText, "原人工文字")
+        XCTAssertTrue(otherMeeting.transcriptCorrections.isEmpty)
+        XCTAssertEqual(otherMeeting.contentRevision, otherRevision)
+    }
+
+    func testUpdatingCorrectionByIDRollsBackOnSaveFailure() throws {
+        let failure = RepositorySaveFailureSwitch()
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                if failure.shouldFail {
+                    throw InjectedRepositorySaveError.forced
+                }
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 3_000)
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 1,
+            end: 2,
+            text: "生成文字"
+        )
+        let transcriptID = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first?.id
+        )
+        try repository.saveTranscriptCorrection(
+            meetingID: meetingID,
+            transcriptIDs: [transcriptID],
+            anchorStartTime: 1,
+            anchorEndTime: 2,
+            source: .mixed,
+            originalText: "生成文字",
+            replacementText: "原人工文字",
+            now: Date(timeIntervalSince1970: 3_010)
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let correction = try XCTUnwrap(meeting.transcriptCorrections.first)
+        meeting.notionSyncState = .synced
+        meeting.notionSyncErrorCode = "existing-sync-error"
+        try repository.updateMeetingState(id: meetingID, state: meeting.state)
+        let priorRevision = meeting.contentRevision
+        let priorUpdatedAt = meeting.updatedAt
+        let priorCorrectionUpdatedAt = correction.updatedAt
+
+        failure.shouldFail = true
+        XCTAssertThrowsError(
+            try repository.updateTranscriptCorrection(
+                meetingID: meetingID,
+                correctionID: correction.id,
+                replacementText: "不应保留的新文字",
+                now: Date(timeIntervalSince1970: 3_020)
+            )
+        ) { error in
+            XCTAssertEqual(error as? InjectedRepositorySaveError, .forced)
+        }
+
+        XCTAssertEqual(correction.replacementText, "原人工文字")
+        XCTAssertEqual(correction.updatedAt, priorCorrectionUpdatedAt)
+        XCTAssertEqual(meeting.contentRevision, priorRevision)
+        XCTAssertEqual(meeting.updatedAt, priorUpdatedAt)
+        XCTAssertEqual(meeting.notionSyncState, .synced)
+        XCTAssertEqual(meeting.notionSyncErrorCode, "existing-sync-error")
+    }
+
     func testIdenticalTranscriptCorrectionDoesNotDirtyMeeting() throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(

@@ -191,7 +191,7 @@ final class MeetingEditAutosaverTests: XCTestCase {
 }
 
 @MainActor
-private final class ControlledMeetingEditDelay {
+final class ControlledMeetingEditDelay {
     private(set) var durations: [Duration] = []
     private var pending: [Int: CheckedContinuation<Void, any Error>] = [:]
     private var callCountWaiters: [
@@ -242,7 +242,7 @@ private final class MeetingEditAutosaverFailureSwitch {
     var shouldFail = true
 }
 
-private final class MeetingEditAutosaverCompletionBarrier:
+final class MeetingEditAutosaverCompletionBarrier:
     @unchecked Sendable {
     private enum TerminalResult {
         case completed

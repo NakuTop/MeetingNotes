@@ -45,6 +45,8 @@ enum MeetingDetailPrimaryAction: Equatable, Sendable {
 }
 
 struct MeetingTranscriptEditTarget: Equatable, Sendable {
+    let canonicalEntryID: UUID
+    let correctionID: UUID?
     let transcriptIDs: [UUID]
     let anchorStartTime: TimeInterval
     let anchorEndTime: TimeInterval
@@ -52,12 +54,16 @@ struct MeetingTranscriptEditTarget: Equatable, Sendable {
     let originalText: String
 
     init(
+        canonicalEntryID: UUID,
+        correctionID: UUID?,
         transcriptIDs: [UUID],
         anchorStartTime: TimeInterval,
         anchorEndTime: TimeInterval,
         source: TranscriptAudioSource,
         originalText: String
     ) {
+        self.canonicalEntryID = canonicalEntryID
+        self.correctionID = correctionID
         self.transcriptIDs = transcriptIDs
         self.anchorStartTime = anchorStartTime
         self.anchorEndTime = anchorEndTime
@@ -67,12 +73,27 @@ struct MeetingTranscriptEditTarget: Equatable, Sendable {
 
     init(entry: CanonicalTranscriptEntry) {
         self.init(
+            canonicalEntryID: entry.id,
+            correctionID: entry.isManuallyEdited ? entry.id : nil,
             transcriptIDs: entry.transcriptIDs,
             anchorStartTime: entry.startTime,
             anchorEndTime: entry.endTime,
             source: entry.source,
             originalText: entry.text
         )
+    }
+
+    func hasSameDraftIdentity(
+        as other: MeetingTranscriptEditTarget
+    ) -> Bool {
+        switch (correctionID, other.correctionID) {
+        case let (lhs?, rhs?):
+            lhs == rhs
+        case (nil, nil):
+            canonicalEntryID == other.canonicalEntryID
+        case (_?, nil), (nil, _?):
+            false
+        }
     }
 }
 
@@ -391,7 +412,9 @@ final class MeetingDetailViewModel {
     func transcriptDraftText(
         for target: MeetingTranscriptEditTarget
     ) -> String {
-        pendingTranscriptDrafts.first { $0.draft.target == target }?
+        pendingTranscriptDrafts.first {
+            $0.draft.target.hasSameDraftIdentity(as: target)
+        }?
             .draft.text ?? target.originalText
     }
 
@@ -411,10 +434,10 @@ final class MeetingDetailViewModel {
     ) {
         if text == target.originalText {
             pendingTranscriptDrafts.removeAll {
-                $0.draft.target == target
+                $0.draft.target.hasSameDraftIdentity(as: target)
             }
         } else if let index = pendingTranscriptDrafts.firstIndex(where: {
-            $0.draft.target == target
+            $0.draft.target.hasSameDraftIdentity(as: target)
         }) {
             pendingTranscriptDrafts[index] = PendingTranscriptDraft(
                 draft: MeetingTranscriptEditDraft(target: target, text: text),
@@ -569,6 +592,7 @@ final class MeetingDetailViewModel {
     func load() {
         do {
             meeting = try repository.meeting(id: meetingID)
+            reconcilePendingTranscriptDrafts()
             synchronizeCleanDocumentDrafts()
         } catch {
             meeting = nil
@@ -725,6 +749,47 @@ final class MeetingDetailViewModel {
         }
     }
 
+    private func reconcilePendingTranscriptDrafts() {
+        guard !pendingTranscriptDrafts.isEmpty,
+              let canonical = try? repository.canonicalTranscripts(
+                  meetingID: meetingID
+              ) else {
+            return
+        }
+
+        for index in pendingTranscriptDrafts.indices {
+            let pending = pendingTranscriptDrafts[index]
+            let target = pending.draft.target
+            let currentEntry: CanonicalTranscriptEntry?
+            if let correctionID = target.correctionID {
+                currentEntry = canonical.first {
+                    $0.isManuallyEdited && $0.id == correctionID
+                }
+            } else if let exact = canonical.first(where: {
+                !$0.isManuallyEdited && $0.id == target.canonicalEntryID
+            }) {
+                currentEntry = exact
+            } else {
+                currentEntry = try? repository
+                    .reconciledTranscriptCorrectionTarget(
+                        meetingID: meetingID,
+                        transcriptIDs: target.transcriptIDs,
+                        anchorStartTime: target.anchorStartTime,
+                        anchorEndTime: target.anchorEndTime,
+                        source: target.source
+                    )
+            }
+            guard let currentEntry else { continue }
+            pendingTranscriptDrafts[index] = PendingTranscriptDraft(
+                draft: MeetingTranscriptEditDraft(
+                    target: MeetingTranscriptEditTarget(entry: currentEntry),
+                    text: pending.draft.text
+                ),
+                token: pending.token
+            )
+        }
+    }
+
     private func reschedulePendingEdits() {
         guard hasPendingEdits else {
             editAutosaver.cancel()
@@ -748,21 +813,29 @@ final class MeetingDetailViewModel {
         for snapshot in transcriptSnapshots {
             let target = snapshot.draft.target
             guard pendingTranscriptDrafts.contains(where: {
-                $0.draft.target == target && $0.token == snapshot.token
+                $0.token == snapshot.token
             }) else {
                 continue
             }
-            try repository.saveTranscriptCorrection(
-                meetingID: meetingID,
-                transcriptIDs: target.transcriptIDs,
-                anchorStartTime: target.anchorStartTime,
-                anchorEndTime: target.anchorEndTime,
-                source: target.source,
-                originalText: target.originalText,
-                replacementText: snapshot.draft.text
-            )
+            if let correctionID = target.correctionID {
+                try repository.updateTranscriptCorrection(
+                    meetingID: meetingID,
+                    correctionID: correctionID,
+                    replacementText: snapshot.draft.text
+                )
+            } else {
+                try repository.saveTranscriptCorrection(
+                    meetingID: meetingID,
+                    transcriptIDs: target.transcriptIDs,
+                    anchorStartTime: target.anchorStartTime,
+                    anchorEndTime: target.anchorEndTime,
+                    source: target.source,
+                    originalText: target.originalText,
+                    replacementText: snapshot.draft.text
+                )
+            }
             pendingTranscriptDrafts.removeAll {
-                $0.draft.target == target && $0.token == snapshot.token
+                $0.token == snapshot.token
             }
         }
 

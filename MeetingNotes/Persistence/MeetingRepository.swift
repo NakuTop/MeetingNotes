@@ -26,6 +26,10 @@ enum SpeakerNameRepositoryError: Error, Equatable, Sendable {
     case speakerNotFound(String)
 }
 
+enum TranscriptCorrectionRepositoryError: Error, Equatable, Sendable {
+    case correctionNotFound(UUID)
+}
+
 @MainActor
 final class MeetingRepository {
     private let container: ModelContainer
@@ -150,13 +154,29 @@ final class MeetingRepository {
         now: Date = .now
     ) throws {
         let meeting = try meeting(id: meetingID)
-        let targetIDs = Set(transcriptIDs)
+        let resolvedTarget = resolvedNewTranscriptCorrectionTarget(
+            meeting: meeting,
+            transcriptIDs: transcriptIDs,
+            anchorStartTime: anchorStartTime,
+            anchorEndTime: anchorEndTime,
+            source: source
+        )
+        let resolvedTranscriptIDs = resolvedTarget?.transcriptIDs
+            ?? transcriptIDs
+        let resolvedAnchorStartTime = resolvedTarget?.startTime
+            ?? anchorStartTime
+        let resolvedAnchorEndTime = resolvedTarget?.endTime
+            ?? anchorEndTime
+        let resolvedSource = resolvedTarget?.source ?? source
+        let targetIDs = Set(resolvedTranscriptIDs)
         if !targetIDs.isEmpty,
            let correction = meeting.transcriptCorrections.first(where: {
-               $0.source == source && Set($0.transcriptIDs) == targetIDs
+               $0.source == resolvedSource
+                   && Set($0.transcriptIDs) == targetIDs
            }) {
-            let isUnchanged = correction.anchorStartTime == anchorStartTime
-                && correction.anchorEndTime == anchorEndTime
+            let isUnchanged = correction.anchorStartTime
+                    == resolvedAnchorStartTime
+                && correction.anchorEndTime == resolvedAnchorEndTime
                 && correction.replacementText == replacementText
             guard !isUnchanged else {
                 return
@@ -168,10 +188,10 @@ final class MeetingRepository {
             let previousReplacementText = correction.replacementText
             let previousTranscriptIDs = correction.transcriptIDs
             let previousCorrectionUpdatedAt = correction.updatedAt
-            correction.anchorStartTime = anchorStartTime
-            correction.anchorEndTime = anchorEndTime
+            correction.anchorStartTime = resolvedAnchorStartTime
+            correction.anchorEndTime = resolvedAnchorEndTime
             correction.replacementText = replacementText
-            correction.transcriptIDs = transcriptIDs
+            correction.transcriptIDs = resolvedTranscriptIDs
             correction.updatedAt = now
             meeting.updatedAt = now
             do {
@@ -192,12 +212,12 @@ final class MeetingRepository {
         let previousUpdatedAt = meeting.updatedAt
         let contentSnapshot = try beginContentMutation(for: meeting)
         let correction = TranscriptCorrectionRecord(
-            anchorStartTime: anchorStartTime,
-            anchorEndTime: anchorEndTime,
-            source: source,
+            anchorStartTime: resolvedAnchorStartTime,
+            anchorEndTime: resolvedAnchorEndTime,
+            source: resolvedSource,
             originalText: originalText,
             replacementText: replacementText,
-            transcriptIDs: transcriptIDs,
+            transcriptIDs: resolvedTranscriptIDs,
             createdAt: now,
             updatedAt: now,
             meeting: meeting
@@ -216,6 +236,70 @@ final class MeetingRepository {
         }
     }
 
+    func updateTranscriptCorrection(
+        meetingID: UUID,
+        correctionID: UUID,
+        replacementText: String,
+        now: Date = .now
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+        guard let correction = meeting.transcriptCorrections.first(where: {
+            $0.id == correctionID
+        }) else {
+            throw TranscriptCorrectionRepositoryError.correctionNotFound(
+                correctionID
+            )
+        }
+        guard correction.replacementText != replacementText else { return }
+
+        let previousReplacementText = correction.replacementText
+        let previousCorrectionUpdatedAt = correction.updatedAt
+        let previousMeetingUpdatedAt = meeting.updatedAt
+        let contentSnapshot = try beginContentMutation(for: meeting)
+        correction.replacementText = replacementText
+        correction.updatedAt = now
+        meeting.updatedAt = now
+        do {
+            try saveContext()
+        } catch {
+            correction.replacementText = previousReplacementText
+            correction.updatedAt = previousCorrectionUpdatedAt
+            meeting.updatedAt = previousMeetingUpdatedAt
+            contentSnapshot.restore(meeting)
+            throw error
+        }
+    }
+
+    func reconciledTranscriptCorrectionTarget(
+        meetingID: UUID,
+        transcriptIDs: [UUID],
+        anchorStartTime: TimeInterval,
+        anchorEndTime: TimeInterval,
+        source: TranscriptAudioSource
+    ) throws -> CanonicalTranscriptEntry? {
+        let meeting = try meeting(id: meetingID)
+        guard let resolved = resolvedNewTranscriptCorrectionTarget(
+            meeting: meeting,
+            transcriptIDs: transcriptIDs,
+            anchorStartTime: anchorStartTime,
+            anchorEndTime: anchorEndTime,
+            source: source
+        ) else {
+            return nil
+        }
+        let resolvedIDs = Set(resolved.transcriptIDs)
+        let canonical = TranscriptCorrectionResolver.resolve(
+            transcripts: meeting.transcripts,
+            corrections: meeting.transcriptCorrections
+        )
+        let candidates = canonical.filter {
+            !$0.isManuallyEdited
+                && Set($0.transcriptIDs) == resolvedIDs
+        }
+        guard candidates.count == 1 else { return nil }
+        return candidates[0]
+    }
+
     func canonicalTranscripts(
         meetingID: UUID
     ) throws -> [CanonicalTranscriptEntry] {
@@ -224,6 +308,42 @@ final class MeetingRepository {
             transcripts: meeting.transcripts,
             corrections: meeting.transcriptCorrections
         )
+    }
+
+    private func resolvedNewTranscriptCorrectionTarget(
+        meeting: MeetingRecord,
+        transcriptIDs: [UUID],
+        anchorStartTime: TimeInterval,
+        anchorEndTime: TimeInterval,
+        source: TranscriptAudioSource
+    ) -> CanonicalTranscriptEntry? {
+        let currentTranscriptIDs = Set(meeting.transcripts.map(\.id))
+        guard !transcriptIDs.isEmpty,
+              !transcriptIDs.allSatisfy(currentTranscriptIDs.contains) else {
+            return nil
+        }
+        let probeID = UUID()
+        let probe = TranscriptCorrectionRecord(
+            id: probeID,
+            anchorStartTime: anchorStartTime,
+            anchorEndTime: anchorEndTime,
+            source: source,
+            originalText: "",
+            replacementText: "",
+            transcriptIDs: transcriptIDs
+        )
+        let resolved = TranscriptCorrectionResolver.resolve(
+            transcripts: meeting.transcripts,
+            corrections: meeting.transcriptCorrections + [probe]
+        )
+        guard let target = resolved.first(where: { $0.id == probeID }),
+              !target.transcriptIDs.isEmpty,
+              target.transcriptIDs.allSatisfy(
+                  currentTranscriptIDs.contains
+              ) else {
+            return nil
+        }
+        return target
     }
 
     func previewExactReplacement(

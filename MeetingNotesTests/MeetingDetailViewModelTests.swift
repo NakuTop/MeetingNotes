@@ -1358,6 +1358,317 @@ final class MeetingDetailViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.localSaveState, .saved)
     }
 
+    func testExistingCorrectionAutosaveKeepsReboundIdentityAfterFinalization()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 10,
+                        endTime: 12,
+                        text: "旧生成文字"
+                    ),
+                    speakerID: "room-old",
+                    source: .room
+                )
+            ],
+            sourceRevision: 1
+        )
+        let oldTranscriptID = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first?.id
+        )
+        try repository.saveTranscriptCorrection(
+            meetingID: meetingID,
+            transcriptIDs: [oldTranscriptID],
+            anchorStartTime: 10,
+            anchorEndTime: 12,
+            source: .room,
+            originalText: "旧生成文字",
+            replacementText: "第一次人工修正"
+        )
+        let initialEntry = try XCTUnwrap(
+            repository.canonicalTranscripts(meetingID: meetingID).first
+        )
+        let correctionID = initialEntry.id
+        let delay = ControlledMeetingEditDelay()
+        let completion = MeetingEditAutosaverCompletionBarrier()
+        let autosaver = MeetingEditAutosaver(
+            delay: { duration in
+                try await delay.suspend(for: duration)
+            },
+            onDelayedTaskCompletion: {
+                completion.signal()
+            }
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy(),
+            editAutosaver: autosaver
+        )
+
+        viewModel.updateTranscriptDraft("最新人工修正", for: initialEntry)
+        let initialDraft = try XCTUnwrap(viewModel.transcriptDrafts.first)
+        XCTAssertEqual(initialDraft.target.canonicalEntryID, correctionID)
+        XCTAssertEqual(initialDraft.target.correctionID, correctionID)
+        await delay.waitForCallCount(1)
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 9.75,
+                        endTime: 12.25,
+                        text: "最终生成文字"
+                    ),
+                    speakerID: "room-new",
+                    source: .room
+                )
+            ],
+            sourceRevision: 2
+        )
+        let newTranscriptID = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first?.id
+        )
+
+        await viewModel.flushEdits()
+        delay.release(call: 0)
+        try await completion.wait(for: 1)
+
+        let meeting = try repository.meeting(id: meetingID)
+        let correction = try XCTUnwrap(meeting.transcriptCorrections.first)
+        XCTAssertEqual(meeting.transcriptCorrections.count, 1)
+        XCTAssertEqual(correction.id, correctionID)
+        XCTAssertEqual(correction.replacementText, "最新人工修正")
+        XCTAssertEqual(correction.transcriptIDs, [newTranscriptID])
+        XCTAssertEqual(correction.anchorStartTime, 9.75, accuracy: 0.001)
+        XCTAssertEqual(correction.anchorEndTime, 12.25, accuracy: 0.001)
+        XCTAssertEqual(correction.source, .room)
+
+        let canonical = try repository.canonicalTranscripts(
+            meetingID: meetingID
+        )
+        let corrected = try XCTUnwrap(canonical.first)
+        XCTAssertEqual(canonical.count, 1)
+        XCTAssertEqual(corrected.id, correctionID)
+        XCTAssertEqual(corrected.text, "最新人工修正")
+        XCTAssertEqual(corrected.transcriptIDs, [newTranscriptID])
+        XCTAssertEqual(corrected.startTime, 9.75, accuracy: 0.001)
+        XCTAssertEqual(corrected.endTime, 12.25, accuracy: 0.001)
+        XCTAssertEqual(corrected.speakerID, "room-new")
+    }
+
+    func testFirstCorrectionAutosaveReattachesToUniqueFinalizedTranscript()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 20,
+                        endTime: 22,
+                        text: "实时生成文字"
+                    ),
+                    speakerID: "room-old",
+                    source: .room
+                )
+            ],
+            sourceRevision: 1
+        )
+        let initialEntry = try XCTUnwrap(
+            repository.canonicalTranscripts(meetingID: meetingID).first
+        )
+        XCTAssertFalse(initialEntry.isManuallyEdited)
+        let delay = ControlledMeetingEditDelay()
+        let completion = MeetingEditAutosaverCompletionBarrier()
+        let autosaver = MeetingEditAutosaver(
+            delay: { duration in
+                try await delay.suspend(for: duration)
+            },
+            onDelayedTaskCompletion: {
+                completion.signal()
+            }
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy(),
+            editAutosaver: autosaver
+        )
+
+        viewModel.updateTranscriptDraft("用户最新文字", for: initialEntry)
+        let initialDraft = try XCTUnwrap(viewModel.transcriptDrafts.first)
+        XCTAssertEqual(initialDraft.target.canonicalEntryID, initialEntry.id)
+        XCTAssertNil(initialDraft.target.correctionID)
+        await delay.waitForCallCount(1)
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 19.8,
+                        endTime: 22.2,
+                        text: "最终生成文字"
+                    ),
+                    speakerID: "room-new",
+                    source: .room
+                )
+            ],
+            sourceRevision: 2
+        )
+        let newTranscriptID = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first?.id
+        )
+
+        await viewModel.flushEdits()
+        delay.release(call: 0)
+        try await completion.wait(for: 1)
+
+        let meeting = try repository.meeting(id: meetingID)
+        let correction = try XCTUnwrap(meeting.transcriptCorrections.first)
+        XCTAssertEqual(meeting.transcriptCorrections.count, 1)
+        XCTAssertEqual(correction.replacementText, "用户最新文字")
+        XCTAssertEqual(correction.transcriptIDs, [newTranscriptID])
+        XCTAssertEqual(correction.anchorStartTime, 19.8, accuracy: 0.001)
+        XCTAssertEqual(correction.anchorEndTime, 22.2, accuracy: 0.001)
+        XCTAssertEqual(correction.source, .room)
+
+        let canonical = try repository.canonicalTranscripts(
+            meetingID: meetingID
+        )
+        let corrected = try XCTUnwrap(canonical.first)
+        XCTAssertEqual(canonical.count, 1)
+        XCTAssertEqual(corrected.id, correction.id)
+        XCTAssertEqual(corrected.text, "用户最新文字")
+        XCTAssertEqual(corrected.transcriptIDs, [newTranscriptID])
+        XCTAssertEqual(corrected.startTime, 19.8, accuracy: 0.001)
+        XCTAssertEqual(corrected.endTime, 22.2, accuracy: 0.001)
+        XCTAssertEqual(corrected.speakerID, "room-new")
+    }
+
+    func testReloadReconcilesDirtyCorrectionTargetWithoutReplacingTypedText()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 30,
+                        endTime: 32,
+                        text: "旧生成文字"
+                    ),
+                    speakerID: "room-old",
+                    source: .room
+                )
+            ],
+            sourceRevision: 1
+        )
+        let oldTranscriptID = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first?.id
+        )
+        try repository.saveTranscriptCorrection(
+            meetingID: meetingID,
+            transcriptIDs: [oldTranscriptID],
+            anchorStartTime: 30,
+            anchorEndTime: 32,
+            source: .room,
+            originalText: "旧生成文字",
+            replacementText: "原人工文字"
+        )
+        let initialEntry = try XCTUnwrap(
+            repository.canonicalTranscripts(meetingID: meetingID).first
+        )
+        let correctionID = initialEntry.id
+        let delay = ControlledMeetingEditDelay()
+        let completion = MeetingEditAutosaverCompletionBarrier()
+        let autosaver = MeetingEditAutosaver(
+            delay: { duration in
+                try await delay.suspend(for: duration)
+            },
+            onDelayedTaskCompletion: {
+                completion.signal()
+            }
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy(),
+            editAutosaver: autosaver
+        )
+
+        viewModel.updateTranscriptDraft("键盘中的最新文字", for: initialEntry)
+        await delay.waitForCallCount(1)
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 29.8,
+                        endTime: 32.2,
+                        text: "最终生成文字"
+                    ),
+                    speakerID: "room-new",
+                    source: .room
+                )
+            ],
+            sourceRevision: 2
+        )
+        let newTranscriptID = try XCTUnwrap(
+            repository.transcripts(meetingID: meetingID).first?.id
+        )
+
+        viewModel.load()
+
+        let currentEntry = try XCTUnwrap(
+            repository.canonicalTranscripts(meetingID: meetingID).first
+        )
+        let pending = try XCTUnwrap(viewModel.transcriptDrafts.first)
+        XCTAssertEqual(viewModel.transcriptDrafts.count, 1)
+        XCTAssertEqual(currentEntry.id, correctionID)
+        XCTAssertEqual(
+            viewModel.transcriptDraftText(for: currentEntry),
+            "键盘中的最新文字"
+        )
+        XCTAssertEqual(pending.text, "键盘中的最新文字")
+        XCTAssertEqual(pending.target.canonicalEntryID, correctionID)
+        XCTAssertEqual(pending.target.correctionID, correctionID)
+        XCTAssertEqual(pending.target.transcriptIDs, [newTranscriptID])
+        XCTAssertEqual(pending.target.anchorStartTime, 29.8, accuracy: 0.001)
+        XCTAssertEqual(pending.target.anchorEndTime, 32.2, accuracy: 0.001)
+        XCTAssertEqual(pending.target.source, .room)
+
+        await viewModel.flushEdits()
+        delay.release(call: 0)
+        try await completion.wait(for: 1)
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID)
+                .map(\.text),
+            ["键盘中的最新文字"]
+        )
+    }
+
     func testStructuredDraftsFlushThroughManualRepositoryUpdates()
         async throws {
         let repository = try MeetingRepository.inMemory()
