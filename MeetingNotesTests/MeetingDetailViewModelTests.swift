@@ -1314,6 +1314,314 @@ final class MeetingDetailViewModelTests: XCTestCase {
         XCTAssertTrue(settingsStore.frequentSpeakerNames.isEmpty)
     }
 
+    func testTranscriptDraftSurvivesReloadAndFlushesAsCanonicalCorrection()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 1,
+            end: 2,
+            text: "原始转录"
+        )
+        let entry = try XCTUnwrap(
+            repository.canonicalTranscripts(meetingID: meetingID).first
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        viewModel.updateTranscriptDraft("人工纠正", for: entry)
+        viewModel.load()
+
+        XCTAssertEqual(
+            viewModel.transcriptDraftText(for: entry),
+            "人工纠正"
+        )
+        XCTAssertTrue(viewModel.hasPendingEdits)
+
+        await viewModel.flushEdits()
+
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID)
+                .map(\.text),
+            ["人工纠正"]
+        )
+        XCTAssertFalse(viewModel.hasPendingEdits)
+        XCTAssertEqual(viewModel.localSaveState, .saved)
+    }
+
+    func testStructuredDraftsFlushThroughManualRepositoryUpdates()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "",
+                overview: "原重点总结",
+                keyPoints: ["原要点"],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            ),
+            model: "test-model"
+        )
+        try repository.saveGeneratedDetailedMinutes(
+            meetingID: meetingID,
+            generated: GeneratedDetailedMinutes(
+                overview: "原完整纪要",
+                sections: [],
+                decisions: [],
+                actionItems: [],
+                openQuestions: []
+            ),
+            model: "test-model",
+            promptVersion: 1
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let editedSummary = GeneratedMeetingSummary(
+            suggestedTitle: "",
+            overview: "编辑后的重点总结",
+            keyPoints: ["新要点"],
+            decisions: ["新决策"],
+            actionItems: [
+                ActionItem(task: "新任务", owner: "张三", dueDate: nil)
+            ],
+            bookmarkInsights: ["新书签见解"]
+        )
+        let editedMinutes = GeneratedDetailedMinutes(
+            overview: "编辑后的完整纪要",
+            sections: [
+                DetailedMinutesSection(
+                    title: "议题",
+                    timeRange: nil,
+                    speakers: ["张三"],
+                    content: "议题内容"
+                )
+            ],
+            decisions: ["纪要决策"],
+            actionItems: [
+                ActionItem(task: "纪要任务", owner: "李四", dueDate: nil)
+            ],
+            openQuestions: ["待确认"]
+        )
+
+        viewModel.updateSummaryDraft(editedSummary)
+        viewModel.updateDetailedMinutesDraft(editedMinutes)
+        await viewModel.flushEdits()
+
+        let meeting = try repository.meeting(id: meetingID)
+        XCTAssertEqual(meeting.summary?.overview, editedSummary.overview)
+        XCTAssertEqual(
+            meeting.summary?.actionItemRecords,
+            editedSummary.actionItems
+        )
+        XCTAssertTrue(meeting.summary?.isManuallyEdited == true)
+        XCTAssertEqual(
+            try meeting.detailedMinutes?.sections,
+            editedMinutes.sections
+        )
+        XCTAssertTrue(meeting.detailedMinutes?.isManuallyEdited == true)
+        XCTAssertFalse(viewModel.hasPendingEdits)
+        XCTAssertEqual(viewModel.localSaveState, .saved)
+    }
+
+    func testRepositoryReloadCannotOverwriteDirtySummaryDraft() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "",
+                overview: "已保存的旧文本",
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            ),
+            model: "test-model"
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let edited = GeneratedMeetingSummary(
+            suggestedTitle: "",
+            overview: "尚未落盘的键盘输入",
+            keyPoints: [],
+            decisions: [],
+            actionItems: [],
+            bookmarkInsights: []
+        )
+        viewModel.updateSummaryDraft(edited)
+
+        try repository.updateTitle(
+            meetingID: meetingID,
+            title: "后台更新的会议标题"
+        )
+        viewModel.load()
+
+        XCTAssertEqual(viewModel.meeting?.title, "后台更新的会议标题")
+        XCTAssertEqual(viewModel.summaryDraft, edited)
+        XCTAssertTrue(viewModel.hasPendingEdits)
+        await viewModel.flushEdits()
+    }
+
+    func testViewModelSaveFailureKeepsDraftAndRetryPersists() async throws {
+        let failure = DetailRepositoryFailureSwitch()
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                if failure.shouldFail {
+                    throw DetailInjectedRepositoryError.forced
+                }
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "",
+                overview: "旧总结",
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            ),
+            model: "test-model"
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let edited = GeneratedMeetingSummary(
+            suggestedTitle: "",
+            overview: "需要重试的本地草稿",
+            keyPoints: [],
+            decisions: [],
+            actionItems: [],
+            bookmarkInsights: []
+        )
+        viewModel.updateSummaryDraft(edited)
+        failure.shouldFail = true
+
+        await viewModel.flushEdits()
+
+        XCTAssertEqual(viewModel.summaryDraft, edited)
+        XCTAssertTrue(viewModel.hasPendingEdits)
+        XCTAssertEqual(
+            viewModel.localSaveState,
+            .failed(message: "无法自动保存本地修改，请稍后重试。")
+        )
+        XCTAssertEqual(
+            try repository.meeting(id: meetingID).summary?.overview,
+            "旧总结"
+        )
+
+        failure.shouldFail = false
+        await viewModel.retrySavingEdits()
+
+        XCTAssertEqual(
+            try repository.meeting(id: meetingID).summary?.overview,
+            edited.overview
+        )
+        XCTAssertFalse(viewModel.hasPendingEdits)
+        XCTAssertEqual(viewModel.localSaveState, .saved)
+    }
+
+    func testMeetingSwitchFlushesOriginalMeetingOnly() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let originalMeetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        let newMeetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now.addingTimeInterval(1)
+        )
+        try repository.appendTranscript(
+            meetingID: originalMeetingID,
+            start: 0,
+            end: 1,
+            text: "原会议文本"
+        )
+        try repository.appendTranscript(
+            meetingID: newMeetingID,
+            start: 0,
+            end: 1,
+            text: "新会议文本"
+        )
+        let originalEntry = try XCTUnwrap(
+            repository.canonicalTranscripts(
+                meetingID: originalMeetingID
+            ).first
+        )
+        let originalViewModel = MeetingDetailViewModel(
+            meetingID: originalMeetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        originalViewModel.updateTranscriptDraft(
+            "原会议已纠正",
+            for: originalEntry
+        )
+
+        let selectedViewModel = MeetingDetailViewModel(
+            meetingID: newMeetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        await originalViewModel.flushEdits()
+
+        XCTAssertEqual(selectedViewModel.meetingID, newMeetingID)
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(
+                meetingID: originalMeetingID
+            ).map(\.text),
+            ["原会议已纠正"]
+        )
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(
+                meetingID: newMeetingID
+            ).map(\.text),
+            ["新会议文本"]
+        )
+        XCTAssertEqual(selectedViewModel.localSaveState, .idle)
+    }
+
     private func makeSettingsStore(
         isNotionArchivingEnabled: Bool = true
     ) -> AppSettingsStore {
