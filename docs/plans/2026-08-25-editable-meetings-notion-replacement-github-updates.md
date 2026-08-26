@@ -461,7 +461,7 @@ git commit -m "feat(editing): autosave meeting text"
 **Files:**
 
 - Create: `MeetingNotes/Views/MeetingExactReplacementSheet.swift`
-- Create: `MeetingNotes/Views/EditableMeetingDocumentView.swift`
+- Create: `MeetingNotes/Views/InlineEditableMeetingText.swift`
 - Modify: `MeetingNotes/Views/TranscriptView.swift`
 - Modify: `MeetingNotes/Views/MeetingDetailView.swift`
 - Modify: `MeetingNotes/App/LaunchArguments.swift`
@@ -474,6 +474,10 @@ Prove that inline text changes update the draft immediately, replacement preview
 shows target counts, cancellation is a no-op, save errors remain visible, and
 manual document regeneration requires explicit confirmation.
 
+Also prove that the normal detail hierarchy remains the original hierarchy:
+there is no edit-mode button, Save button, replacement toolbar, or separate
+document-editor layout.
+
 Add a UI fixture with one repeated wrong name in all supported areas.
 
 **Step 2: Run the new tests and observe failure**
@@ -482,25 +486,35 @@ Use focused unit tests first; then run the single UI test by name.
 
 **Step 3: Implement transcript editing**
 
-- Clicking a transcript turn changes its text to an inline `TextEditor` or
-  multiline `TextField`.
+- Keep the original transcript row, timecode, speaker badge, padding,
+  highlighting, typography, and accessibility grouping.
+- Replace only the read-only transcript `Text` with an always-editable,
+  borderless multiline native text control styled to render like the original
+  text. Do not add an Edit button or edit-mode row.
 - Losing focus schedules/flushes without a Save button.
 - Speaker editing remains available.
 - The floating panel is unchanged.
 
-Do not combine accessibility children while a field is editable. Add stable
-identifiers for edit fields and save state.
+Keep native accessibility for the editable control and add stable identifiers
+for fields and save state without changing the visual hierarchy.
 
 **Step 4: Implement structured document editing**
 
-Build bindings for overview, key points, decisions, action tasks/owners,
-bookmark insights, minutes sections, and open questions. Preserve structure and
-list order. Add/remove controls only where the current generated structure
-already has a list; do not add a general rich-text editor.
+Modify the existing summary and minutes rendering in place. Replace each
+read-only value with `InlineEditableMeetingText` while preserving the existing
+card/material, headings, typography, spacing, wrapping, disclosure behavior,
+structure, and list order. Cover overview, key points, decisions, action
+tasks/owners, bookmark insights, minutes sections, and open questions.
+
+Do not add a separate editor view, boxed form, persistent add/remove controls,
+or general rich-text editor. There is no visual transition into an edit mode.
 
 **Step 5: Implement replacement and regeneration confirmation**
 
-- Present old/new text, match count, and affected sections.
+- Expose the replacement command from a native context menu on editable text;
+  do not add a replacement button or toolbar to the normal detail layout.
+- Present old/new text, match count, and affected sections in a compact native
+  translucent-material sheet.
 - Apply only after confirmation.
 - Present a destructive confirmation before replacing a manually edited summary
   or minutes document with generated content.
@@ -510,6 +524,10 @@ already has a list; do not add a general rich-text editor.
 Call `flushEdits()` when focus leaves, the selected meeting changes, the detail
 view disappears, or an update restart is requested. Do not silently cancel a
 dirty draft.
+
+Show local save state through the existing lightweight status/error area. Do
+not add a permanent save-status toolbar. A failure may expose a native Retry
+action; success must not be presented as Notion synchronization.
 
 **Step 7: Run focused UI coverage and commit**
 

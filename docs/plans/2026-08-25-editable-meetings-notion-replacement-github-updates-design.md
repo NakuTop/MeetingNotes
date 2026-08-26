@@ -149,6 +149,41 @@ Key summaries and detailed minutes remain structured records. Their existing
 sections and fields become editable in place rather than being flattened into a
 single free-form text blob.
 
+### Original-interface preservation amendment (2026-08-26)
+
+Editing must preserve the existing MeetingNotes detail interface instead of
+introducing a separate edit mode, replacement document layout, or editor page.
+
+- Existing cards, material backgrounds, typography, spacing, disclosure
+  sections, mode slider, row order, and information hierarchy remain visually
+  unchanged.
+- Existing read-only text is replaced in place by transparent, borderless
+  native macOS text controls using the same font, alignment, wrapping, and
+  foreground style. The field is always directly editable; there is no Edit
+  button, Save button, or read-only-to-editing layout transition.
+- Focus feedback uses only the subtle native accent/focus treatment. Editing
+  must not add boxed form styling, heavy outlines, opaque panels, or a second
+  visual language.
+- Transcript timecodes, speaker badges, highlighting, row padding, and the
+  floating meeting panel remain unchanged. Only the transcript text itself
+  becomes editable.
+- Summary and detailed-minutes sections keep their original rendering and list
+  order. Existing items can be edited, but Task 6 adds no persistent plus/minus
+  controls and does not turn the document into a generic rich-text form.
+- Local save state reuses the existing lightweight status/error presentation.
+  It must not add a permanent toolbar or large status panel. Save failure may
+  reveal a native retry action because the draft is not safely stored.
+- The current-meeting replacement command is exposed through a native context
+  menu on editable text. Its preview/confirmation uses a compact system sheet
+  with the same translucent material treatment; no replacement button is added
+  to the normal detail layout.
+- Regeneration continues to use the existing generate/regenerate control. A
+  destructive native confirmation appears only when that action would replace
+  manually edited content.
+
+The visual target is the original translucent native macOS interface with
+direct editing added as a capability, not a redesigned editor product.
+
 The first user edit marks the affected document as manually edited and advances
 its local revision. Ordinary finalization, refresh, or background generation
 must not replace a manually edited document. An explicit **Regenerate** action
