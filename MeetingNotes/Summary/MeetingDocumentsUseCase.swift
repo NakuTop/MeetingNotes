@@ -50,6 +50,11 @@ protocol MeetingDocumentArchiving: AnyObject {
 @MainActor
 protocol MeetingDocumentManaging: AnyObject {
     func generate(meetingID: UUID, kind: MeetingDocumentKind) async throws
+    func generate(
+        meetingID: UUID,
+        kind: MeetingDocumentKind,
+        replacingManualEdits: Bool
+    ) async throws
     func retryArchive(meetingID: UUID, kind: MeetingDocumentKind) async throws
     func generate(
         meetingID: UUID,
@@ -65,6 +70,15 @@ protocol MeetingDocumentManaging: AnyObject {
 
 @MainActor
 extension MeetingDocumentManaging {
+    func generate(
+        meetingID: UUID,
+        kind: MeetingDocumentKind,
+        replacingManualEdits: Bool
+    ) async throws {
+        _ = replacingManualEdits
+        try await generate(meetingID: meetingID, kind: kind)
+    }
+
     func generate(
         meetingID: UUID,
         kind: MeetingDocumentKind,
@@ -214,6 +228,19 @@ final class MeetingDocumentsUseCase: MeetingDocumentManaging {
         try await generate(
             meetingID: meetingID,
             kind: kind,
+            replacingManualEdits: false
+        )
+    }
+
+    func generate(
+        meetingID: UUID,
+        kind: MeetingDocumentKind,
+        replacingManualEdits: Bool
+    ) async throws {
+        try await generate(
+            meetingID: meetingID,
+            kind: kind,
+            replacingManualEdits: replacingManualEdits,
             onOperationChange: { _ in }
         )
     }
@@ -221,6 +248,20 @@ final class MeetingDocumentsUseCase: MeetingDocumentManaging {
     func generate(
         meetingID: UUID,
         kind: MeetingDocumentKind,
+        onOperationChange: @escaping (MeetingDocumentOperation) -> Void
+    ) async throws {
+        try await generate(
+            meetingID: meetingID,
+            kind: kind,
+            replacingManualEdits: false,
+            onOperationChange: onOperationChange
+        )
+    }
+
+    func generate(
+        meetingID: UUID,
+        kind: MeetingDocumentKind,
+        replacingManualEdits: Bool,
         onOperationChange: @escaping (MeetingDocumentOperation) -> Void
     ) async throws {
         try prepareForOperation(meetingID: meetingID)
@@ -244,6 +285,7 @@ final class MeetingDocumentsUseCase: MeetingDocumentManaging {
             throw MeetingDocumentsError.missingDeepSeekCredential
         }
         let generationModel = settingsStore.deepSeekModel
+        let observedMeetingContentRevision = meeting.contentRevision
 
         do {
             try repository.updateMeetingState(id: meetingID, state: .summarizing)
@@ -279,10 +321,17 @@ final class MeetingDocumentsUseCase: MeetingDocumentManaging {
                 try repository.saveGeneratedSummary(
                     meetingID: meetingID,
                     generated: generated,
-                    model: generationModel
+                    model: generationModel,
+                    observedMeetingContentRevision:
+                        observedMeetingContentRevision,
+                    replacingManualEdits: replacingManualEdits
                 )
             } catch {
                 try restoreStableState(meetingID: meetingID, state: stableState)
+                if let repositoryError =
+                    error as? MeetingDocumentRepositoryError {
+                    throw repositoryError
+                }
                 throw MeetingDocumentsError.localPersistenceFailed
             }
         case .detailedMinutes:
@@ -314,10 +363,17 @@ final class MeetingDocumentsUseCase: MeetingDocumentManaging {
                     meetingID: meetingID,
                     generated: generated,
                     model: generationModel,
-                    promptVersion: Self.detailedMinutesPromptVersion
+                    promptVersion: Self.detailedMinutesPromptVersion,
+                    observedMeetingContentRevision:
+                        observedMeetingContentRevision,
+                    replacingManualEdits: replacingManualEdits
                 )
             } catch {
                 try restoreStableState(meetingID: meetingID, state: stableState)
+                if let repositoryError =
+                    error as? MeetingDocumentRepositoryError {
+                    throw repositoryError
+                }
                 throw MeetingDocumentsError.localPersistenceFailed
             }
         }

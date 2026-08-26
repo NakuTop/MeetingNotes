@@ -5,6 +5,142 @@ import XCTest
 
 @MainActor
 final class MeetingDocumentsUseCaseTests: XCTestCase {
+    func testOrdinaryGenerationCannotOverwriteManualSummary() async throws {
+        let fixture = try makeFixture(notionEnabled: false)
+        let meetingID = try fixture.makeMeeting()
+        try fixture.addFinalTranscript(to: meetingID)
+        try fixture.repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: Self.summary,
+            model: "old-model"
+        )
+        let manual = GeneratedMeetingSummary(
+            suggestedTitle: "人工标题",
+            overview: "人工总结",
+            keyPoints: ["人工重点"],
+            decisions: ["人工决定"],
+            actionItems: [
+                ActionItem(task: "人工任务", owner: "小李", dueDate: nil)
+            ],
+            bookmarkInsights: ["人工书签"]
+        )
+        try fixture.repository.updateSummaryManually(
+            meetingID: meetingID,
+            value: manual
+        )
+        let beforeRevision = try fixture.repository.meeting(
+            id: meetingID
+        ).contentRevision
+
+        await assertRepositoryThrows(.manualEditProtected(.summary)) {
+            try await fixture.useCase.generate(
+                meetingID: meetingID,
+                kind: .summary
+            )
+        }
+
+        let meeting = try fixture.repository.meeting(id: meetingID)
+        XCTAssertEqual(meeting.summary?.overview, manual.overview)
+        XCTAssertTrue(meeting.summary?.isManuallyEdited == true)
+        XCTAssertEqual(meeting.contentRevision, beforeRevision)
+        XCTAssertEqual(meeting.state, .summaryReady)
+    }
+
+    func testConfirmedRegenerationCanReplaceManualSummary() async throws {
+        let fixture = try makeFixture(notionEnabled: false)
+        let meetingID = try fixture.makeMeeting()
+        try fixture.addFinalTranscript(to: meetingID)
+        try fixture.repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: Self.summary,
+            model: "old-model"
+        )
+        try fixture.repository.updateSummaryManually(
+            meetingID: meetingID,
+            value: GeneratedMeetingSummary(
+                suggestedTitle: "人工标题",
+                overview: "人工总结",
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            )
+        )
+        let beforeRevision = try fixture.repository.meeting(
+            id: meetingID
+        ).contentRevision
+
+        try await fixture.useCase.generate(
+            meetingID: meetingID,
+            kind: .summary,
+            replacingManualEdits: true
+        )
+
+        let meeting = try fixture.repository.meeting(id: meetingID)
+        XCTAssertEqual(meeting.summary?.overview, Self.summary.overview)
+        XCTAssertFalse(meeting.summary?.isManuallyEdited == true)
+        XCTAssertEqual(meeting.contentRevision, beforeRevision + 1)
+        XCTAssertEqual(meeting.state, .summaryReady)
+    }
+
+    func testGenerationStartedBeforeLaterEditIsRejectedAsStale()
+        async throws {
+        let fixture = try makeFixture(
+            notionEnabled: false,
+            blockSummaryGeneration: true
+        )
+        let meetingID = try fixture.makeMeeting()
+        try fixture.addFinalTranscript(to: meetingID)
+        try fixture.repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: Self.summary,
+            model: "old-model"
+        )
+        let observedRevision = try fixture.repository.meeting(
+            id: meetingID
+        ).contentRevision
+        let generation = Task {
+            try await fixture.useCase.generate(
+                meetingID: meetingID,
+                kind: .summary,
+                replacingManualEdits: true
+            )
+        }
+        await fixture.summaryGenerator.waitUntilStarted()
+        let laterEdit = GeneratedMeetingSummary(
+            suggestedTitle: "稍后人工标题",
+            overview: "生成进行中的人工修改",
+            keyPoints: ["必须保留"],
+            decisions: [],
+            actionItems: [],
+            bookmarkInsights: []
+        )
+        try fixture.repository.updateSummaryManually(
+            meetingID: meetingID,
+            value: laterEdit
+        )
+        await fixture.summaryGenerator.finishBlockingCall()
+
+        do {
+            try await generation.value
+            XCTFail("Expected stale revision rejection")
+        } catch {
+            XCTAssertEqual(
+                error as? MeetingDocumentRepositoryError,
+                .staleMeetingContentRevision(
+                    expected: observedRevision,
+                    actual: observedRevision + 1
+                )
+            )
+        }
+
+        let meeting = try fixture.repository.meeting(id: meetingID)
+        XCTAssertEqual(meeting.summary?.overview, laterEdit.overview)
+        XCTAssertTrue(meeting.summary?.isManuallyEdited == true)
+        XCTAssertEqual(meeting.contentRevision, observedRevision + 1)
+        XCTAssertEqual(meeting.state, .summaryReady)
+    }
+
     func testOperationCallbackReportsGenerationThenAutomaticArchive()
         async throws {
         let fixture = try makeFixture()
@@ -850,6 +986,18 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
             XCTFail("Expected \(expected)")
         } catch {
             XCTAssertEqual(error as? MeetingDocumentsError, expected)
+        }
+    }
+
+    private func assertRepositoryThrows(
+        _ expected: MeetingDocumentRepositoryError,
+        operation: () async throws -> Void
+    ) async {
+        do {
+            try await operation()
+            XCTFail("Expected \(expected)")
+        } catch {
+            XCTAssertEqual(error as? MeetingDocumentRepositoryError, expected)
         }
     }
 

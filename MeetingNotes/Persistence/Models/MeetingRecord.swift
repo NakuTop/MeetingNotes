@@ -33,6 +33,10 @@ final class MeetingRecord {
     var notionPageID: String?
     var notionPageURL: String?
     var lastErrorCode: String?
+    var contentRevisionBacking: Int?
+    var notionSyncedContentRevision: Int?
+    var notionSyncStateRawValue: String?
+    var notionSyncErrorCode: String?
     var speakerDiarizationRequestedBacking: Bool?
     var speakerProcessingStateRawValue: String?
     var speakerProcessingErrorCode: String?
@@ -70,6 +74,20 @@ final class MeetingRecord {
 
     var isPinned: Bool {
         pinnedAt != nil
+    }
+
+    var contentRevision: Int {
+        get { max(0, contentRevisionBacking ?? 0) }
+        set { contentRevisionBacking = max(0, newValue) }
+    }
+
+    var notionSyncState: MeetingNotionSyncState {
+        get {
+            notionSyncStateRawValue
+                .flatMap(MeetingNotionSyncState.init(rawValue:))
+                ?? .localOnly
+        }
+        set { notionSyncStateRawValue = newValue.rawValue }
     }
 
     var speakerDiarizationRequested: Bool {
@@ -135,6 +153,10 @@ final class MeetingRecord {
         self.notionPageID = notionPageID
         self.notionPageURL = notionPageURL
         self.lastErrorCode = lastErrorCode
+        contentRevisionBacking = 0
+        notionSyncedContentRevision = nil
+        notionSyncStateRawValue = MeetingNotionSyncState.localOnly.rawValue
+        notionSyncErrorCode = nil
         self.speakerDiarizationRequested = speakerDiarizationRequested
         self.speakerProcessingState = speakerProcessingState
             ?? (speakerDiarizationRequested ? .pending : .notRequested)

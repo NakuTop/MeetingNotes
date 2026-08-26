@@ -15,6 +15,7 @@ final class SummaryRecord {
     var archiveStateRawValue: String?
     var archivedContentRevision: Int?
     var lastArchiveErrorCode: String?
+    var isManuallyEditedBacking: Bool?
     var meeting: MeetingRecord?
 
     var keyPoints: [String] { Self.decodeStrings(keyPointsData) }
@@ -44,6 +45,11 @@ final class SummaryRecord {
         set { archiveStateRawValue = newValue.rawValue }
     }
 
+    var isManuallyEdited: Bool {
+        get { isManuallyEditedBacking ?? false }
+        set { isManuallyEditedBacking = newValue }
+    }
+
     init(
         id: UUID = UUID(),
         overview: String,
@@ -67,6 +73,7 @@ final class SummaryRecord {
         archiveStateRawValue = MeetingDocumentArchiveState.localOnly.rawValue
         archivedContentRevision = nil
         lastArchiveErrorCode = nil
+        isManuallyEditedBacking = false
         self.meeting = meeting
     }
 
@@ -93,6 +100,7 @@ final class SummaryRecord {
         archiveStateRawValue = MeetingDocumentArchiveState.localOnly.rawValue
         archivedContentRevision = nil
         lastArchiveErrorCode = nil
+        isManuallyEditedBacking = false
         self.meeting = meeting
     }
 
@@ -142,6 +150,7 @@ final class SummaryRecord {
 
     private func markRegenerated(contentRevision: Int) {
         self.contentRevision = contentRevision
+        isManuallyEdited = false
         archiveState = .localOnly
         archivedContentRevision = nil
         lastArchiveErrorCode = nil

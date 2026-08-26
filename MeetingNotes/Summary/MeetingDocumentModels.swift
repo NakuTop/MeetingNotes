@@ -33,6 +33,27 @@ enum MeetingDocumentArchiveState: String, Equatable, Sendable {
     case failed
 }
 
+enum MeetingNotionSyncState: String, Equatable, Sendable {
+    case localOnly
+    case syncing
+    case synced
+    case failed
+}
+
+enum MeetingContentRevisionError: Error, Equatable, Sendable {
+    case overflow
+}
+
+enum MeetingContentRevision {
+    static func next(after revision: Int) throws -> Int {
+        let (nextRevision, overflow) = revision.addingReportingOverflow(1)
+        guard !overflow else {
+            throw MeetingContentRevisionError.overflow
+        }
+        return max(0, nextRevision)
+    }
+}
+
 enum MeetingDocumentRevisionError: Error, Equatable, Sendable {
     case overflow
 }

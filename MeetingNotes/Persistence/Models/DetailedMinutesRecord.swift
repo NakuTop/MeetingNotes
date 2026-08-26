@@ -20,6 +20,7 @@ final class DetailedMinutesRecord {
     var archiveStateRawValue: String?
     var archivedContentRevision: Int?
     var lastArchiveErrorCode: String?
+    var isManuallyEditedBacking: Bool?
     var meeting: MeetingRecord?
 
     var sections: [DetailedMinutesSection] {
@@ -76,6 +77,11 @@ final class DetailedMinutesRecord {
         set { archiveStateRawValue = newValue.rawValue }
     }
 
+    var isManuallyEdited: Bool {
+        get { isManuallyEditedBacking ?? false }
+        set { isManuallyEditedBacking = newValue }
+    }
+
     init(
         id: UUID = UUID(),
         generated: GeneratedDetailedMinutes,
@@ -98,6 +104,7 @@ final class DetailedMinutesRecord {
         archiveStateRawValue = MeetingDocumentArchiveState.localOnly.rawValue
         archivedContentRevision = nil
         lastArchiveErrorCode = nil
+        isManuallyEditedBacking = false
         self.meeting = meeting
     }
 
@@ -127,6 +134,7 @@ final class DetailedMinutesRecord {
         archiveStateRawValue = MeetingDocumentArchiveState.localOnly.rawValue
         archivedContentRevision = nil
         lastArchiveErrorCode = nil
+        isManuallyEditedBacking = false
         self.meeting = meeting
     }
 

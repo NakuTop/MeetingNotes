@@ -4,6 +4,204 @@ import SwiftData
 
 @MainActor
 final class MeetingRepositoryTests: XCTestCase {
+    func testEditingSummaryMarksManualAndAdvancesMeetingRevision() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "旧标题",
+                overview: "旧总结",
+                keyPoints: ["旧重点"],
+                decisions: ["旧决定"],
+                actionItems: [
+                    ActionItem(task: "旧任务", owner: "旧负责人", dueDate: "周四")
+                ],
+                bookmarkInsights: ["旧书签"]
+            ),
+            model: "old-model"
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let summary = try XCTUnwrap(meeting.summary)
+        summary.archiveState = .archived
+        summary.archivedContentRevision = summary.contentRevision
+        summary.lastArchiveErrorCode = "old-error"
+        try repository.updateMeetingState(id: meetingID, state: .summaryReady)
+        let meetingRevision = meeting.contentRevision
+        let documentRevision = summary.contentRevision
+        let edited = GeneratedMeetingSummary(
+            suggestedTitle: "人工标题",
+            overview: "人工总结",
+            keyPoints: ["人工重点"],
+            decisions: ["人工决定"],
+            actionItems: [
+                ActionItem(task: "人工任务", owner: "小王", dueDate: "周五")
+            ],
+            bookmarkInsights: ["人工书签"]
+        )
+
+        try repository.updateSummaryManually(
+            meetingID: meetingID,
+            value: edited
+        )
+
+        XCTAssertEqual(summary.overview, edited.overview)
+        XCTAssertEqual(summary.keyPoints, edited.keyPoints)
+        XCTAssertEqual(summary.decisions, edited.decisions)
+        XCTAssertEqual(summary.actionItemRecords, edited.actionItems)
+        XCTAssertEqual(summary.bookmarkInsights, edited.bookmarkInsights)
+        XCTAssertTrue(summary.isManuallyEdited)
+        XCTAssertEqual(summary.contentRevision, documentRevision + 1)
+        XCTAssertEqual(meeting.contentRevision, meetingRevision + 1)
+        XCTAssertEqual(meeting.suggestedTitle, edited.suggestedTitle)
+        XCTAssertEqual(summary.archiveState, .localOnly)
+        XCTAssertNil(summary.archivedContentRevision)
+        XCTAssertNil(summary.lastArchiveErrorCode)
+    }
+
+    func testEditingMinutesMarksManualAndAdvancesMeetingRevision() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        try repository.saveGeneratedDetailedMinutes(
+            meetingID: meetingID,
+            generated: makeDetailedMinutes(overview: "旧纪要"),
+            model: "old-model",
+            promptVersion: 1
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let minutes = try XCTUnwrap(meeting.detailedMinutes)
+        minutes.archiveState = .archived
+        minutes.archivedContentRevision = minutes.contentRevision
+        minutes.lastArchiveErrorCode = "old-error"
+        try repository.updateMeetingState(id: meetingID, state: .summaryReady)
+        let meetingRevision = meeting.contentRevision
+        let documentRevision = minutes.contentRevision
+        let edited = makeDetailedMinutes(overview: "人工纪要")
+
+        try repository.updateDetailedMinutesManually(
+            meetingID: meetingID,
+            value: edited
+        )
+
+        XCTAssertEqual(minutes.overview, edited.overview)
+        XCTAssertEqual(try minutes.sections, edited.sections)
+        XCTAssertEqual(try minutes.decisions, edited.decisions)
+        XCTAssertEqual(try minutes.actionItems, edited.actionItems)
+        XCTAssertEqual(try minutes.openQuestions, edited.openQuestions)
+        XCTAssertTrue(minutes.isManuallyEdited)
+        XCTAssertEqual(minutes.contentRevision, documentRevision + 1)
+        XCTAssertEqual(meeting.contentRevision, meetingRevision + 1)
+        XCTAssertEqual(minutes.archiveState, .localOnly)
+        XCTAssertNil(minutes.archivedContentRevision)
+        XCTAssertNil(minutes.lastArchiveErrorCode)
+    }
+
+    func testLegacyOptionalBackingsResolveToSafeDefaults() throws {
+        let meeting = MeetingRecord(
+            title: "旧会议",
+            mode: .offline,
+            state: .ready,
+            startedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let summary = SummaryRecord(
+            overview: "旧总结",
+            keyPoints: [],
+            decisions: [],
+            actionItems: [String](),
+            bookmarkInsights: [],
+            model: "legacy"
+        )
+        let minutes = try DetailedMinutesRecord(
+            generated: makeDetailedMinutes(overview: "旧纪要"),
+            model: "legacy",
+            promptVersion: 1
+        )
+        meeting.contentRevisionBacking = nil
+        meeting.notionSyncStateRawValue = nil
+        summary.isManuallyEditedBacking = nil
+        minutes.isManuallyEditedBacking = nil
+
+        XCTAssertEqual(meeting.contentRevision, 0)
+        XCTAssertEqual(meeting.notionSyncState, .localOnly)
+        XCTAssertFalse(summary.isManuallyEdited)
+        XCTAssertFalse(minutes.isManuallyEdited)
+
+        meeting.notionSyncStateRawValue = "future-unknown-state"
+        XCTAssertEqual(meeting.notionSyncState, .localOnly)
+    }
+
+    func testMeetingContentRevisionRejectsOverflow() {
+        XCTAssertThrowsError(
+            try MeetingContentRevision.next(after: Int.max)
+        ) { error in
+            XCTAssertEqual(
+                error as? MeetingContentRevisionError,
+                .overflow
+            )
+        }
+    }
+
+    func testFailedManualSummaryEditRollsBackRevisionAndManualLock() throws {
+        let failure = RepositorySaveFailureSwitch()
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                if failure.shouldFail {
+                    throw InjectedRepositorySaveError.forced
+                }
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "旧标题",
+                overview: "旧总结",
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            ),
+            model: "old-model"
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        let summary = try XCTUnwrap(meeting.summary)
+        let oldMeetingRevisionBacking = meeting.contentRevisionBacking
+        let oldDocumentRevisionBacking = summary.contentRevisionBacking
+        failure.shouldFail = true
+
+        XCTAssertThrowsError(
+            try repository.updateSummaryManually(
+                meetingID: meetingID,
+                value: GeneratedMeetingSummary(
+                    suggestedTitle: "新标题",
+                    overview: "不应留下的人工总结",
+                    keyPoints: ["新重点"],
+                    decisions: [],
+                    actionItems: [],
+                    bookmarkInsights: []
+                )
+            )
+        ) { error in
+            XCTAssertEqual(error as? InjectedRepositorySaveError, .forced)
+        }
+
+        XCTAssertEqual(summary.overview, "旧总结")
+        XCTAssertFalse(summary.isManuallyEdited)
+        XCTAssertEqual(summary.contentRevisionBacking, oldDocumentRevisionBacking)
+        XCTAssertEqual(meeting.contentRevisionBacking, oldMeetingRevisionBacking)
+        XCTAssertEqual(meeting.suggestedTitle, "旧标题")
+    }
+
     func testResetNotionArchiveCheckpointClearsEveryOldPageReference() throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(
