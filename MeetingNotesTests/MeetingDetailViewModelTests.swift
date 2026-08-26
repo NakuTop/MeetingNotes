@@ -1,9 +1,243 @@
+import AppKit
 import Foundation
 import XCTest
 @testable import MeetingNotes
 
 @MainActor
 final class MeetingDetailViewModelTests: XCTestCase {
+    func testInlineTextSizingAdvertisesACompressibleHStackMinimum() {
+        XCTAssertEqual(
+            InlineEditableMeetingText.layoutWidth(
+                proposal: 0,
+                fittingWidth: 480
+            ),
+            0
+        )
+        XCTAssertEqual(
+            InlineEditableMeetingText.layoutWidth(
+                proposal: 180,
+                fittingWidth: 480
+            ),
+            180
+        )
+        XCTAssertEqual(
+            InlineEditableMeetingText.layoutWidth(
+                proposal: nil,
+                fittingWidth: 480
+            ),
+            480
+        )
+        XCTAssertEqual(
+            InlineEditableMeetingText.measurementWidth(
+                proposal: nil,
+                currentWidth: 180,
+                fittingWidth: 480
+            ),
+            180
+        )
+        XCTAssertEqual(
+            InlineEditableMeetingText.measurementWidth(
+                proposal: nil,
+                currentWidth: 0,
+                fittingWidth: 480
+            ),
+            480
+        )
+    }
+
+    func testInlineContextMenuBindsNativeEditingCommandsToClickedEditor()
+        throws {
+        let editor = InlineMeetingNativeTextView()
+        let nativeMenu = NSMenu()
+        for (title, action) in [
+            ("Cut", #selector(NSText.cut(_:))),
+            ("Copy", #selector(NSText.copy(_:))),
+            ("Paste", #selector(NSText.paste(_:))),
+        ] {
+            nativeMenu.addItem(
+                NSMenuItem(
+                    title: title,
+                    action: action,
+                    keyEquivalent: ""
+                )
+            )
+        }
+        let replacementTarget = InlineContextMenuTarget()
+
+        let menu = editor.augmentedContextMenu(
+            sourceMenu: nativeMenu,
+            replacementTarget: replacementTarget,
+            replacementAction:
+                #selector(InlineContextMenuTarget.requestReplacement(_:))
+        )
+
+        XCTAssertFalse(menu === nativeMenu)
+        XCTAssertNil(nativeMenu.item(withTitle: "Cut")?.target)
+        XCTAssertTrue(menu.item(withTitle: "Cut")?.target === editor)
+        XCTAssertTrue(menu.item(withTitle: "Copy")?.target === editor)
+        XCTAssertTrue(menu.item(withTitle: "Paste")?.target === editor)
+        XCTAssertTrue(
+            menu.item(withTitle: "替换本会议相同文字…")?.target
+                === replacementTarget
+        )
+    }
+
+    func testInlineNativeTextViewReportsTextChangesDirectly() {
+        let editor = InlineMeetingNativeTextView()
+        var observedValues: [String] = []
+        editor.onStringChange = { observedValues.append($0) }
+
+        editor.string = "用户输入"
+        editor.didChangeText()
+
+        XCTAssertEqual(observedValues, ["用户输入"])
+    }
+
+    func testDirtyGroupedTurnDoesNotAbsorbNewSameSpeakerSegmentBetweenKeystrokes()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "已合并第一段",
+            speakerID: "room-1"
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 1.2,
+            end: 2,
+            text: "已合并第二段",
+            speakerID: "room-1"
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let initialTurn = try XCTUnwrap(
+            TranscriptDisplayPolicy.turns(
+                from: repository.canonicalTranscripts(meetingID: meetingID),
+                bookmarks: []
+            ).first
+        )
+        let initialTarget = MeetingTranscriptEditTarget(turn: initialTurn)
+        XCTAssertEqual(initialTurn.transcriptIDs.count, 2)
+
+        viewModel.updateTranscriptDraft(
+            "人工修正后的完整合并发言",
+            for: initialTarget
+        )
+
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 2.2,
+            end: 3,
+            text: "后续新语音",
+            speakerID: "room-1"
+        )
+        viewModel.load()
+        let refreshedTurns = TranscriptDisplayPolicy.turns(
+            from: try repository.canonicalTranscripts(meetingID: meetingID),
+            bookmarks: [],
+            preservingDraftTargets: viewModel.transcriptDrafts.map(\.target)
+        )
+
+        XCTAssertEqual(refreshedTurns.count, 2)
+        XCTAssertEqual(
+            viewModel.transcriptDraftText(
+                for: MeetingTranscriptEditTarget(turn: refreshedTurns[0])
+            ),
+            "人工修正后的完整合并发言"
+        )
+        XCTAssertEqual(refreshedTurns[1].text, "后续新语音")
+
+        viewModel.updateTranscriptDraft(
+            "人工修正后的完整合并发言继续输入",
+            for: MeetingTranscriptEditTarget(turn: refreshedTurns[0])
+        )
+        let pending = try XCTUnwrap(viewModel.transcriptDrafts.first)
+        XCTAssertEqual(pending.target.transcriptIDs, initialTurn.transcriptIDs)
+
+        await viewModel.flushEdits()
+
+        let canonical = try repository.canonicalTranscripts(
+            meetingID: meetingID
+        )
+        XCTAssertEqual(
+            canonical.map(\.text),
+            ["人工修正后的完整合并发言继续输入", "后续新语音"]
+        )
+    }
+
+    func testPersistedCorrectionKeepsIndependentEditableIdentityFromAdjacentSpeech()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "原始第一段",
+            speakerID: "room-1"
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 1.2,
+            end: 2,
+            text: "后续生成语音",
+            speakerID: "room-1"
+        )
+        let raw = try repository.transcripts(meetingID: meetingID)
+        try repository.saveTranscriptCorrection(
+            meetingID: meetingID,
+            transcriptIDs: [raw[0].id],
+            anchorStartTime: raw[0].startTime,
+            anchorEndTime: raw[0].endTime,
+            source: raw[0].source,
+            originalText: raw[0].text,
+            replacementText: "已保存的第一段修正"
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let turns = TranscriptDisplayPolicy.turns(
+            from: try repository.canonicalTranscripts(meetingID: meetingID),
+            bookmarks: []
+        )
+
+        XCTAssertEqual(turns.count, 2)
+        XCTAssertNotNil(turns[0].correctionID)
+        XCTAssertNil(turns[1].correctionID)
+        XCTAssertEqual(turns[0].transcriptIDs, [raw[0].id])
+        XCTAssertEqual(turns[1].transcriptIDs, [raw[1].id])
+
+        viewModel.updateTranscriptDraft(
+            "再次修正第一段",
+            for: MeetingTranscriptEditTarget(turn: turns[0])
+        )
+        await viewModel.flushEdits()
+
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID)
+                .map(\.text),
+            ["再次修正第一段", "后续生成语音"]
+        )
+    }
+
     func testDisplayedActiveDurationUsesLivePresentationForCurrentMeeting() async throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(
@@ -1933,6 +2167,437 @@ final class MeetingDetailViewModelTests: XCTestCase {
         XCTAssertEqual(selectedViewModel.localSaveState, .idle)
     }
 
+    func testInlineEditableFieldsUpdateAllDraftKindsImmediately() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "原转录"
+        )
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "",
+                overview: "原重点总结",
+                keyPoints: ["原要点"],
+                decisions: ["原决定"],
+                actionItems: [
+                    ActionItem(
+                        task: "原行动项",
+                        owner: "原负责人",
+                        dueDate: "周五"
+                    )
+                ],
+                bookmarkInsights: ["原书签洞察"]
+            ),
+            model: "test-model"
+        )
+        try repository.saveGeneratedDetailedMinutes(
+            meetingID: meetingID,
+            generated: GeneratedDetailedMinutes(
+                overview: "原完整纪要",
+                sections: [
+                    DetailedMinutesSection(
+                        title: "原议题",
+                        timeRange: "00:00–00:01",
+                        speakers: ["原发言人"],
+                        content: "原议题内容"
+                    )
+                ],
+                decisions: ["原纪要决定"],
+                actionItems: [
+                    ActionItem(
+                        task: "原纪要行动项",
+                        owner: "原纪要负责人",
+                        dueDate: nil
+                    )
+                ],
+                openQuestions: ["原待确认问题"]
+            ),
+            model: "test-model",
+            promptVersion: 1
+        )
+        let entry = try XCTUnwrap(
+            repository.canonicalTranscripts(meetingID: meetingID).first
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        viewModel.updateTranscriptDraft("键盘中的转录", for: entry)
+        XCTAssertTrue(
+            viewModel.updateDocumentDraftText(
+                "键盘中的重点总结",
+                field: .summaryOverview
+            )
+        )
+        XCTAssertTrue(
+            viewModel.updateDocumentDraftText(
+                "键盘中的完整纪要",
+                field: .detailedMinutesOverview
+            )
+        )
+
+        XCTAssertEqual(
+            viewModel.transcriptDraftText(for: entry),
+            "键盘中的转录"
+        )
+        XCTAssertEqual(
+            viewModel.documentDraftText(field: .summaryOverview),
+            "键盘中的重点总结"
+        )
+        XCTAssertEqual(
+            viewModel.documentDraftText(field: .detailedMinutesOverview),
+            "键盘中的完整纪要"
+        )
+        XCTAssertTrue(viewModel.hasPendingEdits)
+    }
+
+    func testOriginalVisibleStructuredFieldsUpdateWithoutFlatteningDocuments()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "原建议标题",
+                overview: "概览",
+                keyPoints: ["要点"],
+                decisions: ["决定"],
+                actionItems: [
+                    ActionItem(task: "任务", owner: "负责人", dueDate: "周五")
+                ],
+                bookmarkInsights: ["后端保留但未显示"]
+            ),
+            model: "test-model"
+        )
+        try repository.saveGeneratedDetailedMinutes(
+            meetingID: meetingID,
+            generated: GeneratedDetailedMinutes(
+                overview: "纪要概览",
+                sections: [
+                    DetailedMinutesSection(
+                        title: "议题",
+                        timeRange: "00:00–00:10",
+                        speakers: ["甲", "乙"],
+                        content: "内容"
+                    )
+                ],
+                decisions: ["纪要决定"],
+                actionItems: [
+                    ActionItem(task: "纪要任务", owner: "丙", dueDate: nil)
+                ],
+                openQuestions: ["待确认"]
+            ),
+            model: "test-model",
+            promptVersion: 1
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let edits: [(MeetingEditableDocumentField, String)] = [
+            (.summaryKeyPoint(0), "新要点"),
+            (.summaryDecision(0), "新决定"),
+            (.summaryActionTask(0), "新任务"),
+            (.summaryActionOwner(0), "新负责人"),
+            (.detailedMinutesSectionTitle(0), "新议题"),
+            (.detailedMinutesSectionSpeaker(section: 0, speaker: 1), "丁"),
+            (.detailedMinutesSectionContent(0), "新内容"),
+            (.detailedMinutesDecision(0), "新纪要决定"),
+            (.detailedMinutesActionTask(0), "新纪要任务"),
+            (.detailedMinutesActionOwner(0), "戊"),
+            (.detailedMinutesOpenQuestion(0), "新待确认")
+        ]
+
+        for (field, value) in edits {
+            XCTAssertTrue(viewModel.updateDocumentDraftText(value, field: field))
+            XCTAssertEqual(viewModel.documentDraftText(field: field), value)
+        }
+
+        XCTAssertEqual(
+            viewModel.summaryDraft?.bookmarkInsights,
+            ["后端保留但未显示"]
+        )
+        XCTAssertEqual(viewModel.summaryDraft?.suggestedTitle, "原建议标题")
+        XCTAssertEqual(viewModel.summaryDraft?.actionItems[0].dueDate, "周五")
+        XCTAssertEqual(
+            viewModel.detailedMinutesDraft?.sections[0].timeRange,
+            "00:00–00:10"
+        )
+    }
+
+    func testReplacementPreviewCancelAndApplyUseConfirmedTaskFourPreview()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let currentMeetingID = try makeExactReplacementMeeting(
+            in: repository,
+            startedAt: .now,
+            title: "当前会议"
+        )
+        let isolatedMeetingID = try makeExactReplacementMeeting(
+            in: repository,
+            startedAt: .now.addingTimeInterval(-100),
+            title: "隔离会议"
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: currentMeetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        await viewModel.prepareExactReplacement(
+            searchText: "错名",
+            replacementText: "正确名"
+        )
+
+        let preview = try XCTUnwrap(viewModel.replacementPreview)
+        XCTAssertEqual(preview.meetingID, currentMeetingID)
+        XCTAssertEqual(preview.transcriptMatches, 2)
+        XCTAssertEqual(preview.speakerMatches, 1)
+        XCTAssertEqual(preview.summaryMatches, 6)
+        XCTAssertEqual(preview.detailedMinutesMatches, 8)
+        XCTAssertEqual(preview.totalMatches, 17)
+
+        viewModel.cancelExactReplacement()
+
+        XCTAssertNil(viewModel.replacementPreview)
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(
+                meetingID: currentMeetingID
+            ).first?.text,
+            "错名跟进错名任务"
+        )
+
+        await viewModel.prepareExactReplacement(
+            searchText: "错名",
+            replacementText: "正确名"
+        )
+        let applied = await viewModel.confirmExactReplacement()
+        XCTAssertTrue(applied)
+
+        XCTAssertNil(viewModel.replacementPreview)
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(
+                meetingID: currentMeetingID
+            ).first?.text,
+            "正确名跟进正确名任务"
+        )
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(
+                meetingID: isolatedMeetingID
+            ).first?.text,
+            "错名跟进错名任务"
+        )
+    }
+
+    func testStaleReplacementPreviewRefreshesWithoutApplying() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeExactReplacementMeeting(
+            in: repository,
+            startedAt: .now,
+            title: "内容变化会议"
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        await viewModel.prepareExactReplacement(
+            searchText: "错名",
+            replacementText: "正确名"
+        )
+        let staleRevision = try XCTUnwrap(
+            viewModel.replacementPreview?.observedContentRevision
+        )
+        let summary = try XCTUnwrap(
+            try repository.meeting(id: meetingID).summary
+        )
+        try repository.updateSummaryManually(
+            meetingID: meetingID,
+            value: GeneratedMeetingSummary(
+                suggestedTitle: "",
+                overview: summary.overview + "错名",
+                keyPoints: summary.keyPoints,
+                decisions: summary.decisions,
+                actionItems: summary.actionItemRecords,
+                bookmarkInsights: summary.bookmarkInsights
+            )
+        )
+
+        let applied = await viewModel.confirmExactReplacement()
+        XCTAssertFalse(applied)
+
+        let refreshed = try XCTUnwrap(viewModel.replacementPreview)
+        XCTAssertGreaterThan(refreshed.observedContentRevision, staleRevision)
+        XCTAssertEqual(refreshed.summaryMatches, 7)
+        XCTAssertEqual(
+            viewModel.replacementErrorMessage,
+            "会议内容已变化，请确认更新后的替换范围。"
+        )
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(
+                meetingID: meetingID
+            ).first?.text,
+            "错名跟进错名任务"
+        )
+    }
+
+    func testManualDocumentRegenerationRequiresExplicitDestructiveIntent()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "可生成的最终转录",
+            isFinal: true
+        )
+        try repository.finalizeMeeting(
+            id: meetingID,
+            endedAt: .now,
+            activeDuration: 1
+        )
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "",
+                overview: "生成的总结",
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            ),
+            model: "test-model"
+        )
+        try repository.updateSummaryManually(
+            meetingID: meetingID,
+            value: GeneratedMeetingSummary(
+                suggestedTitle: "",
+                overview: "人工修改的总结",
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            )
+        )
+        let manager = DetailDocumentManagerSpy()
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            documentManager: manager,
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        XCTAssertTrue(
+            viewModel.selectedDocumentRequiresRegenerationConfirmation
+        )
+
+        await viewModel.generateSelectedDocument()
+        XCTAssertTrue(manager.generatedKinds.isEmpty)
+
+        await viewModel.generateSelectedDocument(replacingManualEdits: true)
+        XCTAssertEqual(manager.generatedKinds, [.summary])
+        XCTAssertEqual(manager.generatedReplacingManualEdits, [true])
+    }
+
+    private func makeExactReplacementMeeting(
+        in repository: MeetingRepository,
+        startedAt: Date,
+        title: String
+    ) throws -> UUID {
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: startedAt,
+            title: title
+        )
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 0,
+                        endTime: 2,
+                        text: "错名跟进错名任务"
+                    ),
+                    speakerID: "room-1",
+                    source: .room
+                )
+            ],
+            sourceRevision: 1
+        )
+        try repository.setSpeakerDisplayName(
+            meetingID: meetingID,
+            speakerID: "room-1",
+            displayName: "错名"
+        )
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "",
+                overview: "错名确认范围",
+                keyPoints: ["错名确认要点"],
+                decisions: ["错名批准决定"],
+                actionItems: [
+                    ActionItem(
+                        task: "错名准备发布",
+                        owner: "错名",
+                        dueDate: nil
+                    )
+                ],
+                bookmarkInsights: ["错名书签洞察"]
+            ),
+            model: "test-model"
+        )
+        try repository.saveGeneratedDetailedMinutes(
+            meetingID: meetingID,
+            generated: GeneratedDetailedMinutes(
+                overview: "错名纪要概览",
+                sections: [
+                    DetailedMinutesSection(
+                        title: "错名议题",
+                        timeRange: "00:00–00:02",
+                        speakers: ["错名"],
+                        content: "错名议题内容"
+                    )
+                ],
+                decisions: ["错名纪要决定"],
+                actionItems: [
+                    ActionItem(task: "错名纪要任务", owner: "错名", dueDate: nil)
+                ],
+                openQuestions: ["错名待确认"]
+            ),
+            model: "test-model",
+            promptVersion: 1
+        )
+        return meetingID
+    }
+
     private func makeSettingsStore(
         isNotionArchivingEnabled: Bool = true
     ) -> AppSettingsStore {
@@ -1952,6 +2617,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
 @MainActor
 private final class DetailDocumentManagerSpy: MeetingDocumentManaging {
     private(set) var generatedKinds: [MeetingDocumentKind] = []
+    private(set) var generatedReplacingManualEdits: [Bool] = []
     private(set) var retriedKinds: [MeetingDocumentKind] = []
 
     func generate(
@@ -1960,8 +2626,8 @@ private final class DetailDocumentManagerSpy: MeetingDocumentManaging {
         replacingManualEdits: Bool
     ) async throws {
         _ = meetingID
-        _ = replacingManualEdits
         generatedKinds.append(kind)
+        generatedReplacingManualEdits.append(replacingManualEdits)
     }
 
     func retryArchive(
@@ -1970,6 +2636,12 @@ private final class DetailDocumentManagerSpy: MeetingDocumentManaging {
     ) async throws {
         _ = meetingID
         retriedKinds.append(kind)
+    }
+}
+
+private final class InlineContextMenuTarget: NSObject {
+    @objc func requestReplacement(_ sender: Any?) {
+        _ = sender
     }
 }
 

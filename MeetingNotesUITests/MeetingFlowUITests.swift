@@ -209,6 +209,262 @@ final class MeetingFlowUITests: XCTestCase {
         XCTAssertTrue(remove.waitForNonExistence(timeout: 3))
     }
 
+    func testEditsAutosaveAndReplaceCurrentMeeting() {
+        let app = launchApp(
+            environment: ["MEETING_NOTES_UI_MEETING_EDITING": "1"]
+        )
+        let currentMeeting = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier == %@ AND label CONTAINS %@",
+                "meeting.historyRow",
+                "原界面可编辑会议"
+            )
+        ).firstMatch
+        XCTAssertTrue(currentMeeting.waitForExistence(timeout: 5))
+        currentMeeting.click()
+
+        let detail = app.scrollViews["meeting.detail"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["总结与归档"].exists)
+        let summaryMode = app.buttons["meeting.documents.mode.summary"]
+        let detailedMode = app.buttons["meeting.documents.mode.detailed"]
+        XCTAssertTrue(summaryMode.exists)
+        XCTAssertTrue(detailedMode.exists)
+        let transcriptDisclosure = app.descendants(matching: .any)[
+            "meeting.transcripts.disclosure"
+        ].firstMatch
+        XCTAssertTrue(transcriptDisclosure.exists)
+        XCTAssertTrue(
+            transcriptDisclosure.label.contains("完整转录内容")
+        )
+        XCTAssertTrue(app.staticTexts["书签"].exists)
+        XCTAssertFalse(app.buttons["meeting.editMode"].exists)
+        XCTAssertFalse(app.buttons["meeting.documents.save"].exists)
+        XCTAssertFalse(
+            app.descendants(matching: .any)[
+                "meeting.replacement.toolbar"
+            ].firstMatch.exists
+        )
+        XCTAssertFalse(
+            app.descendants(matching: .any)[
+                "meeting.documents.editor"
+            ].firstMatch.exists
+        )
+        XCTAssertFalse(app.staticTexts["书签洞察"].exists)
+
+        let summaryTask = app.descendants(matching: .any)[
+            "meeting.summary.action.0.task"
+        ].firstMatch
+        let summaryOwner = app.descendants(matching: .any)[
+            "meeting.summary.action.0.owner"
+        ].firstMatch
+        scrollUntilHittable(summaryTask, in: detail)
+        XCTAssertTrue(summaryTask.isHittable)
+        XCTAssertTrue(summaryOwner.waitForExistence(timeout: 3))
+        XCTAssertGreaterThan(summaryTask.frame.height, 24)
+        XCTAssertGreaterThan(
+            summaryOwner.frame.height,
+            24,
+            "task=\(summaryTask.frame) owner=\(summaryOwner.frame) detail=\(detail.frame)"
+        )
+        XCTAssertLessThanOrEqual(
+            summaryOwner.frame.maxX,
+            detail.frame.maxX + 1
+        )
+
+        for _ in 0..<14 where !detailedMode.isHittable {
+            detail.scroll(byDeltaX: 0, deltaY: 90)
+        }
+        XCTAssertTrue(detailedMode.isHittable)
+        detailedMode.click()
+        let firstLongSpeaker = app.descendants(matching: .any)[
+            "meeting.minutes.section.0.speaker.0"
+        ].firstMatch
+        let secondLongSpeaker = app.descendants(matching: .any)[
+            "meeting.minutes.section.0.speaker.1"
+        ].firstMatch
+        scrollUntilHittable(firstLongSpeaker, in: detail)
+        XCTAssertTrue(firstLongSpeaker.isHittable)
+        XCTAssertTrue(secondLongSpeaker.waitForExistence(timeout: 3))
+        XCTAssertGreaterThan(
+            firstLongSpeaker.frame.height,
+            20,
+            "first=\(firstLongSpeaker.frame) second=\(secondLongSpeaker.frame) detail=\(detail.frame)"
+        )
+        XCTAssertGreaterThan(
+            secondLongSpeaker.frame.height,
+            20,
+            "first=\(firstLongSpeaker.frame) second=\(secondLongSpeaker.frame) detail=\(detail.frame)"
+        )
+        XCTAssertLessThanOrEqual(
+            secondLongSpeaker.frame.maxX,
+            detail.frame.maxX + 1
+        )
+
+        for _ in 0..<14 where !summaryMode.isHittable {
+            detail.scroll(byDeltaX: 0, deltaY: 90)
+        }
+        XCTAssertTrue(summaryMode.isHittable)
+        summaryMode.click()
+
+        let transcript = app.descendants(matching: .any)[
+            "meeting.transcripts.text.0"
+        ].firstMatch
+        scrollUntilHittable(transcript, in: detail)
+        XCTAssertTrue(transcript.waitForExistence(timeout: 3))
+        XCTAssertEqual(accessibleText(of: transcript), "王明跟进王明任务")
+        replaceText(
+            in: transcript,
+            with: "王明跟进王明任务，人工修正"
+        )
+        XCTAssertEqual(
+            accessibleText(of: transcript),
+            "王明跟进王明任务，人工修正"
+        )
+        XCTAssertTrue(
+            waitForStaticText(
+                identifier: "meeting.edits.saveStatus",
+                label: "已保存到本机",
+                in: app,
+                timeout: 5
+            )
+        )
+        let transcriptTurn = app.descendants(matching: .any)[
+            "meeting.transcripts.turn.0"
+        ].firstMatch
+        scrollUntilHittable(transcriptTurn, in: detail)
+        XCTAssertTrue(transcriptTurn.waitForExistence(timeout: 3))
+        XCTAssertTrue(
+            waitForLabelContaining("人工修正", on: transcriptTurn),
+            "label=\(transcriptTurn.label)"
+        )
+
+        let summaryOverview = app.descendants(matching: .any)[
+            "meeting.summary.overview"
+        ].firstMatch
+        scrollUntilHittable(summaryOverview, in: detail)
+        XCTAssertTrue(summaryOverview.waitForExistence(timeout: 3))
+        replaceText(
+            in: summaryOverview,
+            with: "王明确认范围，人工修正"
+        )
+
+        XCTAssertTrue(
+            waitForStaticText(
+                identifier: "meeting.edits.saveStatus",
+                label: "已保存到本机",
+                in: app,
+                timeout: 5
+            )
+        )
+        XCTAssertFalse(app.buttons["meeting.documents.save"].exists)
+
+        scrollUntilHittable(transcript, in: detail)
+        transcript.rightClick()
+        let replaceSameText = app.menuItems["替换本会议相同文字…"]
+        XCTAssertTrue(replaceSameText.waitForExistence(timeout: 3))
+        XCTAssertTrue(
+            app.menuItems["Copy"].exists
+                || app.menuItems["拷贝"].exists
+                || app.menuItems["复制"].exists
+        )
+        replaceSameText.click()
+
+        let search = app.textFields["meeting.replacement.search"]
+        let replacement = app.textFields["meeting.replacement.replacement"]
+        XCTAssertTrue(search.waitForExistence(timeout: 3))
+        XCTAssertEqual(
+            accessibleText(of: search),
+            "王明跟进王明任务，人工修正"
+        )
+        replaceText(in: search, with: "王明")
+        replaceText(in: replacement, with: "王敏")
+        app.buttons["meeting.replacement.preview"].click()
+
+        XCTAssertTrue(
+            waitForStaticText(
+                identifier: "meeting.replacement.count.transcript",
+                label: "完整转录：2 处",
+                in: app,
+                timeout: 3
+            )
+        )
+        XCTAssertTrue(
+            waitForStaticText(
+                identifier: "meeting.replacement.count.speaker",
+                label: "说话人：1 处",
+                in: app,
+                timeout: 3
+            )
+        )
+        XCTAssertTrue(
+            waitForStaticText(
+                identifier: "meeting.replacement.count.summary",
+                label: "重点总结：6 处",
+                in: app,
+                timeout: 3
+            )
+        )
+        XCTAssertTrue(
+            waitForStaticText(
+                identifier: "meeting.replacement.count.minutes",
+                label: "完整纪要：8 处",
+                in: app,
+                timeout: 3
+            )
+        )
+        app.buttons["meeting.replacement.cancel"].click()
+        XCTAssertTrue(search.waitForNonExistence(timeout: 3))
+        XCTAssertTrue(
+            waitForValueContaining("王明", on: transcript, timeout: 3)
+        )
+
+        transcript.rightClick()
+        let replaceSameTextAgain = app.menuItems["替换本会议相同文字…"]
+        XCTAssertTrue(replaceSameTextAgain.waitForExistence(timeout: 3))
+        replaceSameTextAgain.click()
+        XCTAssertTrue(search.waitForExistence(timeout: 3))
+        replaceText(in: search, with: "王明")
+        replaceText(in: replacement, with: "王敏")
+        app.buttons["meeting.replacement.preview"].click()
+        let confirm = app.buttons["meeting.replacement.confirm"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 3))
+        confirm.click()
+
+        XCTAssertTrue(search.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(
+            waitForValueContaining("王敏", on: transcript, timeout: 5)
+        )
+        XCTAssertFalse(accessibleText(of: transcript).contains("王明"))
+        scrollUntilHittable(summaryOverview, in: detail)
+        XCTAssertTrue(
+            waitForValueContaining("王敏", on: summaryOverview, timeout: 5)
+        )
+
+        app.buttons["meeting.returnHome"].click()
+        let isolatedMeeting = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier == %@ AND label CONTAINS %@",
+                "meeting.historyRow",
+                "隔离会议（不应修改）"
+            )
+        ).firstMatch
+        XCTAssertTrue(isolatedMeeting.waitForExistence(timeout: 5))
+        isolatedMeeting.click()
+        let isolatedDetail = app.scrollViews["meeting.detail"]
+        XCTAssertTrue(isolatedDetail.waitForExistence(timeout: 5))
+        let isolatedTranscript = app.descendants(matching: .any)[
+            "meeting.transcripts.text.0"
+        ].firstMatch
+        scrollUntilHittable(isolatedTranscript, in: isolatedDetail)
+        XCTAssertTrue(isolatedTranscript.waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            accessibleText(of: isolatedTranscript),
+            "王明跟进王明任务"
+        )
+        XCTAssertFalse(accessibleText(of: isolatedTranscript).contains("王敏"))
+    }
+
     func testSettingsAudioDiagnosticsExposeAccessibleWorkflow() {
         let app = launchApp()
         XCTAssertTrue(

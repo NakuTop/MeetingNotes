@@ -34,6 +34,11 @@ private struct TranscriptDisclosureContext: Equatable {
     }
 }
 
+private struct MeetingExactReplacementRequest: Identifiable {
+    let id = UUID()
+    let initialSearchText: String
+}
+
 @MainActor
 enum MeetingDetailTranscriptProjection {
     static func entries(
@@ -58,6 +63,9 @@ struct MeetingDetailView: View {
     @State private var transcriptIsExpanded = true
     @State private var transcriptPreviouslyHadSummary = false
     @State private var transcriptDisclosureUserHasInteracted = false
+    @State private var exactReplacementRequest:
+        MeetingExactReplacementRequest?
+    @State private var isRegenerationConfirmationPresented = false
     @Bindable private var audioPlayerController: MeetingAudioPlayerController
     @FocusState private var isTitleFieldFocused: Bool
     private let onReturnHome: () -> Void
@@ -104,6 +112,31 @@ struct MeetingDetailView: View {
             invalidateRenameTask()
             invalidateDocumentOperationTask()
             invalidateSpeakerDiarizationTask()
+            flushMeetingEdits()
+        }
+        .sheet(
+            item: $exactReplacementRequest,
+            onDismiss: viewModel.cancelExactReplacement
+        ) { request in
+            MeetingExactReplacementSheet(
+                viewModel: viewModel,
+                initialSearchText: request.initialSearchText,
+                onClose: {
+                    exactReplacementRequest = nil
+                }
+            )
+        }
+        .confirmationDialog(
+            "重新生成会覆盖手动修改",
+            isPresented: $isRegenerationConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("重新生成并覆盖", role: .destructive) {
+                beginGenerateSelectedDocument(replacingManualEdits: true)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("当前内容包含手动修改，重新生成后无法恢复。")
         }
     }
 
@@ -151,7 +184,17 @@ struct MeetingDetailView: View {
                                 )
                                 if succeeded { onMeetingChanged() }
                                 return succeeded
-                            }
+                            },
+                            onChangeTranscript: { text, target in
+                                viewModel.updateTranscriptDraft(
+                                    text,
+                                    for: target
+                                )
+                            },
+                            onFlushEdits: flushMeetingEdits,
+                            onRequestExactReplacement:
+                                requestExactReplacement,
+                            transcriptDrafts: viewModel.transcriptDrafts
                         )
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 8)
@@ -210,8 +253,18 @@ struct MeetingDetailView: View {
     ) {
         guard transcriptMeetingID == context.meetingID else {
             transcriptMeetingID = context.meetingID
+            #if DEBUG
+            if LaunchArguments.isUITesting(),
+               LaunchArguments.usesMeetingEditingUITestFixture() {
+                transcriptIsExpanded = true
+            } else {
+                transcriptIsExpanded = TranscriptDisclosurePolicy
+                    .initialIsExpanded(hasSummary: context.hasSummary)
+            }
+            #else
             transcriptIsExpanded = TranscriptDisclosurePolicy
                 .initialIsExpanded(hasSummary: context.hasSummary)
+            #endif
             transcriptPreviouslyHadSummary = context.hasSummary
             transcriptDisclosureUserHasInteracted = false
             return
@@ -482,6 +535,8 @@ struct MeetingDetailView: View {
 
                 selectedDocumentContent(meeting)
 
+                localSaveStatus
+
                 if let errorMessage = viewModel.documentErrorMessage(
                     for: viewModel.selectedDocumentKind
                 ) {
@@ -506,7 +561,14 @@ struct MeetingDetailView: View {
                         selectedGenerateButtonTitle(meeting),
                         systemImage: "sparkles"
                     ) {
-                        beginGenerateSelectedDocument()
+                        if viewModel
+                            .selectedDocumentRequiresRegenerationConfirmation {
+                            isRegenerationConfirmationPresented = true
+                        } else {
+                            beginGenerateSelectedDocument(
+                                replacingManualEdits: false
+                            )
+                        }
                     }
                     .adaptivePrimaryButtonStyle()
                     .disabled(
@@ -560,21 +622,45 @@ struct MeetingDetailView: View {
     private func selectedDocumentContent(_ meeting: MeetingRecord) -> some View {
         switch viewModel.selectedDocumentKind {
         case .summary:
-            if let summary = meeting.summary {
-                Text(summary.overview)
-                    .textSelection(.enabled)
-                summaryList(title: "关键结论", items: summary.keyPoints)
-                summaryList(title: "决定事项", items: summary.decisions)
-                summaryList(
+            if meeting.summary != nil,
+               let summary = viewModel.summaryDraft {
+                editableDocumentText(
+                    field: .summaryOverview,
+                    fallback: summary.overview,
+                    accessibilityIdentifier: "meeting.summary.overview"
+                )
+                editableStringList(
+                    title: "关键结论",
+                    items: summary.keyPoints,
+                    field: { .summaryKeyPoint($0) },
+                    accessibilityIdentifier: "meeting.summary.keyPoint"
+                )
+                editableStringList(
+                    title: "决定事项",
+                    items: summary.decisions,
+                    field: { .summaryDecision($0) },
+                    accessibilityIdentifier: "meeting.summary.decision"
+                )
+                editableActionItems(
                     title: "行动项",
-                    items: summary.actionItemRecords.map(actionItemText)
+                    items: summary.actionItems,
+                    taskField: { .summaryActionTask($0) },
+                    ownerField: { .summaryActionOwner($0) },
+                    accessibilityIdentifier: "meeting.summary.action"
                 )
             } else {
                 emptyDocumentMessage(kind: .summary)
             }
         case .detailedMinutes:
-            if let minutes = meeting.detailedMinutes {
-                decodedDetailedMinutesContent(minutes)
+            if meeting.detailedMinutes != nil,
+               let minutes = viewModel.detailedMinutesDraft {
+                detailedMinutesContent(minutes)
+            } else if meeting.detailedMinutes != nil {
+                Label(
+                    "完整纪要读取失败，请重新生成。",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.orange)
             } else {
                 emptyDocumentMessage(kind: .detailedMinutes)
             }
@@ -591,36 +677,34 @@ struct MeetingDetailView: View {
     }
 
     @ViewBuilder
-    private func decodedDetailedMinutesContent(
-        _ minutes: DetailedMinutesRecord
+    private func detailedMinutesContent(
+        _ minutes: GeneratedDetailedMinutes
     ) -> some View {
-        let result: Result<GeneratedDetailedMinutes, Error> = Result {
-            try GeneratedDetailedMinutes(
-                overview: minutes.overview,
-                sections: minutes.sections,
-                decisions: minutes.decisions,
-                actionItems: minutes.actionItems,
-                openQuestions: minutes.openQuestions
-            )
-        }
-        switch result {
-        case let .success(decoded):
-            Text(decoded.overview)
-                .textSelection(.enabled)
-            detailedMinutesSections(decoded.sections)
-            summaryList(title: "决定事项", items: decoded.decisions)
-            summaryList(
-                title: "行动项",
-                items: decoded.actionItems.map(actionItemText)
-            )
-            summaryList(title: "待确认问题", items: decoded.openQuestions)
-        case .failure:
-            Label(
-                "完整纪要读取失败，请重新生成。",
-                systemImage: "exclamationmark.triangle.fill"
-            )
-            .foregroundStyle(.orange)
-        }
+        editableDocumentText(
+            field: .detailedMinutesOverview,
+            fallback: minutes.overview,
+            accessibilityIdentifier: "meeting.minutes.overview"
+        )
+        detailedMinutesSections(minutes.sections)
+        editableStringList(
+            title: "决定事项",
+            items: minutes.decisions,
+            field: { .detailedMinutesDecision($0) },
+            accessibilityIdentifier: "meeting.minutes.decision"
+        )
+        editableActionItems(
+            title: "行动项",
+            items: minutes.actionItems,
+            taskField: { .detailedMinutesActionTask($0) },
+            ownerField: { .detailedMinutesActionOwner($0) },
+            accessibilityIdentifier: "meeting.minutes.action"
+        )
+        editableStringList(
+            title: "待确认问题",
+            items: minutes.openQuestions,
+            field: { .detailedMinutesOpenQuestion($0) },
+            accessibilityIdentifier: "meeting.minutes.openQuestion"
+        )
     }
 
     @ViewBuilder
@@ -631,11 +715,20 @@ struct MeetingDetailView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("议题记录")
                     .font(.headline)
-                ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
+                ForEach(Array(sections.enumerated()), id: \.offset) {
+                    sectionIndex, section in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(alignment: .firstTextBaseline) {
-                            Text(section.title)
-                                .font(.subheadline.weight(.semibold))
+                            editableDocumentText(
+                                field: .detailedMinutesSectionTitle(
+                                    sectionIndex
+                                ),
+                                fallback: section.title,
+                                font: .subheadline,
+                                fontWeight: .semibold,
+                                accessibilityIdentifier:
+                                    "meeting.minutes.section.\(sectionIndex).title"
+                            )
                             Spacer()
                             if let timeRange = section.timeRange,
                                !timeRange.isEmpty {
@@ -645,12 +738,44 @@ struct MeetingDetailView: View {
                             }
                         }
                         if !section.speakers.isEmpty {
-                            Text("发言人：\(section.speakers.joined(separator: "、"))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            HStack(
+                                alignment: .firstTextBaseline,
+                                spacing: 0
+                            ) {
+                                Text("发言人：")
+                                ForEach(
+                                    Array(section.speakers.enumerated()),
+                                    id: \.offset
+                                ) { speakerIndex, speaker in
+                                    if speakerIndex > 0 {
+                                        Text("、")
+                                    }
+                                    editableDocumentText(
+                                        field:
+                                            .detailedMinutesSectionSpeaker(
+                                                section: sectionIndex,
+                                                speaker: speakerIndex
+                                            ),
+                                        fallback: speaker,
+                                        font: .caption,
+                                        foregroundColor: .secondary,
+                                        expandsHorizontally: false,
+                                        accessibilityIdentifier:
+                                            "meeting.minutes.section.\(sectionIndex).speaker.\(speakerIndex)"
+                                    )
+                                }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         }
-                        Text(section.content)
-                            .textSelection(.enabled)
+                        editableDocumentText(
+                            field: .detailedMinutesSectionContent(
+                                sectionIndex
+                            ),
+                            fallback: section.content,
+                            accessibilityIdentifier:
+                                "meeting.minutes.section.\(sectionIndex).content"
+                        )
                     }
                 }
             }
@@ -664,12 +789,16 @@ struct MeetingDetailView: View {
             : "完整纪要")
     }
 
-    private func beginGenerateSelectedDocument() {
+    private func beginGenerateSelectedDocument(
+        replacingManualEdits: Bool
+    ) {
         invalidateDocumentOperationTask()
         // The detail view owns this workflow so navigation cancellation reaches
         // the view model and its use case instead of continuing off-screen.
         documentOperationTask = Task { @MainActor [viewModel] in
-            await viewModel.generateSelectedDocument()
+            await viewModel.generateSelectedDocument(
+                replacingManualEdits: replacingManualEdits
+            )
         }
     }
 
@@ -779,30 +908,161 @@ struct MeetingDetailView: View {
         }
     }
 
-    private func actionItemText(_ item: ActionItem) -> String {
-        var details: [String] = []
-        if let owner = item.owner, !owner.isEmpty {
-            details.append("负责人：\(owner)")
-        }
-        if let dueDate = item.dueDate, !dueDate.isEmpty {
-            details.append("截止：\(dueDate)")
-        }
-        guard !details.isEmpty else { return item.task }
-        return "\(item.task)｜\(details.joined(separator: "｜"))"
-    }
-
     @ViewBuilder
-    private func summaryList(title: String, items: [String]) -> some View {
+    private func editableStringList(
+        title: String,
+        items: [String],
+        field: @escaping (Int) -> MeetingEditableDocumentField,
+        accessibilityIdentifier: String
+    ) -> some View {
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: 5) {
                 Text(title)
                     .font(.headline)
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    Text("• \(item)")
-                        .textSelection(.enabled)
+                ForEach(Array(items.enumerated()), id: \.offset) {
+                    index, item in
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        Text("• ")
+                        editableDocumentText(
+                            field: field(index),
+                            fallback: item,
+                            accessibilityIdentifier:
+                                "\(accessibilityIdentifier).\(index)"
+                        )
+                    }
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func editableActionItems(
+        title: String,
+        items: [ActionItem],
+        taskField: @escaping (Int) -> MeetingEditableDocumentField,
+        ownerField: @escaping (Int) -> MeetingEditableDocumentField,
+        accessibilityIdentifier: String
+    ) -> some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .font(.headline)
+                ForEach(Array(items.enumerated()), id: \.offset) {
+                    index, item in
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        Text("• ")
+                        editableDocumentText(
+                            field: taskField(index),
+                            fallback: item.task,
+                            expandsHorizontally: item.owner == nil
+                                && item.dueDate == nil,
+                            accessibilityIdentifier:
+                                "\(accessibilityIdentifier).\(index).task"
+                        )
+                        if let owner = item.owner, !owner.isEmpty {
+                            Text("｜负责人：")
+                            editableDocumentText(
+                                field: ownerField(index),
+                                fallback: owner,
+                                expandsHorizontally: false,
+                                accessibilityIdentifier:
+                                    "\(accessibilityIdentifier).\(index).owner"
+                            )
+                        }
+                        if let dueDate = item.dueDate, !dueDate.isEmpty {
+                            Text("｜截止：\(dueDate)")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func editableDocumentText(
+        field: MeetingEditableDocumentField,
+        fallback: String,
+        font: Font.TextStyle = .body,
+        fontWeight: Font.Weight? = nil,
+        foregroundColor: Color = .primary,
+        expandsHorizontally: Bool = true,
+        accessibilityIdentifier: String
+    ) -> some View {
+        InlineEditableMeetingText(
+            text: Binding(
+                get: {
+                    viewModel.documentDraftText(field: field) ?? fallback
+                },
+                set: { value in
+                    _ = viewModel.updateDocumentDraftText(
+                        value,
+                        field: field
+                    )
+                }
+            ),
+            font: font,
+            fontWeight: fontWeight,
+            foregroundColor: foregroundColor,
+            accessibilityIdentifier: accessibilityIdentifier,
+            onFlush: flushMeetingEdits,
+            onRequestExactReplacement: requestExactReplacement
+        )
+        .frame(
+            minWidth: 0,
+            maxWidth: expandsHorizontally ? .infinity : nil,
+            alignment: .leading
+        )
+        .layoutPriority(expandsHorizontally ? 1 : 0)
+    }
+
+    @ViewBuilder
+    private var localSaveStatus: some View {
+        switch viewModel.localSaveState {
+        case .idle:
+            EmptyView()
+        case .saving:
+            HStack(spacing: 7) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在保存…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("meeting.edits.saveStatus")
+        case .saved:
+            Label("已保存到本机", systemImage: "checkmark.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("meeting.edits.saveStatus")
+        case let .failed(message):
+            HStack(spacing: 8) {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                Button("重试") {
+                    Task { @MainActor [viewModel] in
+                        await viewModel.retrySavingEdits()
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("meeting.edits.retry")
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("meeting.edits.saveStatus")
+        }
+    }
+
+    private func flushMeetingEdits() {
+        Task { @MainActor [viewModel] in
+            await viewModel.flushEdits()
+        }
+    }
+
+    private func requestExactReplacement(_ text: String) {
+        viewModel.cancelExactReplacement()
+        exactReplacementRequest = MeetingExactReplacementRequest(
+            initialSearchText: text
+        )
     }
 }
 

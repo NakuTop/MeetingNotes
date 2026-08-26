@@ -83,6 +83,18 @@ struct MeetingTranscriptEditTarget: Equatable, Sendable {
         )
     }
 
+    init(turn: TranscriptDisplayTurn) {
+        self.init(
+            canonicalEntryID: turn.canonicalEntryID,
+            correctionID: turn.correctionID,
+            transcriptIDs: turn.transcriptIDs,
+            anchorStartTime: turn.startTime,
+            anchorEndTime: turn.endTime,
+            source: turn.source,
+            originalText: turn.text
+        )
+    }
+
     func hasSameDraftIdentity(
         as other: MeetingTranscriptEditTarget
     ) -> Bool {
@@ -102,6 +114,22 @@ struct MeetingTranscriptEditDraft: Equatable, Sendable {
     let text: String
 }
 
+enum MeetingEditableDocumentField: Hashable, Sendable {
+    case summaryOverview
+    case summaryKeyPoint(Int)
+    case summaryDecision(Int)
+    case summaryActionTask(Int)
+    case summaryActionOwner(Int)
+    case detailedMinutesOverview
+    case detailedMinutesSectionTitle(Int)
+    case detailedMinutesSectionSpeaker(section: Int, speaker: Int)
+    case detailedMinutesSectionContent(Int)
+    case detailedMinutesDecision(Int)
+    case detailedMinutesActionTask(Int)
+    case detailedMinutesActionOwner(Int)
+    case detailedMinutesOpenQuestion(Int)
+}
+
 @MainActor
 @Observable
 final class MeetingDetailViewModel {
@@ -116,6 +144,7 @@ final class MeetingDetailViewModel {
     private let recordingPresentationStore:
         RecordingSessionPresentationStore?
     private let editAutosaver: MeetingEditAutosaver
+    private let exactReplacement: MeetingExactReplacement
 
     private(set) var meeting: MeetingRecord?
     private(set) var summaryDraft: GeneratedMeetingSummary?
@@ -128,6 +157,8 @@ final class MeetingDetailViewModel {
     private(set) var isRetryingSpeakerDiarization = false
     private(set) var speakerDiarizationRetryErrorMessage: String?
     private(set) var speakerNameErrorMessage: String?
+    private(set) var replacementPreview: MeetingExactReplacementPreview?
+    private(set) var replacementErrorMessage: String?
     var selectedDocumentKind: MeetingDocumentKind = .summary
     private(set) var documentOperation: MeetingDocumentOperation = .idle
     private var summaryDocumentErrorMessage: String?
@@ -148,7 +179,8 @@ final class MeetingDetailViewModel {
             (any MeetingSpeakerDiarizationRetrying)? = nil,
         recordingPresentationStore:
             RecordingSessionPresentationStore? = nil,
-        editAutosaver: MeetingEditAutosaver? = nil
+        editAutosaver: MeetingEditAutosaver? = nil,
+        exactReplacement: MeetingExactReplacement? = nil
     ) {
         self.meetingID = meetingID
         self.repository = repository
@@ -159,6 +191,8 @@ final class MeetingDetailViewModel {
         self.speakerDiarizationRetryer = speakerDiarizationRetryer
         self.recordingPresentationStore = recordingPresentationStore
         self.editAutosaver = editAutosaver ?? MeetingEditAutosaver()
+        self.exactReplacement = exactReplacement
+            ?? MeetingExactReplacement(repository: repository)
         meeting = try? repository.meeting(id: meetingID)
         synchronizeCleanDocumentDrafts()
     }
@@ -289,7 +323,34 @@ final class MeetingDetailViewModel {
         setDocumentErrorMessage(nil, for: kind)
     }
 
-    func generateSelectedDocument() async {
+    var selectedDocumentRequiresRegenerationConfirmation: Bool {
+        switch selectedDocumentKind {
+        case .summary:
+            summaryDraftToken != nil
+                || meeting?.summary?.isManuallyEdited == true
+        case .detailedMinutes:
+            detailedMinutesDraftToken != nil
+                || meeting?.detailedMinutes?.isManuallyEdited == true
+        }
+    }
+
+    func generateSelectedDocument(
+        replacingManualEdits: Bool = false
+    ) async {
+        guard replacingManualEdits
+                || !selectedDocumentRequiresRegenerationConfirmation else {
+            return
+        }
+        if hasPendingEdits {
+            await flushEdits()
+            guard !hasPendingEdits else {
+                setDocumentErrorMessage(
+                    "本地修改尚未安全保存，请重试后再重新生成。",
+                    for: selectedDocumentKind
+                )
+                return
+            }
+        }
         guard canGenerateSelectedDocument,
               let documentManager else { return }
         let kind = selectedDocumentKind
@@ -298,13 +359,21 @@ final class MeetingDetailViewModel {
         defer { documentOperation = .idle }
 
         do {
-            try await documentManager.generate(
-                meetingID: meetingID,
-                kind: kind
-            ) { [weak self] operation in
-                self?.documentOperation = operation
-                if case .archiving = operation {
-                    self?.load()
+            if replacingManualEdits {
+                try await documentManager.generate(
+                    meetingID: meetingID,
+                    kind: kind,
+                    replacingManualEdits: true
+                )
+            } else {
+                try await documentManager.generate(
+                    meetingID: meetingID,
+                    kind: kind
+                ) { [weak self] operation in
+                    self?.documentOperation = operation
+                    if case .archiving = operation {
+                        self?.load()
+                    }
                 }
             }
         } catch where Self.isCancellation(error) {
@@ -439,8 +508,12 @@ final class MeetingDetailViewModel {
         } else if let index = pendingTranscriptDrafts.firstIndex(where: {
             $0.draft.target.hasSameDraftIdentity(as: target)
         }) {
+            let existingTarget = pendingTranscriptDrafts[index].draft.target
             pendingTranscriptDrafts[index] = PendingTranscriptDraft(
-                draft: MeetingTranscriptEditDraft(target: target, text: text),
+                draft: MeetingTranscriptEditDraft(
+                    target: existingTarget,
+                    text: text
+                ),
                 token: UUID()
             )
         } else {
@@ -475,6 +548,227 @@ final class MeetingDetailViewModel {
             detailedMinutesDraftToken = UUID()
         }
         reschedulePendingEdits()
+    }
+
+    func documentDraftText(
+        field: MeetingEditableDocumentField
+    ) -> String? {
+        switch field {
+        case .summaryOverview:
+            summaryDraft?.overview
+        case let .summaryKeyPoint(index):
+            summaryDraft?.keyPoints[safe: index]
+        case let .summaryDecision(index):
+            summaryDraft?.decisions[safe: index]
+        case let .summaryActionTask(index):
+            summaryDraft?.actionItems[safe: index]?.task
+        case let .summaryActionOwner(index):
+            summaryDraft?.actionItems[safe: index]?.owner
+        case .detailedMinutesOverview:
+            detailedMinutesDraft?.overview
+        case let .detailedMinutesSectionTitle(index):
+            detailedMinutesDraft?.sections[safe: index]?.title
+        case let .detailedMinutesSectionSpeaker(section, speaker):
+            detailedMinutesDraft?.sections[safe: section]?
+                .speakers[safe: speaker]
+        case let .detailedMinutesSectionContent(index):
+            detailedMinutesDraft?.sections[safe: index]?.content
+        case let .detailedMinutesDecision(index):
+            detailedMinutesDraft?.decisions[safe: index]
+        case let .detailedMinutesActionTask(index):
+            detailedMinutesDraft?.actionItems[safe: index]?.task
+        case let .detailedMinutesActionOwner(index):
+            detailedMinutesDraft?.actionItems[safe: index]?.owner
+        case let .detailedMinutesOpenQuestion(index):
+            detailedMinutesDraft?.openQuestions[safe: index]
+        }
+    }
+
+    @discardableResult
+    func updateDocumentDraftText(
+        _ text: String,
+        field: MeetingEditableDocumentField
+    ) -> Bool {
+        switch field {
+        case .summaryOverview:
+            guard let summaryDraft else { return false }
+            updateSummaryDraft(
+                summaryDraft.replacing(overview: text)
+            )
+        case let .summaryKeyPoint(index):
+            guard let summaryDraft,
+                  let keyPoints = summaryDraft.keyPoints.replacing(
+                      at: index,
+                      with: text
+                  ) else { return false }
+            updateSummaryDraft(summaryDraft.replacing(keyPoints: keyPoints))
+        case let .summaryDecision(index):
+            guard let summaryDraft,
+                  let decisions = summaryDraft.decisions.replacing(
+                      at: index,
+                      with: text
+                  ) else { return false }
+            updateSummaryDraft(summaryDraft.replacing(decisions: decisions))
+        case let .summaryActionTask(index):
+            guard let summaryDraft,
+                  let actionItems = summaryDraft.actionItems.replacingAction(
+                      at: index,
+                      task: text
+                  ) else { return false }
+            updateSummaryDraft(
+                summaryDraft.replacing(actionItems: actionItems)
+            )
+        case let .summaryActionOwner(index):
+            guard let summaryDraft,
+                  let actionItems = summaryDraft.actionItems.replacingAction(
+                      at: index,
+                      owner: text
+                  ) else { return false }
+            updateSummaryDraft(
+                summaryDraft.replacing(actionItems: actionItems)
+            )
+        case .detailedMinutesOverview:
+            guard let detailedMinutesDraft else { return false }
+            updateDetailedMinutesDraft(
+                detailedMinutesDraft.replacing(overview: text)
+            )
+        case let .detailedMinutesSectionTitle(index):
+            guard let detailedMinutesDraft,
+                  let sections = detailedMinutesDraft.sections
+                    .replacingSection(at: index, title: text) else {
+                return false
+            }
+            updateDetailedMinutesDraft(
+                detailedMinutesDraft.replacing(sections: sections)
+            )
+        case let .detailedMinutesSectionSpeaker(section, speaker):
+            guard let detailedMinutesDraft,
+                  let sections = detailedMinutesDraft.sections
+                    .replacingSectionSpeaker(
+                        section: section,
+                        speaker: speaker,
+                        with: text
+                    ) else { return false }
+            updateDetailedMinutesDraft(
+                detailedMinutesDraft.replacing(sections: sections)
+            )
+        case let .detailedMinutesSectionContent(index):
+            guard let detailedMinutesDraft,
+                  let sections = detailedMinutesDraft.sections
+                    .replacingSection(at: index, content: text) else {
+                return false
+            }
+            updateDetailedMinutesDraft(
+                detailedMinutesDraft.replacing(sections: sections)
+            )
+        case let .detailedMinutesDecision(index):
+            guard let detailedMinutesDraft,
+                  let decisions = detailedMinutesDraft.decisions.replacing(
+                      at: index,
+                      with: text
+                  ) else { return false }
+            updateDetailedMinutesDraft(
+                detailedMinutesDraft.replacing(decisions: decisions)
+            )
+        case let .detailedMinutesActionTask(index):
+            guard let detailedMinutesDraft,
+                  let actionItems = detailedMinutesDraft.actionItems
+                    .replacingAction(at: index, task: text) else {
+                return false
+            }
+            updateDetailedMinutesDraft(
+                detailedMinutesDraft.replacing(actionItems: actionItems)
+            )
+        case let .detailedMinutesActionOwner(index):
+            guard let detailedMinutesDraft,
+                  let actionItems = detailedMinutesDraft.actionItems
+                    .replacingAction(at: index, owner: text) else {
+                return false
+            }
+            updateDetailedMinutesDraft(
+                detailedMinutesDraft.replacing(actionItems: actionItems)
+            )
+        case let .detailedMinutesOpenQuestion(index):
+            guard let detailedMinutesDraft,
+                  let openQuestions = detailedMinutesDraft.openQuestions
+                    .replacing(at: index, with: text) else {
+                return false
+            }
+            updateDetailedMinutesDraft(
+                detailedMinutesDraft.replacing(openQuestions: openQuestions)
+            )
+        }
+        return true
+    }
+
+    func prepareExactReplacement(
+        searchText: String,
+        replacementText: String
+    ) async {
+        replacementErrorMessage = nil
+        if hasPendingEdits {
+            await flushEdits()
+            guard !hasPendingEdits else {
+                replacementPreview = nil
+                replacementErrorMessage =
+                    "本地修改尚未安全保存，请重试后再替换。"
+                return
+            }
+        }
+        do {
+            replacementPreview = try exactReplacement.preview(
+                meetingID: meetingID,
+                old: searchText,
+                new: replacementText
+            )
+        } catch {
+            replacementPreview = nil
+            replacementErrorMessage = Self.replacementMessage(for: error)
+        }
+    }
+
+    func cancelExactReplacement() {
+        replacementPreview = nil
+        replacementErrorMessage = nil
+    }
+
+    @discardableResult
+    func confirmExactReplacement() async -> Bool {
+        guard let confirmedPreview = replacementPreview,
+              confirmedPreview.totalMatches > 0 else {
+            return false
+        }
+        do {
+            _ = try exactReplacement.apply(confirmedPreview)
+            replacementPreview = nil
+            replacementErrorMessage = nil
+            load()
+            return true
+        } catch let error as MeetingExactReplacementError {
+            switch error {
+            case .stalePreview:
+                do {
+                    replacementPreview = try exactReplacement.preview(
+                        meetingID: meetingID,
+                        old: confirmedPreview.searchText,
+                        new: confirmedPreview.replacementText
+                    )
+                    replacementErrorMessage =
+                        "会议内容已变化，请确认更新后的替换范围。"
+                } catch {
+                    replacementPreview = nil
+                    replacementErrorMessage = Self.replacementMessage(
+                        for: error
+                    )
+                }
+            default:
+                replacementErrorMessage = Self.replacementMessage(for: error)
+            }
+            return false
+        } catch {
+            replacementErrorMessage = Self.replacementMessage(for: error)
+            return false
+        }
     }
 
     func flushEdits() async {
@@ -765,11 +1059,22 @@ final class MeetingDetailViewModel {
                 currentEntry = canonical.first {
                     $0.isManuallyEdited && $0.id == correctionID
                 }
-            } else if let exact = canonical.first(where: {
-                !$0.isManuallyEdited && $0.id == target.canonicalEntryID
-            }) {
-                currentEntry = exact
             } else {
+                let currentGeneratedIDs = Set(
+                    canonical
+                        .filter { !$0.isManuallyEdited }
+                        .flatMap(\.transcriptIDs)
+                )
+                if !target.transcriptIDs.isEmpty,
+                   target.transcriptIDs.allSatisfy(
+                       currentGeneratedIDs.contains
+                   ) {
+                    // A displayed turn can own multiple generated rows. Keep
+                    // that exact editing scope while every row still exists;
+                    // selecting only its first canonical entry would persist
+                    // the combined draft over one row and duplicate the rest.
+                    continue
+                }
                 currentEntry = try? repository
                     .reconciledTranscriptCorrectionTarget(
                         meetingID: meetingID,
@@ -903,6 +1208,21 @@ final class MeetingDetailViewModel {
             || (error as? URLError)?.code == .cancelled
     }
 
+    private static func replacementMessage(for error: Error) -> String {
+        switch error as? MeetingExactReplacementError {
+        case .emptySearchText:
+            "请输入要替换的文字。"
+        case .identicalSearchAndReplacement:
+            "新旧文字相同，无需替换。"
+        case .stalePreview:
+            "会议内容已变化，请重新预览替换范围。"
+        case .invalidStructuredField:
+            "会议内容无法安全替换，请重试。"
+        case nil:
+            "无法替换本会议文字，请重试。"
+        }
+    }
+
     private static func documentMessage(for error: Error) -> String {
         switch error as? MeetingDocumentsError {
         case .noFinalTranscript:
@@ -983,6 +1303,207 @@ final class MeetingDetailViewModel {
         case .failed:
             nil
         }
+    }
+}
+
+private extension Collection {
+    subscript(safe offset: Int) -> Element? {
+        guard offset >= 0,
+              let index = index(startIndex, offsetBy: offset, limitedBy: endIndex),
+              index != endIndex else {
+            return nil
+        }
+        return self[index]
+    }
+}
+
+private extension Array {
+    func replacing(at index: Int, with value: Element) -> [Element]? {
+        guard indices.contains(index) else { return nil }
+        var copy = self
+        copy[index] = value
+        return copy
+    }
+}
+
+private extension GeneratedMeetingSummary {
+    func replacing(overview: String) -> GeneratedMeetingSummary {
+        GeneratedMeetingSummary(
+            suggestedTitle: suggestedTitle,
+            overview: overview,
+            keyPoints: keyPoints,
+            decisions: decisions,
+            actionItems: actionItems,
+            bookmarkInsights: bookmarkInsights
+        )
+    }
+
+    func replacing(keyPoints: [String]) -> GeneratedMeetingSummary {
+        GeneratedMeetingSummary(
+            suggestedTitle: suggestedTitle,
+            overview: overview,
+            keyPoints: keyPoints,
+            decisions: decisions,
+            actionItems: actionItems,
+            bookmarkInsights: bookmarkInsights
+        )
+    }
+
+    func replacing(decisions: [String]) -> GeneratedMeetingSummary {
+        GeneratedMeetingSummary(
+            suggestedTitle: suggestedTitle,
+            overview: overview,
+            keyPoints: keyPoints,
+            decisions: decisions,
+            actionItems: actionItems,
+            bookmarkInsights: bookmarkInsights
+        )
+    }
+
+    func replacing(actionItems: [ActionItem]) -> GeneratedMeetingSummary {
+        GeneratedMeetingSummary(
+            suggestedTitle: suggestedTitle,
+            overview: overview,
+            keyPoints: keyPoints,
+            decisions: decisions,
+            actionItems: actionItems,
+            bookmarkInsights: bookmarkInsights
+        )
+    }
+}
+
+private extension GeneratedDetailedMinutes {
+    func replacing(overview: String) -> GeneratedDetailedMinutes {
+        GeneratedDetailedMinutes(
+            overview: overview,
+            sections: sections,
+            decisions: decisions,
+            actionItems: actionItems,
+            openQuestions: openQuestions
+        )
+    }
+
+    func replacing(
+        sections: [DetailedMinutesSection]
+    ) -> GeneratedDetailedMinutes {
+        GeneratedDetailedMinutes(
+            overview: overview,
+            sections: sections,
+            decisions: decisions,
+            actionItems: actionItems,
+            openQuestions: openQuestions
+        )
+    }
+
+    func replacing(decisions: [String]) -> GeneratedDetailedMinutes {
+        GeneratedDetailedMinutes(
+            overview: overview,
+            sections: sections,
+            decisions: decisions,
+            actionItems: actionItems,
+            openQuestions: openQuestions
+        )
+    }
+
+    func replacing(actionItems: [ActionItem]) -> GeneratedDetailedMinutes {
+        GeneratedDetailedMinutes(
+            overview: overview,
+            sections: sections,
+            decisions: decisions,
+            actionItems: actionItems,
+            openQuestions: openQuestions
+        )
+    }
+
+    func replacing(openQuestions: [String]) -> GeneratedDetailedMinutes {
+        GeneratedDetailedMinutes(
+            overview: overview,
+            sections: sections,
+            decisions: decisions,
+            actionItems: actionItems,
+            openQuestions: openQuestions
+        )
+    }
+}
+
+private extension Array where Element == ActionItem {
+    func replacingAction(at index: Int, task: String) -> [ActionItem]? {
+        guard let item = self[safe: index] else { return nil }
+        return replacing(
+            at: index,
+            with: ActionItem(
+                task: task,
+                owner: item.owner,
+                dueDate: item.dueDate
+            )
+        )
+    }
+
+    func replacingAction(at index: Int, owner: String) -> [ActionItem]? {
+        guard let item = self[safe: index] else { return nil }
+        return replacing(
+            at: index,
+            with: ActionItem(
+                task: item.task,
+                owner: owner,
+                dueDate: item.dueDate
+            )
+        )
+    }
+}
+
+private extension Array where Element == DetailedMinutesSection {
+    func replacingSection(
+        at index: Int,
+        title: String
+    ) -> [DetailedMinutesSection]? {
+        guard let section = self[safe: index] else { return nil }
+        return replacing(
+            at: index,
+            with: DetailedMinutesSection(
+                title: title,
+                timeRange: section.timeRange,
+                speakers: section.speakers,
+                content: section.content
+            )
+        )
+    }
+
+    func replacingSection(
+        at index: Int,
+        content: String
+    ) -> [DetailedMinutesSection]? {
+        guard let section = self[safe: index] else { return nil }
+        return replacing(
+            at: index,
+            with: DetailedMinutesSection(
+                title: section.title,
+                timeRange: section.timeRange,
+                speakers: section.speakers,
+                content: content
+            )
+        )
+    }
+
+    func replacingSectionSpeaker(
+        section index: Int,
+        speaker speakerIndex: Int,
+        with value: String
+    ) -> [DetailedMinutesSection]? {
+        guard let section = self[safe: index],
+              let speakers = section.speakers.replacing(
+                  at: speakerIndex,
+                  with: value
+              ) else { return nil }
+        return replacing(
+            at: index,
+            with: DetailedMinutesSection(
+                title: section.title,
+                timeRange: section.timeRange,
+                speakers: speakers,
+                content: section.content
+            )
+        )
     }
 }
 

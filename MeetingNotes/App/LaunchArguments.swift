@@ -14,6 +14,8 @@ enum LaunchArguments {
         "MEETING_NOTES_UI_DOCUMENTS"
     static let uiTestingSpeakerArchiveEnvironment =
         "MEETING_NOTES_UI_SPEAKER_ARCHIVE"
+    static let uiTestingMeetingEditingEnvironment =
+        "MEETING_NOTES_UI_MEETING_EDITING"
 
     static func isUITesting(
         _ arguments: [String] = ProcessInfo.processInfo.arguments
@@ -43,6 +45,12 @@ enum LaunchArguments {
         _ environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Bool {
         environment[uiTestingSpeakerArchiveEnvironment] == "1"
+    }
+
+    static func usesMeetingEditingUITestFixture(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        environment[uiTestingMeetingEditingEnvironment] == "1"
     }
 
     static func audioPlayerLifecycleTriggerURL(
@@ -91,6 +99,8 @@ extension AppContainer {
             LaunchArguments.usesDocumentsUITestFixture()
         let usesSpeakerArchiveFixture =
             LaunchArguments.usesSpeakerArchiveUITestFixture()
+        let usesMeetingEditingFixture =
+            LaunchArguments.usesMeetingEditingUITestFixture()
         let audioPlayerMeetingID = LaunchArguments.audioPlayerMeetingID()
         let audioPlayerLifecycleTriggerURL =
             LaunchArguments.audioPlayerLifecycleTriggerURL()
@@ -288,6 +298,9 @@ extension AppContainer {
                 pageURL: "https://www.notion.so/ui-test-partial-archive-page"
             )
         }
+        if usesMeetingEditingFixture {
+            try installMeetingEditingFixture(in: repository)
+        }
         let fileStore = MeetingFileStore(rootURL: recordingsURL)
         let credentials = EphemeralCredentialStore(
             deepSeekAPIKey: "ui-deepseek-key",
@@ -359,6 +372,104 @@ extension AppContainer {
             )
         }
         return container
+    }
+
+    private static func installMeetingEditingFixture(
+        in repository: MeetingRepository
+    ) throws {
+        try installEditableMeeting(
+            in: repository,
+            startedAt: Date(timeIntervalSince1970: 7_000),
+            title: "原界面可编辑会议"
+        )
+        try installEditableMeeting(
+            in: repository,
+            startedAt: Date(timeIntervalSince1970: 6_000),
+            title: "隔离会议（不应修改）"
+        )
+    }
+
+    private static func installEditableMeeting(
+        in repository: MeetingRepository,
+        startedAt: Date,
+        title: String
+    ) throws {
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: startedAt,
+            title: title
+        )
+        try repository.finalizeMeeting(
+            id: meetingID,
+            endedAt: startedAt.addingTimeInterval(20),
+            activeDuration: 20
+        )
+        try repository.replaceTranscripts(
+            meetingID: meetingID,
+            drafts: [
+                AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(
+                        startTime: 0,
+                        endTime: 8,
+                        text: "王明跟进王明任务"
+                    ),
+                    speakerID: "room-1",
+                    source: .room
+                )
+            ],
+            sourceRevision: 1
+        )
+        try repository.setSpeakerDisplayName(
+            meetingID: meetingID,
+            speakerID: "room-1",
+            displayName: "王明"
+        )
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: title,
+                overview: "王明确认范围",
+                keyPoints: ["王明确认要点"],
+                decisions: ["王明批准决定"],
+                actionItems: [
+                    ActionItem(
+                        task: "王明负责整理详细发布清单并逐项核对全部产品、测试与运营交付内容",
+                        owner: "王明（项目总负责人兼跨部门协调人，负责统筹产品、研发、测试、运营、法务及发布验收全流程）",
+                        dueDate: "周五"
+                    )
+                ],
+                bookmarkInsights: ["王明书签洞察"]
+            ),
+            model: "ui-test-model"
+        )
+        try repository.saveGeneratedDetailedMinutes(
+            meetingID: meetingID,
+            generated: GeneratedDetailedMinutes(
+                overview: "王明纪要概览",
+                sections: [
+                    DetailedMinutesSection(
+                        title: "王明议题",
+                        timeRange: "00:00–00:08",
+                        speakers: [
+                            "王明（产品与交付联合负责人，同时协调客户端、服务端、测试、运营与发布节奏，并持续负责跨部门沟通、风险跟踪、上线准备与验收闭环）",
+                            "技术负责人（统筹架构、性能、数据安全、质量保障与多端验收工作，并统一协调代码审查、容量规划、故障演练与发布后观测）",
+                        ],
+                        content: "王明议题内容"
+                    )
+                ],
+                decisions: ["王明纪要决定"],
+                actionItems: [
+                    ActionItem(
+                        task: "王明完成跨部门纪要任务并检查每一项交付物的验收标准和后续责任",
+                        owner: "王明（纪要跟进与验收总负责人，同时协调需求、技术、质量、发布与后续追踪工作）",
+                        dueDate: nil
+                    )
+                ],
+                openQuestions: ["王明待确认"]
+            ),
+            model: "ui-test-model",
+            promptVersion: 1
+        )
     }
 
     private static func monitorAudioPlayerLifecycleFixture(

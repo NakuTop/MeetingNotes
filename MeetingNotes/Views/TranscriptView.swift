@@ -2,6 +2,7 @@ import SwiftUI
 
 struct TranscriptDisplayEntry: Identifiable, Equatable {
     let id: UUID
+    let correctionID: UUID?
     let transcriptIDs: [UUID]
     let startTime: TimeInterval
     let endTime: TimeInterval
@@ -11,6 +12,8 @@ struct TranscriptDisplayEntry: Identifiable, Equatable {
 }
 
 struct TranscriptDisplayTurn: Identifiable, Equatable {
+    let canonicalEntryID: UUID
+    let correctionID: UUID?
     let transcriptIDs: [UUID]
     let startTime: TimeInterval
     let endTime: TimeInterval
@@ -91,6 +94,9 @@ enum TranscriptDisplayPolicy {
                 }
                 return TranscriptDisplayEntry(
                     id: transcript.id,
+                    correctionID: transcript.isManuallyEdited
+                        ? transcript.id
+                        : nil,
                     transcriptIDs: transcript.transcriptIDs.isEmpty
                         ? [transcript.id]
                         : transcript.transcriptIDs,
@@ -118,17 +124,26 @@ enum TranscriptDisplayPolicy {
 
     static func turns(
         from transcripts: [CanonicalTranscriptEntry],
-        bookmarks: [BookmarkRecord]
+        bookmarks: [BookmarkRecord],
+        preservingDraftTargets: [MeetingTranscriptEditTarget] = []
     ) -> [TranscriptDisplayTurn] {
-        entries(from: transcripts).reduce(into: []) { turns, entry in
+        let draftScopes = preservingDraftTargets.map {
+            Set($0.transcriptIDs)
+        }
+        return entries(from: transcripts).reduce(
+            into: [TranscriptDisplayTurn]()
+        ) { turns, entry in
             let highlighted = isHighlighted(entry, bookmarks: bookmarks)
             if let previous = turns.last,
                shouldGroup(
                 previous,
                 with: entry,
-                highlighted: highlighted
+                highlighted: highlighted,
+                preservingDraftScopes: draftScopes
                ) {
                 turns[turns.count - 1] = TranscriptDisplayTurn(
+                    canonicalEntryID: previous.canonicalEntryID,
+                    correctionID: nil,
                     transcriptIDs: previous.transcriptIDs
                         + entry.transcriptIDs,
                     startTime: previous.startTime,
@@ -141,6 +156,8 @@ enum TranscriptDisplayPolicy {
             } else {
                 turns.append(
                     TranscriptDisplayTurn(
+                        canonicalEntryID: entry.id,
+                        correctionID: entry.correctionID,
                         transcriptIDs: entry.transcriptIDs,
                         startTime: entry.startTime,
                         endTime: entry.endTime,
@@ -157,15 +174,37 @@ enum TranscriptDisplayPolicy {
     private static func shouldGroup(
         _ turn: TranscriptDisplayTurn,
         with entry: TranscriptDisplayEntry,
-        highlighted: Bool
+        highlighted: Bool,
+        preservingDraftScopes: [Set<UUID>]
     ) -> Bool {
         guard let speakerID = turn.speakerID,
-              speakerID == entry.speakerID else {
+              speakerID == entry.speakerID,
+              turn.correctionID == nil,
+              entry.correctionID == nil,
+              doesNotCrossDraftBoundary(
+                  turn.transcriptIDs,
+                  with: entry.transcriptIDs,
+                  preservingDraftScopes: preservingDraftScopes
+              ) else {
             return false
         }
         return turn.source == entry.source
             && entry.startTime <= turn.endTime + maximumTurnGap
             && turn.isHighlighted == highlighted
+    }
+
+    private static func doesNotCrossDraftBoundary(
+        _ turnTranscriptIDs: [UUID],
+        with entryTranscriptIDs: [UUID],
+        preservingDraftScopes: [Set<UUID>]
+    ) -> Bool {
+        let turnIDs = Set(turnTranscriptIDs)
+        let entryIDs = Set(entryTranscriptIDs)
+        return preservingDraftScopes.allSatisfy { scope in
+            let turnIntersects = !turnIDs.isDisjoint(with: scope)
+            let entryIntersects = !entryIDs.isDisjoint(with: scope)
+            return turnIntersects == entryIntersects
+        }
     }
 
     private static func isHighlighted(
@@ -190,14 +229,27 @@ struct TranscriptView: View {
     var onBeginSpeakerEditing: (() -> Void)?
     var onRenameSpeaker: ((String, String) -> Bool)?
     var onClearSpeakerName: ((String) -> Bool)?
+    var onChangeTranscript: ((String, MeetingTranscriptEditTarget) -> Void)?
+    var onFlushEdits: (() -> Void)?
+    var onRequestExactReplacement: ((String) -> Void)?
+    var transcriptDrafts: [MeetingTranscriptEditDraft] = []
 
     @State private var editingSpeaker: TranscriptSpeakerEditingTarget?
 
     private var visibleTurns: [TranscriptDisplayTurn] {
         TranscriptDisplayPolicy.turns(
             from: transcripts,
-            bookmarks: bookmarks
+            bookmarks: bookmarks,
+            preservingDraftTargets: transcriptDrafts.map(\.target)
         )
+    }
+
+    private func draftText(
+        for target: MeetingTranscriptEditTarget
+    ) -> String? {
+        transcriptDrafts.first {
+            $0.target.hasSameDraftIdentity(as: target)
+        }?.text
     }
 
     private var speakerOptions: [TranscriptSpeakerOption] {
@@ -237,6 +289,9 @@ struct TranscriptView: View {
                         source: turn.source,
                         customNames: customSpeakerNames
                     )
+                    let editTarget = MeetingTranscriptEditTarget(turn: turn)
+                    let displayedText = draftText(for: editTarget)
+                        ?? turn.text
 
                     HStack(alignment: .firstTextBaseline, spacing: 12) {
                         Text(MeetingDisplayFormat.timecode(turn.startTime))
@@ -252,8 +307,23 @@ struct TranscriptView: View {
                                     "meeting.transcripts.turnSpeaker.\(speakerID)"
                             )
                         }
-                        Text(turn.text)
-                            .textSelection(.enabled)
+                        InlineEditableMeetingText(
+                            text: Binding(
+                                get: {
+                                    draftText(for: editTarget) ?? turn.text
+                                },
+                                set: { value in
+                                    onChangeTranscript?(value, editTarget)
+                                }
+                            ),
+                            accessibilityIdentifier:
+                                "meeting.transcripts.text.\(Int((turn.startTime * 1_000).rounded()))",
+                            onFlush: {
+                                onFlushEdits?()
+                            },
+                            onRequestExactReplacement:
+                                onRequestExactReplacement
+                        )
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(9)
@@ -263,12 +333,12 @@ struct TranscriptView: View {
                             : Color.clear,
                         in: RoundedRectangle(cornerRadius: 8)
                     )
-                    .accessibilityElement(children: .combine)
+                    .accessibilityElement(children: .contain)
                     .accessibilityIdentifier(
                         "meeting.transcripts.turn.\(Int((turn.startTime * 1_000).rounded()))"
                     )
                     .accessibilityLabel(
-                        "\(MeetingDisplayFormat.timecode(turn.startTime))\(speakerBadge.map { "，\($0.label)" } ?? "")，\(turn.text)\(turn.isHighlighted ? "，书签附近" : "")"
+                        "\(MeetingDisplayFormat.timecode(turn.startTime))\(speakerBadge.map { "，\($0.label)" } ?? "")，\(displayedText)\(turn.isHighlighted ? "，书签附近" : "")"
                     )
                 }
             }
