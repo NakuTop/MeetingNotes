@@ -12,11 +12,13 @@ enum MeetingLocalSaveState: Equatable, Sendable {
 @Observable
 final class MeetingEditAutosaver {
     typealias Delay = @MainActor @Sendable (Duration) async throws -> Void
+    typealias DelayedTaskCompletion = @MainActor @Sendable () -> Void
 
     private static let liveDelay: Duration = .milliseconds(350)
     private static let failureMessage = "无法自动保存本地修改，请稍后重试。"
 
     private let delay: Delay
+    private let onDelayedTaskCompletion: DelayedTaskCompletion
     private var generation = UUID()
     private var pendingDelayTask: Task<Void, Never>?
     private var latestSave: (@MainActor () throws -> Void)?
@@ -26,9 +28,11 @@ final class MeetingEditAutosaver {
     init(
         delay: @escaping Delay = { duration in
             try await Task.sleep(for: duration)
-        }
+        },
+        onDelayedTaskCompletion: @escaping DelayedTaskCompletion = {}
     ) {
         self.delay = delay
+        self.onDelayedTaskCompletion = onDelayedTaskCompletion
     }
 
     func schedule(
@@ -41,7 +45,9 @@ final class MeetingEditAutosaver {
         pendingDelayTask?.cancel()
 
         let delay = self.delay
+        let onDelayedTaskCompletion = self.onDelayedTaskCompletion
         pendingDelayTask = Task { [weak self] in
+            defer { onDelayedTaskCompletion() }
             guard !Task.isCancelled else { return }
             do {
                 try await delay(Self.liveDelay)

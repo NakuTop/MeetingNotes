@@ -4,11 +4,15 @@ import XCTest
 
 @MainActor
 final class MeetingEditAutosaverTests: XCTestCase {
-    func testRepeatedKeystrokesCoalesceToLatestSnapshot() async {
+    func testRepeatedKeystrokesCoalesceToLatestSnapshot() async throws {
         let delay = ControlledMeetingEditDelay()
+        let completion = MeetingEditAutosaverCompletionBarrier()
         let autosaver = MeetingEditAutosaver(
             delay: { duration in
                 try await delay.suspend(for: duration)
+            },
+            onDelayedTaskCompletion: {
+                completion.signal()
             }
         )
         var savedValues: [String] = []
@@ -27,18 +31,24 @@ final class MeetingEditAutosaverTests: XCTestCase {
             [.milliseconds(350), .milliseconds(350)]
         )
         delay.release(call: 0)
+        try await completion.wait(for: 1)
+        XCTAssertTrue(savedValues.isEmpty)
         delay.release(call: 1)
-        await yieldToScheduledTasks()
+        try await completion.wait(for: 2)
 
         XCTAssertEqual(savedValues, ["latest"])
         XCTAssertEqual(autosaver.state, .saved)
     }
 
-    func testFlushPersistsImmediatelyAndCancelsPendingDelay() async {
+    func testFlushPersistsImmediatelyAndCancelsPendingDelay() async throws {
         let delay = ControlledMeetingEditDelay()
+        let completion = MeetingEditAutosaverCompletionBarrier()
         let autosaver = MeetingEditAutosaver(
             delay: { duration in
                 try await delay.suspend(for: duration)
+            },
+            onDelayedTaskCompletion: {
+                completion.signal()
             }
         )
         var saveCount = 0
@@ -52,16 +62,20 @@ final class MeetingEditAutosaverTests: XCTestCase {
         XCTAssertEqual(saveCount, 1)
         XCTAssertEqual(autosaver.state, .saved)
         delay.release(call: 0)
-        await yieldToScheduledTasks()
+        try await completion.wait(for: 1)
         XCTAssertEqual(saveCount, 1)
         XCTAssertEqual(autosaver.state, .saved)
     }
 
-    func testOldSaveCompletionCannotClearNewDirtyDraft() async {
+    func testOldSaveCompletionCannotClearNewDirtyDraft() async throws {
         let delay = ControlledMeetingEditDelay()
+        let completion = MeetingEditAutosaverCompletionBarrier()
         let autosaver = MeetingEditAutosaver(
             delay: { duration in
                 try await delay.suspend(for: duration)
+            },
+            onDelayedTaskCompletion: {
+                completion.signal()
             }
         )
         var savedValues: [String] = []
@@ -74,22 +88,27 @@ final class MeetingEditAutosaverTests: XCTestCase {
         }
         await delay.waitForCallCount(1)
         delay.release(call: 0)
+        try await completion.wait(for: 1)
         await delay.waitForCallCount(2)
 
         XCTAssertEqual(savedValues, ["old"])
         XCTAssertEqual(autosaver.state, .idle)
 
         delay.release(call: 1)
-        await yieldToScheduledTasks()
+        try await completion.wait(for: 2)
         XCTAssertEqual(savedValues, ["old", "new"])
         XCTAssertEqual(autosaver.state, .saved)
     }
 
-    func testSaveFailureKeepsDraftAndExposesRetryState() async {
+    func testSaveFailureKeepsDraftAndExposesRetryState() async throws {
         let delay = ControlledMeetingEditDelay()
+        let completion = MeetingEditAutosaverCompletionBarrier()
         let autosaver = MeetingEditAutosaver(
             delay: { duration in
                 try await delay.suspend(for: duration)
+            },
+            onDelayedTaskCompletion: {
+                completion.signal()
             }
         )
         let failure = MeetingEditAutosaverFailureSwitch()
@@ -102,7 +121,7 @@ final class MeetingEditAutosaverTests: XCTestCase {
         }
         await delay.waitForCallCount(1)
         delay.release(call: 0)
-        await yieldToScheduledTasks()
+        try await completion.wait(for: 1)
 
         XCTAssertEqual(attempts, 1)
         XCTAssertEqual(
@@ -117,11 +136,15 @@ final class MeetingEditAutosaverTests: XCTestCase {
         XCTAssertEqual(autosaver.state, .saved)
     }
 
-    func testCancelPreventsDelayedSaveAndStaleStateChange() async {
+    func testCancelPreventsDelayedSaveAndStaleStateChange() async throws {
         let delay = ControlledMeetingEditDelay()
+        let completion = MeetingEditAutosaverCompletionBarrier()
         let autosaver = MeetingEditAutosaver(
             delay: { duration in
                 try await delay.suspend(for: duration)
+            },
+            onDelayedTaskCompletion: {
+                completion.signal()
             }
         )
         var saveCount = 0
@@ -132,7 +155,7 @@ final class MeetingEditAutosaverTests: XCTestCase {
 
         autosaver.cancel()
         delay.release(call: 0)
-        await yieldToScheduledTasks()
+        try await completion.wait(for: 1)
 
         XCTAssertEqual(saveCount, 0)
         XCTAssertEqual(autosaver.state, .idle)
@@ -140,10 +163,30 @@ final class MeetingEditAutosaverTests: XCTestCase {
         XCTAssertEqual(saveCount, 0)
     }
 
-    private func yieldToScheduledTasks() async {
-        for _ in 0..<10 {
-            await Task.yield()
+    func testCompletionBarrierCancellationIsSingleResume() async throws {
+        let registration = ControlledMeetingEditDelay()
+        let barrier = MeetingEditAutosaverCompletionBarrier(
+            onWaiterPrepared: {
+                try? await registration.suspend(for: .zero)
+            }
+        )
+        let waiter = Task {
+            try await barrier.wait(for: 1)
         }
+        await registration.waitForCallCount(1)
+
+        waiter.cancel()
+        registration.release(call: 0)
+        do {
+            try await waiter.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected terminal result.
+        } catch {
+            XCTFail("Unexpected error: \(type(of: error))")
+        }
+
+        barrier.signal()
     }
 }
 
@@ -197,4 +240,128 @@ private enum MeetingEditAutosaverTestError: Error {
 @MainActor
 private final class MeetingEditAutosaverFailureSwitch {
     var shouldFail = true
+}
+
+private final class MeetingEditAutosaverCompletionBarrier:
+    @unchecked Sendable {
+    private enum TerminalResult {
+        case completed
+        case cancelled
+    }
+
+    private enum WaiterState {
+        case registering(target: Int)
+        case waiting(
+            target: Int,
+            continuation: CheckedContinuation<Void, any Error>
+        )
+        case terminal(TerminalResult)
+    }
+
+    private let lock = NSLock()
+    private let onWaiterPrepared: @Sendable () async -> Void
+    private var completionCount = 0
+    private var waiters: [UUID: WaiterState] = [:]
+
+    init(onWaiterPrepared: @escaping @Sendable () async -> Void = {}) {
+        self.onWaiterPrepared = onWaiterPrepared
+    }
+
+    func signal() {
+        var continuations: [CheckedContinuation<Void, any Error>] = []
+        lock.lock()
+        completionCount += 1
+        for (id, state) in Array(waiters) {
+            switch state {
+            case let .registering(target) where completionCount >= target:
+                waiters[id] = .terminal(.completed)
+            case let .waiting(target, continuation)
+                where completionCount >= target:
+                waiters.removeValue(forKey: id)
+                continuations.append(continuation)
+            case .registering, .waiting, .terminal:
+                break
+            }
+        }
+        lock.unlock()
+        continuations.forEach { $0.resume() }
+    }
+
+    func wait(for target: Int) async throws {
+        precondition(target > 0)
+        try Task.checkCancellation()
+        let waiterID = UUID()
+        guard prepare(waiterID: waiterID, target: target) else { return }
+        await onWaiterPrepared()
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                register(
+                    waiterID: waiterID,
+                    continuation: continuation
+                )
+            }
+        } onCancel: {
+            cancel(waiterID: waiterID)
+        }
+    }
+
+    private func prepare(waiterID: UUID, target: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard completionCount < target else { return false }
+        waiters[waiterID] = .registering(target: target)
+        return true
+    }
+
+    private func register(
+        waiterID: UUID,
+        continuation: CheckedContinuation<Void, any Error>
+    ) {
+        var terminal: TerminalResult?
+        lock.lock()
+        switch waiters[waiterID] {
+        case let .registering(target):
+            if completionCount >= target {
+                waiters.removeValue(forKey: waiterID)
+                terminal = .completed
+            } else {
+                waiters[waiterID] = .waiting(
+                    target: target,
+                    continuation: continuation
+                )
+            }
+        case let .terminal(result):
+            waiters.removeValue(forKey: waiterID)
+            terminal = result
+        case .waiting, nil:
+            terminal = .cancelled
+        }
+        lock.unlock()
+
+        switch terminal {
+        case .completed:
+            continuation.resume()
+        case .cancelled:
+            continuation.resume(throwing: CancellationError())
+        case nil:
+            break
+        }
+    }
+
+    private func cancel(waiterID: UUID) {
+        var continuation: CheckedContinuation<Void, any Error>?
+        lock.lock()
+        switch waiters[waiterID] {
+        case .registering:
+            waiters[waiterID] = .terminal(.cancelled)
+        case let .waiting(_, pendingContinuation):
+            waiters.removeValue(forKey: waiterID)
+            continuation = pendingContinuation
+        case .terminal, nil:
+            break
+        }
+        lock.unlock()
+        continuation?.resume(throwing: CancellationError())
+    }
 }
