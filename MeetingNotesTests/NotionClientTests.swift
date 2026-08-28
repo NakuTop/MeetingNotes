@@ -137,6 +137,132 @@ final class NotionClientTests: XCTestCase {
         )
     }
 
+    func testListsFirstChildBlockPageWithPageSize100() async throws {
+        let httpClient = QueuedNotionHTTPClient(responses: [
+            .json([
+                "object": "list",
+                "results": [
+                    ["object": "block", "id": "  old-block-1 \n"],
+                    ["object": "block", "id": "old-block-2"]
+                ],
+                "has_more": false,
+                "next_cursor": NSNull()
+            ])
+        ])
+        let client = NotionClient(token: "test-token", httpClient: httpClient)
+
+        let page = try await client.childBlocks(
+            pageID: "page-id",
+            startCursor: nil
+        )
+
+        XCTAssertEqual(page.blockIDs, ["old-block-1", "old-block-2"])
+        XCTAssertNil(page.nextCursor)
+        let requests = await httpClient.recordedRequests()
+        let request = try XCTUnwrap(requests.first)
+        XCTAssertEqual(request.httpMethod, "GET")
+        let components = try XCTUnwrap(
+            URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
+        )
+        XCTAssertEqual(components.path, "/v1/blocks/page-id/children")
+        XCTAssertEqual(components.queryItems, [
+            URLQueryItem(name: "page_size", value: "100")
+        ])
+        XCTAssertEqual(request.timeoutInterval, 30)
+    }
+
+    func testListsNextPageUsingEncodedCursor() async throws {
+        let httpClient = QueuedNotionHTTPClient(responses: [
+            .json([
+                "object": "list",
+                "results": [["object": "block", "id": "next-block"]],
+                "has_more": false,
+                "next_cursor": NSNull()
+            ])
+        ])
+        let client = NotionClient(token: "test-token", httpClient: httpClient)
+        let cursor = "cursor /+?&= 中文"
+
+        _ = try await client.childBlocks(
+            pageID: "page-id",
+            startCursor: cursor
+        )
+
+        let requests = await httpClient.recordedRequests()
+        let request = try XCTUnwrap(requests.first)
+        let components = try XCTUnwrap(
+            URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)
+        )
+        XCTAssertEqual(
+            components.queryItems,
+            [
+                URLQueryItem(name: "page_size", value: "100"),
+                URLQueryItem(name: "start_cursor", value: cursor)
+            ]
+        )
+        XCTAssertFalse(request.url?.absoluteString.contains(" ") == true)
+    }
+
+    func testRejectsHasMoreWithoutNextCursor() async throws {
+        let httpClient = QueuedNotionHTTPClient(responses: [
+            .json([
+                "object": "list",
+                "results": [["object": "block", "id": "block-1"]],
+                "has_more": true,
+                "next_cursor": NSNull()
+            ])
+        ])
+        let client = NotionClient(token: "test-token", httpClient: httpClient)
+
+        do {
+            _ = try await client.childBlocks(
+                pageID: "page-id",
+                startCursor: nil
+            )
+            XCTFail("Expected malformed pagination to be rejected")
+        } catch {
+            XCTAssertEqual(error as? NotionClientError, .invalidResponse)
+        }
+    }
+
+    func testRejectsBlankOrDuplicateChildBlockIDs() async throws {
+        let responses: [[[String: Any]]] = [
+            [
+                ["object": "block", "id": " \n "],
+                ["object": "block", "id": "valid"]
+            ],
+            [
+                ["object": "block", "id": "duplicate"],
+                ["object": "block", "id": " duplicate "]
+            ]
+        ]
+
+        for results in responses {
+            let httpClient = QueuedNotionHTTPClient(responses: [
+                .json([
+                    "object": "list",
+                    "results": results,
+                    "has_more": false,
+                    "next_cursor": NSNull()
+                ])
+            ])
+            let client = NotionClient(
+                token: "test-token",
+                httpClient: httpClient
+            )
+
+            do {
+                _ = try await client.childBlocks(
+                    pageID: "page-id",
+                    startCursor: nil
+                )
+                XCTFail("Expected invalid child block IDs to be rejected")
+            } catch {
+                XCTAssertEqual(error as? NotionClientError, .invalidResponse)
+            }
+        }
+    }
+
     func testArchiveBlockUsesDeleteEndpointAndCurrentHeaders() async throws {
         let httpClient = QueuedNotionHTTPClient(responses: [
             .json(["object": "block", "id": "block/to archive"])

@@ -24,6 +24,11 @@ struct NotionConnectionResult: Equatable, Sendable {
     }
 }
 
+struct NotionChildBlockPage: Equatable, Sendable {
+    let blockIDs: [String]
+    let nextCursor: String?
+}
+
 enum NotionArchiveRunPhase: String, Codable, Equatable, Sendable {
     case appending
     case cleaningUp
@@ -61,6 +66,11 @@ protocol NotionAPIClient: Sendable {
         title: String
     ) async throws -> NotionPageReference
 
+    func childBlocks(
+        pageID: String,
+        startCursor: String?
+    ) async throws -> NotionChildBlockPage
+
     func append(
         blocks: [NotionBlockDraft],
         to pageID: String
@@ -69,6 +79,17 @@ protocol NotionAPIClient: Sendable {
     func archiveBlock(id: String) async throws
 
     func updatePageTitle(pageID: String, title: String) async throws
+}
+
+extension NotionAPIClient {
+    func childBlocks(
+        pageID: String,
+        startCursor: String?
+    ) async throws -> NotionChildBlockPage {
+        _ = pageID
+        _ = startCursor
+        throw NotionClientError.invalidResponse
+    }
 }
 
 enum NotionClientError: Error, Equatable, Sendable {

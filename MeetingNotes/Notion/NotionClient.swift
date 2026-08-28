@@ -76,6 +76,85 @@ struct NotionClient: NotionAPIClient, Sendable {
         return try decodePage(try await perform(request))
     }
 
+    func childBlocks(
+        pageID: String,
+        startCursor: String?
+    ) async throws -> NotionChildBlockPage {
+        let canonicalPageID = pageID.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !canonicalPageID.isEmpty else {
+            throw NotionClientError.invalidRequest
+        }
+        if let startCursor,
+           startCursor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw NotionClientError.invalidRequest
+        }
+
+        var request = request(
+            method: "GET",
+            path: ["blocks", canonicalPageID, "children"],
+            timeout: 30
+        )
+        guard let requestURL = request.url,
+              var components = URLComponents(
+            url: requestURL,
+            resolvingAgainstBaseURL: false
+        ) else {
+            throw NotionClientError.invalidRequest
+        }
+        components.queryItems = [
+            URLQueryItem(name: "page_size", value: "100")
+        ]
+        if let startCursor {
+            components.queryItems?.append(
+                URLQueryItem(name: "start_cursor", value: startCursor)
+            )
+        }
+        guard let url = components.url else {
+            throw NotionClientError.invalidRequest
+        }
+        request.url = url
+
+        let response: ChildBlocksResponse
+        do {
+            response = try decoder.decode(
+                ChildBlocksResponse.self,
+                from: try await perform(request)
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as NotionClientError {
+            throw error
+        } catch {
+            throw NotionClientError.invalidResponse
+        }
+
+        let blockIDs = response.results.map {
+            $0.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard blockIDs.allSatisfy({ !$0.isEmpty }),
+              Set(blockIDs).count == blockIDs.count else {
+            throw NotionClientError.invalidResponse
+        }
+        let nextCursor = response.nextCursor?.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        if response.hasMore {
+            guard let nextCursor, !nextCursor.isEmpty else {
+                throw NotionClientError.invalidResponse
+            }
+            return NotionChildBlockPage(
+                blockIDs: blockIDs,
+                nextCursor: nextCursor
+            )
+        }
+        guard nextCursor == nil || nextCursor?.isEmpty == true else {
+            throw NotionClientError.invalidResponse
+        }
+        return NotionChildBlockPage(blockIDs: blockIDs, nextCursor: nil)
+    }
+
     func append(
         blocks: [NotionBlockDraft],
         to pageID: String
@@ -312,6 +391,22 @@ private struct AppendBlocksRequest: Encodable {
 
 private struct AppendBlocksResponse: Decodable {
     let results: [Block]
+
+    struct Block: Decodable {
+        let id: String
+    }
+}
+
+private struct ChildBlocksResponse: Decodable {
+    let results: [Block]
+    let hasMore: Bool
+    let nextCursor: String?
+
+    enum CodingKeys: String, CodingKey {
+        case results
+        case hasMore = "has_more"
+        case nextCursor = "next_cursor"
+    }
 
     struct Block: Decodable {
         let id: String
