@@ -1,15 +1,93 @@
 import Foundation
 
-struct NotionMeetingPageContent: Equatable, Sendable {
+struct NotionMeetingPageContent: Codable, Equatable, Sendable {
     let title: String
     let startedAt: Date
     let duration: TimeInterval
     let mode: MeetingMode
-    let kind: MeetingDocumentKind
+    let contentRevision: Int
     let summary: GeneratedMeetingSummary?
     let detailedMinutes: GeneratedDetailedMinutes?
     let bookmarks: [MeetingBookmarkInput]
     let transcripts: [MeetingTranscriptInput]
+
+    private enum CodingKeys: String, CodingKey {
+        case title
+        case startedAt
+        case duration
+        case mode
+        case contentRevision
+        case summary
+        case detailedMinutes
+        case bookmarks
+        case transcripts
+    }
+
+    var documentKinds: [MeetingDocumentKind] {
+        var result: [MeetingDocumentKind] = []
+        if summary != nil { result.append(.summary) }
+        if detailedMinutes != nil { result.append(.detailedMinutes) }
+        return result
+    }
+
+    var kind: MeetingDocumentKind {
+        summary != nil ? .summary : .detailedMinutes
+    }
+
+    init(
+        title: String,
+        startedAt: Date,
+        duration: TimeInterval,
+        mode: MeetingMode,
+        contentRevision: Int,
+        summary: GeneratedMeetingSummary?,
+        detailedMinutes: GeneratedDetailedMinutes?,
+        bookmarks: [MeetingBookmarkInput],
+        transcripts: [MeetingTranscriptInput]
+    ) throws {
+        guard summary != nil || detailedMinutes != nil else {
+            throw NotionMeetingPageContentError.missingLocalDocument
+        }
+        self.title = title
+        self.startedAt = startedAt
+        self.duration = duration
+        self.mode = mode
+        self.contentRevision = max(0, contentRevision)
+        self.summary = summary
+        self.detailedMinutes = detailedMinutes
+        self.bookmarks = bookmarks
+        self.transcripts = transcripts
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            title: container.decode(String.self, forKey: .title),
+            startedAt: container.decode(Date.self, forKey: .startedAt),
+            duration: container.decode(TimeInterval.self, forKey: .duration),
+            mode: container.decode(MeetingMode.self, forKey: .mode),
+            contentRevision: container.decode(
+                Int.self,
+                forKey: .contentRevision
+            ),
+            summary: container.decodeIfPresent(
+                GeneratedMeetingSummary.self,
+                forKey: .summary
+            ),
+            detailedMinutes: container.decodeIfPresent(
+                GeneratedDetailedMinutes.self,
+                forKey: .detailedMinutes
+            ),
+            bookmarks: container.decode(
+                [MeetingBookmarkInput].self,
+                forKey: .bookmarks
+            ),
+            transcripts: container.decode(
+                [MeetingTranscriptInput].self,
+                forKey: .transcripts
+            )
+        )
+    }
 
     init(
         title: String,
@@ -37,15 +115,17 @@ struct NotionMeetingPageContent: Equatable, Sendable {
                     .missingRequestedDocument(kind)
             }
         }
-        self.title = title
-        self.startedAt = startedAt
-        self.duration = duration
-        self.mode = mode
-        self.kind = kind
-        self.summary = summary
-        self.detailedMinutes = detailedMinutes
-        self.bookmarks = bookmarks
-        self.transcripts = transcripts
+        try self.init(
+            title: title,
+            startedAt: startedAt,
+            duration: duration,
+            mode: mode,
+            contentRevision: 0,
+            summary: summary,
+            detailedMinutes: detailedMinutes,
+            bookmarks: bookmarks,
+            transcripts: transcripts
+        )
     }
 }
 
@@ -146,27 +226,19 @@ struct NotionBlockBuilder: Sendable {
     func documentBlocks(
         for content: NotionMeetingPageContent
     ) -> [NotionBlockDraft] {
-        switch content.kind {
-        case .summary:
-            guard let summary = content.summary else {
-                preconditionFailure(
-                    "Validated summary content must contain its payload."
-                )
-            }
-            return summaryBlocks(summary, content: content)
-        case .detailedMinutes:
-            guard let detailedMinutes = content.detailedMinutes else {
-                preconditionFailure(
-                    "Validated detailed-minutes content must contain its payload."
-                )
-            }
-            return detailedMinutesBlocks(detailedMinutes)
+        var result: [NotionBlockDraft] = []
+        if let summary = content.summary {
+            result.append(contentsOf: summaryBlocks(summary))
         }
+        if let detailedMinutes = content.detailedMinutes {
+            result.append(contentsOf: detailedMinutesBlocks(detailedMinutes))
+        }
+        result.append(contentsOf: sharedMeetingBlocks(for: content))
+        return result
     }
 
     private func summaryBlocks(
-        _ summary: GeneratedMeetingSummary,
-        content: NotionMeetingPageContent
+        _ summary: GeneratedMeetingSummary
     ) -> [NotionBlockDraft] {
         var result: [NotionBlockDraft] = []
 
@@ -185,13 +257,21 @@ struct NotionBlockBuilder: Sendable {
             to: &result
         )
 
+        return result
+    }
+
+    private func sharedMeetingBlocks(
+        for content: NotionMeetingPageContent
+    ) -> [NotionBlockDraft] {
+        var result: [NotionBlockDraft] = []
+
         appendHeading("书签", to: &result)
         let bookmarkLines = content.bookmarks
             .sorted { $0.timestamp < $1.timestamp }
             .map { "[\(formatTime($0.timestamp))] \($0.excerpt)" }
-        let insightLines = summary.bookmarkInsights.map {
+        let insightLines = content.summary?.bookmarkInsights.map {
             "AI 解读：\($0)"
-        }
+        } ?? []
         appendList(bookmarkLines + insightLines, to: &result)
 
         appendHeading("完整转录", to: &result)
@@ -208,10 +288,10 @@ struct NotionBlockBuilder: Sendable {
             }
             .map {
                 let transcript = $0.element
-                return "[\(formatTime(transcript.startTime))-\(formatTime(transcript.endTime))] \(transcript.text)"
+                let speaker = transcript.speakerLabel.map { "\($0)：" } ?? ""
+                return "[\(formatTime(transcript.startTime))-\(formatTime(transcript.endTime))] \(speaker)\(transcript.text)"
             }
         appendList(transcriptLines, emptyKind: .paragraph, to: &result)
-
         return result
     }
 

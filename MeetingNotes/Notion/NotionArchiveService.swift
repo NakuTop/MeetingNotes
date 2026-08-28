@@ -163,9 +163,12 @@ final class NotionArchiveService {
         guard let checkpoint = meeting.archiveCheckpoint else {
             throw MeetingDocumentRepositoryError.missingArchiveCheckpoint
         }
+        let meetingSnapshotAlreadySynced = content.contentRevision == 0
+            || meeting.notionSyncedContentRevision == content.contentRevision
         if try checkpoint.pendingRun(for: content.kind) == nil,
            try !checkpoint.blockIDs(for: content.kind).isEmpty,
-           archivedRevision(in: meeting, kind: content.kind) == contentRevision {
+           archivedRevision(in: meeting, kind: content.kind) == contentRevision,
+           meetingSnapshotAlreadySynced {
             return
         }
 

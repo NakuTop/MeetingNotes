@@ -95,7 +95,6 @@ extension SummarizeAndArchiving {
 @MainActor
 final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
     private let repository: MeetingRepository
-    private let settingsStore: AppSettingsStore
     private let operationGate: MeetingOperationGate
     private let documentsUseCase: MeetingDocumentsUseCase
 
@@ -109,7 +108,6 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
         documentsUseCase: MeetingDocumentsUseCase? = nil
     ) {
         self.repository = repository
-        self.settingsStore = settingsStore
         self.operationGate = operationGate
         self.documentsUseCase = documentsUseCase
             ?? MeetingDocumentsUseCase(
@@ -146,60 +144,29 @@ final class SummarizeAndArchiveUseCase: SummarizeAndArchiving {
             throw SummarizeAndArchiveError.operationInProgress
         case .summaryReady:
             onProgress(.summaryReady)
-            guard settingsStore.isNotionArchivingEnabled else { return }
-            onProgress(.archiving)
-            do {
-                try await documentsUseCase.retryArchive(
-                    meetingID: meetingID,
-                    kind: .summary
-                )
-                onProgress(.archived)
-            } catch {
-                onProgress(
-                    (try? repository.meeting(id: meetingID).state)
-                        ?? .summaryReady
-                )
-                throw Self.legacyError(error)
-            }
+            return
         case .ready:
             if meeting.summary != nil {
                 onProgress(.summaryReady)
-                guard settingsStore.isNotionArchivingEnabled else {
-                    guard operationGate.acquire(
+                guard operationGate.acquire(
+                    .summarizeArchive,
+                    for: meetingID
+                ) else {
+                    throw SummarizeAndArchiveError.operationInProgress
+                }
+                defer {
+                    operationGate.release(
                         .summarizeArchive,
                         for: meetingID
-                    ) else {
-                        throw SummarizeAndArchiveError.operationInProgress
-                    }
-                    defer {
-                        operationGate.release(
-                            .summarizeArchive,
-                            for: meetingID
-                        )
-                    }
-                    do {
-                        try repository.updateMeetingState(
-                            id: meetingID,
-                            state: .summaryReady
-                        )
-                    } catch {
-                        throw SummarizeAndArchiveError.localPersistenceFailed
-                    }
-                    return
+                    )
                 }
                 do {
-                    onProgress(.archiving)
-                    try await documentsUseCase.retryArchive(
-                        meetingID: meetingID,
-                        kind: .summary
+                    try repository.updateMeetingState(
+                        id: meetingID,
+                        state: .summaryReady
                     )
-                    onProgress(.archived)
                 } catch {
-                    onProgress(
-                        (try? repository.meeting(id: meetingID).state)
-                            ?? .summaryReady
-                    )
-                    throw Self.legacyError(error)
+                    throw SummarizeAndArchiveError.localPersistenceFailed
                 }
                 return
             }

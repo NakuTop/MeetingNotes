@@ -15,7 +15,7 @@ struct GeneratedMeetingSummary: Codable, Equatable, Sendable {
     let bookmarkInsights: [String]
 }
 
-struct MeetingTranscriptInput: Equatable, Sendable {
+struct MeetingTranscriptInput: Codable, Equatable, Sendable {
     let startTime: TimeInterval
     let endTime: TimeInterval
     let text: String
@@ -34,7 +34,7 @@ struct MeetingTranscriptInput: Equatable, Sendable {
     }
 }
 
-struct MeetingBookmarkInput: Equatable, Sendable {
+struct MeetingBookmarkInput: Codable, Equatable, Sendable {
     let timestamp: TimeInterval
     let excerpt: String
 }

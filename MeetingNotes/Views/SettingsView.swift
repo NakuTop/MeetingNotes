@@ -166,7 +166,7 @@ struct SettingsView: View {
                             .font(.headline)
 
                         Toggle(
-                            "生成后自动归档到 Notion",
+                            "启用 Notion 同步",
                             isOn: $viewModel.isNotionArchivingEnabled
                         )
                         .accessibilityIdentifier(
@@ -174,7 +174,7 @@ struct SettingsView: View {
                         )
 
                         Text(
-                            "仅在本地生成成功后，自动归档会议详情页滑块当前选择的文档类型（重点总结或完整纪要）。"
+                            "本地内容会随时自动保存；只有在会议详情中点击“同步到 Notion”时才会更新 Notion 页面。"
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)

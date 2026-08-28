@@ -1822,6 +1822,117 @@ final class MeetingRepository {
         }
     }
 
+    func beginNotionSync(
+        meetingID: UUID,
+        contentRevision: Int
+    ) throws -> MeetingNotionSyncSnapshot {
+        let meeting = try meeting(id: meetingID)
+        guard meeting.contentRevision == contentRevision else {
+            throw MeetingDocumentRepositoryError.staleMeetingContentRevision(
+                expected: contentRevision,
+                actual: meeting.contentRevision
+            )
+        }
+        let snapshot = notionSyncSnapshot(for: meeting)
+        meeting.notionSyncState = .syncing
+        meeting.notionSyncErrorCode = nil
+        meeting.updatedAt = .now
+        do {
+            try saveContext()
+            return snapshot
+        } catch {
+            restoreNotionSyncFields(from: snapshot, to: meeting)
+            throw error
+        }
+    }
+
+    func completeNotionSync(
+        meetingID: UUID,
+        contentRevision: Int
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+        let snapshot = notionSyncSnapshot(for: meeting)
+        meeting.notionSyncedContentRevision = contentRevision
+        meeting.notionSyncState = meeting.contentRevision == contentRevision
+            ? .synced
+            : .localOnly
+        meeting.notionSyncErrorCode = nil
+        meeting.updatedAt = .now
+        do {
+            try saveContext()
+        } catch {
+            restoreNotionSyncFields(from: snapshot, to: meeting)
+            throw error
+        }
+    }
+
+    func failNotionSync(
+        meetingID: UUID,
+        contentRevision: Int,
+        errorCode: String
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+        let snapshot = notionSyncSnapshot(for: meeting)
+        if meeting.contentRevision == contentRevision {
+            meeting.notionSyncState = .failed
+            meeting.notionSyncErrorCode = errorCode
+        } else {
+            meeting.notionSyncState = .localOnly
+            meeting.notionSyncErrorCode = nil
+        }
+        meeting.updatedAt = .now
+        do {
+            try saveContext()
+        } catch {
+            restoreNotionSyncFields(from: snapshot, to: meeting)
+            throw error
+        }
+    }
+
+    func restoreNotionSyncSnapshot(
+        _ snapshot: MeetingNotionSyncSnapshot
+    ) throws {
+        let meeting = try meeting(id: snapshot.meetingID)
+        let current = notionSyncSnapshot(for: meeting)
+        if meeting.contentRevision == snapshot.contentRevision {
+            restoreNotionSyncFields(from: snapshot, to: meeting)
+        } else {
+            meeting.notionSyncedContentRevision = snapshot.syncedContentRevision
+            meeting.notionSyncState = .localOnly
+            meeting.notionSyncErrorCode = nil
+            meeting.updatedAt = .now
+        }
+        do {
+            try saveContext()
+        } catch {
+            restoreNotionSyncFields(from: current, to: meeting)
+            throw error
+        }
+    }
+
+    private func notionSyncSnapshot(
+        for meeting: MeetingRecord
+    ) -> MeetingNotionSyncSnapshot {
+        MeetingNotionSyncSnapshot(
+            meetingID: meeting.id,
+            contentRevision: meeting.contentRevision,
+            syncedContentRevision: meeting.notionSyncedContentRevision,
+            syncStateRawValue: meeting.notionSyncStateRawValue,
+            errorCode: meeting.notionSyncErrorCode,
+            meetingUpdatedAt: meeting.updatedAt
+        )
+    }
+
+    private func restoreNotionSyncFields(
+        from snapshot: MeetingNotionSyncSnapshot,
+        to meeting: MeetingRecord
+    ) {
+        meeting.notionSyncedContentRevision = snapshot.syncedContentRevision
+        meeting.notionSyncStateRawValue = snapshot.syncStateRawValue
+        meeting.notionSyncErrorCode = snapshot.errorCode
+        meeting.updatedAt = snapshot.meetingUpdatedAt
+    }
+
     private func applyDocumentArchiveSnapshot(
         _ snapshot: MeetingDocumentArchiveSnapshot,
         to meeting: MeetingRecord

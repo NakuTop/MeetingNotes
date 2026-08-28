@@ -225,7 +225,7 @@ final class MeetingFlowUITests: XCTestCase {
 
         let detail = app.scrollViews["meeting.detail"]
         XCTAssertTrue(detail.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["总结与归档"].exists)
+        XCTAssertTrue(app.staticTexts["总结与同步"].exists)
         let summaryMode = app.buttons["meeting.documents.mode.summary"]
         let detailedMode = app.buttons["meeting.documents.mode.detailed"]
         XCTAssertTrue(summaryMode.exists)
@@ -523,7 +523,7 @@ final class MeetingFlowUITests: XCTestCase {
         XCTAssertTrue(send.isEnabled)
     }
 
-    func testGenerateSummaryShowsArchiveStageThenNotionLink() {
+    func testGenerateSummaryThenExplicitSyncShowsNotionLink() {
         let app = launchApp()
         let start = app.buttons["meeting.start.offline"]
         XCTAssertTrue(start.waitForExistence(timeout: 5))
@@ -540,16 +540,27 @@ final class MeetingFlowUITests: XCTestCase {
 
         XCTAssertTrue(
             waitForStaticText(
-                identifier: "meeting.documents.archiveStatus",
-                label: "正在归档",
+                identifier: "meeting.documents.notionSyncStatus",
+                label: "尚未同步",
                 in: app,
                 timeout: 8
             )
         )
+        let sync = app.buttons["meeting.documents.syncNotion"]
+        XCTAssertTrue(sync.waitForExistence(timeout: 5))
+        sync.click()
         XCTAssertTrue(
             waitForStaticText(
-                identifier: "meeting.documents.archiveStatus",
-                label: "已归档",
+                identifier: "meeting.documents.notionSyncStatus",
+                label: "正在同步",
+                in: app,
+                timeout: 3
+            )
+        )
+        XCTAssertTrue(
+            waitForStaticText(
+                identifier: "meeting.documents.notionSyncStatus",
+                label: "已同步",
                 in: app,
                 timeout: 8
             )
@@ -557,7 +568,7 @@ final class MeetingFlowUITests: XCTestCase {
         XCTAssertTrue(
             app.links["在 Notion 中打开"].waitForExistence(timeout: 5)
         )
-        keepScreenshot(named: "06-archived-detail", of: app)
+        keepScreenshot(named: "06-synced-detail", of: app)
     }
 
     func testMeetingManagementMenusAndRename() {

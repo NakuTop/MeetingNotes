@@ -130,6 +130,9 @@ private struct MeetingSidebarRow: View {
 
     var body: some View {
         let archiveDisplayState = MeetingNotionArchiveDisplayState.resolve(
+            notionSyncStateRawValue: meeting.notionSyncStateRawValue,
+            contentRevision: meeting.contentRevision,
+            syncedContentRevision: meeting.notionSyncedContentRevision,
             summary: meeting.summary?.archiveState,
             detailedMinutes: meeting.detailedMinutes?.archiveState,
             legacyMeetingState: meeting.state,
@@ -192,7 +195,8 @@ private struct MeetingSidebarRow: View {
     ) -> Color {
         switch state {
         case .none: .secondary
-        case .partial: .blue
+        case .dirty, .syncing: .blue
+        case .failed: .orange
         case .complete: .green
         }
     }

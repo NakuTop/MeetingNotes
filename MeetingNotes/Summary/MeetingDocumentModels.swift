@@ -1,11 +1,12 @@
 import Foundation
 
-enum MeetingDocumentKind: String, CaseIterable, Equatable, Sendable {
+enum MeetingDocumentKind: String, CaseIterable, Codable, Equatable, Sendable {
     case summary
     case detailedMinutes
 }
 
 enum NotionMeetingPageContentError: Error, Equatable, Sendable {
+    case missingLocalDocument
     case missingRequestedDocument(MeetingDocumentKind)
     case multipleDocuments
 }
@@ -14,6 +15,16 @@ enum MeetingDocumentOperation: Equatable, Sendable {
     case idle
     case generating(MeetingDocumentKind)
     case archiving(MeetingDocumentKind)
+    case syncingNotion
+}
+
+struct MeetingNotionSyncSnapshot: Equatable, Sendable {
+    let meetingID: UUID
+    let contentRevision: Int
+    let syncedContentRevision: Int?
+    let syncStateRawValue: String?
+    let errorCode: String?
+    let meetingUpdatedAt: Date
 }
 
 struct MeetingDocumentArchiveSnapshot: Equatable, Sendable {

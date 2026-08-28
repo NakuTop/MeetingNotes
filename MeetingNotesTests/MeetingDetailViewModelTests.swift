@@ -332,12 +332,12 @@ final class MeetingDetailViewModelTests: XCTestCase {
         )
 
         let cases: [(RecordingState, MeetingDetailPrimaryAction)] = [
-            (.recording, .unavailable),
-            (.ready, .summarizeAndArchive),
+            (.recording, .unavailableLocal),
+            (.ready, .summarizeLocally),
             (.summarizing, .summarizing),
-            (.summaryReady, .archiveToNotion),
+            (.summaryReady, .localSummarySaved),
             (.archiving, .archiving),
-            (.archived, .archived)
+            (.archived, .localSummarySaved)
         ]
 
         for (state, expected) in cases {
@@ -375,7 +375,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
 
         settingsStore.isNotionArchivingEnabled = true
         XCTAssertTrue(viewModel.isNotionArchivingEnabled)
-        XCTAssertEqual(viewModel.primaryAction, .summarizeAndArchive)
+        XCTAssertEqual(viewModel.primaryAction, .summarizeLocally)
 
         settingsStore.isNotionArchivingEnabled = false
         try repository.updateMeetingState(id: meetingID, state: .summaryReady)
@@ -383,7 +383,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.primaryAction, .localSummarySaved)
 
         settingsStore.isNotionArchivingEnabled = true
-        XCTAssertEqual(viewModel.primaryAction, .archiveToNotion)
+        XCTAssertEqual(viewModel.primaryAction, .localSummarySaved)
     }
 
     func testPrimaryActionKeepsLegacySummaryAdapterUntilDocumentPickerMigration()
@@ -511,7 +511,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         let cases = [
             (
                 "source_track_write_failed_microphone",
-                "部分分轨处理失败，已使用可用录音和转录，不影响播放、总结与归档。"
+                "部分分轨处理失败，已使用可用录音和转录，不影响播放、总结与同步。"
             ),
             (
                 "speaker_diarization_model_preparation_failed",
@@ -523,11 +523,11 @@ final class MeetingDetailViewModelTests: XCTestCase {
             ),
             (
                 "speaker_transcript_replacement_failed",
-                "说话人标记未能保存，已保留普通转录，不影响播放、总结与归档。"
+                "说话人标记未能保存，已保留普通转录，不影响播放、总结与同步。"
             ),
             (
                 "private_internal_detail",
-                "说话人处理未完成，已使用普通转录，不影响播放、总结与归档。"
+                "说话人处理未完成，已使用普通转录，不影响播放、总结与同步。"
             )
         ]
 
@@ -557,7 +557,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
                 viewModel.speakerProcessingWarningMessage,
                 expectedMessage
             )
-            XCTAssertEqual(viewModel.primaryAction, .summarizeAndArchive)
+            XCTAssertEqual(viewModel.primaryAction, .summarizeLocally)
         }
     }
 
@@ -760,8 +760,8 @@ final class MeetingDetailViewModelTests: XCTestCase {
 
         await viewModel.performPrimaryAction()
 
-        XCTAssertEqual(viewModel.primaryAction, .archiveToNotion)
-        XCTAssertEqual(viewModel.errorMessage, "Notion 归档失败，可直接重试，不会再次生成总结。")
+        XCTAssertEqual(viewModel.primaryAction, .localSummarySaved)
+        XCTAssertEqual(viewModel.errorMessage, "Notion 同步失败，可直接重试，不会再次生成总结。")
         XCTAssertEqual(action.callCount, 1)
     }
 
@@ -906,7 +906,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
             ),
             (
                 .invalidState(.summarizing),
-                "会议正在总结或归档，暂时不能重命名。"
+                "会议正在总结或同步，暂时不能重命名。"
             ),
             (
                 .localUpdateFailed,
@@ -1111,7 +1111,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         XCTAssertTrue(documentManager.retriedKinds.isEmpty)
     }
 
-    func testRetryArchiveUsesSelectedSavedDocumentWithoutGeneration()
+    func testExplicitSyncUsesWholeMeetingWithoutGeneration()
         async throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(
@@ -1148,24 +1148,25 @@ final class MeetingDetailViewModelTests: XCTestCase {
             titleUpdater: DetailTitleUpdaterSpy()
         )
 
-        await viewModel.archiveSelectedDocumentToNotion()
+        await viewModel.syncMeetingToNotion()
 
         XCTAssertTrue(documentManager.generatedKinds.isEmpty)
-        XCTAssertEqual(documentManager.retriedKinds, [.summary])
+        XCTAssertTrue(documentManager.retriedKinds.isEmpty)
+        XCTAssertEqual(documentManager.syncedMeetingIDs, [meetingID])
     }
 
-    func testSavedDocumentArchiveButtonCoversLocalFailedAndArchivedStates()
+    func testMeetingSyncButtonUsesMeetingLevelState()
         throws {
         let expectations: [
-            (MeetingDocumentArchiveState, RecordingState, String, Bool)
+            (MeetingNotionSyncState, String, Bool)
         ] = [
-            (.localOnly, .summaryReady, "归档到 Notion", true),
-            (.failed, .summaryReady, "重新归档到 Notion", true),
-            (.archived, .archived, "重新归档并覆盖", true),
-            (.archiving, .archiving, "正在归档", false),
+            (.localOnly, "尚未同步", true),
+            (.failed, "同步失败", true),
+            (.synced, "已同步", true),
+            (.syncing, "正在同步", false),
         ]
 
-        for (archiveState, meetingState, title, isEnabled) in expectations {
+        for (syncState, status, isEnabled) in expectations {
             let repository = try MeetingRepository.inMemory()
             let meetingID = try repository.createMeeting(
                 mode: .offline,
@@ -1183,13 +1184,10 @@ final class MeetingDetailViewModelTests: XCTestCase {
                 ),
                 model: "test-model"
             )
-            if archiveState != .localOnly {
-                try repository.updateDocumentArchiveState(
-                    meetingID: meetingID,
-                    kind: .summary,
-                    archiveState: archiveState,
-                    meetingState: meetingState
-                )
+            let meeting = try repository.meeting(id: meetingID)
+            meeting.notionSyncState = syncState
+            if syncState == .synced {
+                meeting.notionSyncedContentRevision = meeting.contentRevision
             }
             let viewModel = MeetingDetailViewModel(
                 meetingID: meetingID,
@@ -1201,19 +1199,71 @@ final class MeetingDetailViewModelTests: XCTestCase {
             )
 
             XCTAssertEqual(
-                viewModel.selectedDocumentArchiveButtonTitle,
-                title,
-                "Unexpected title for \(archiveState)"
+                viewModel.notionSyncButtonTitle,
+                "同步到 Notion"
             )
             XCTAssertEqual(
-                viewModel.canArchiveSelectedDocumentToNotion,
+                viewModel.notionSyncStatusTitle,
+                status,
+                "Unexpected status for \(syncState)"
+            )
+            XCTAssertEqual(
+                viewModel.canSyncMeetingToNotion,
                 isEnabled,
-                "Unexpected enabled state for \(archiveState)"
+                "Unexpected enabled state for \(syncState)"
             )
         }
     }
 
-    func testArchiveButtonIsHiddenWithoutSelectedDocumentOrNotion() throws {
+    func testSyncButtonShowsDirtyWhenMeetingRevisionExceedsSyncedRevision()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "",
+                overview: "原总结",
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            ),
+            model: "test-model"
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        meeting.notionSyncState = .synced
+        meeting.notionSyncedContentRevision = meeting.contentRevision
+        try repository.updateSummaryManually(
+            meetingID: meetingID,
+            value: GeneratedMeetingSummary(
+                suggestedTitle: "",
+                overview: "已修改总结",
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            )
+        )
+
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            documentManager: DetailDocumentManagerSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        XCTAssertEqual(viewModel.notionSyncButtonTitle, "同步到 Notion")
+        XCTAssertEqual(viewModel.notionSyncStatusTitle, "有本地更改待同步")
+        XCTAssertTrue(viewModel.canSyncMeetingToNotion)
+    }
+
+    func testSyncButtonIsHiddenWithoutAnyDocumentOrNotion() throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(
             mode: .offline,
@@ -1228,7 +1278,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
             titleUpdater: DetailTitleUpdaterSpy()
         )
 
-        XCTAssertNil(noDocument.selectedDocumentArchiveButtonTitle)
+        XCTAssertNil(noDocument.notionSyncButtonTitle)
 
         try repository.saveGeneratedSummary(
             meetingID: meetingID,
@@ -1253,17 +1303,17 @@ final class MeetingDetailViewModelTests: XCTestCase {
             titleUpdater: DetailTitleUpdaterSpy()
         )
 
-        XCTAssertNil(notionDisabled.selectedDocumentArchiveButtonTitle)
+        XCTAssertNil(notionDisabled.notionSyncButtonTitle)
         XCTAssertFalse(
-            notionDisabled.canArchiveSelectedDocumentToNotion
+            notionDisabled.canSyncMeetingToNotion
         )
     }
 
-    func testArchiveActionHandlesLocalOnlyAndArchivedWithoutGeneration()
+    func testSyncActionHandlesLocalOnlyAndSyncedWithoutGeneration()
         async throws {
-        for archiveState in [
-            MeetingDocumentArchiveState.localOnly,
-            .archived,
+        for syncState in [
+            MeetingNotionSyncState.localOnly,
+            .synced,
         ] {
             let repository = try MeetingRepository.inMemory()
             let meetingID = try repository.createMeeting(
@@ -1282,11 +1332,10 @@ final class MeetingDetailViewModelTests: XCTestCase {
                 ),
                 model: "test-model"
             )
-            if archiveState == .archived {
-                try repository.completeDocumentArchive(
-                    meetingID: meetingID,
-                    kind: .summary
-                )
+            let meeting = try repository.meeting(id: meetingID)
+            meeting.notionSyncState = syncState
+            if syncState == .synced {
+                meeting.notionSyncedContentRevision = meeting.contentRevision
             }
             let documentManager = DetailDocumentManagerSpy()
             let viewModel = MeetingDetailViewModel(
@@ -1298,10 +1347,11 @@ final class MeetingDetailViewModelTests: XCTestCase {
                 titleUpdater: DetailTitleUpdaterSpy()
             )
 
-            await viewModel.archiveSelectedDocumentToNotion()
+            await viewModel.syncMeetingToNotion()
 
             XCTAssertTrue(documentManager.generatedKinds.isEmpty)
-            XCTAssertEqual(documentManager.retriedKinds, [.summary])
+            XCTAssertTrue(documentManager.retriedKinds.isEmpty)
+            XCTAssertEqual(documentManager.syncedMeetingIDs, [meetingID])
         }
     }
 
@@ -2619,6 +2669,7 @@ private final class DetailDocumentManagerSpy: MeetingDocumentManaging {
     private(set) var generatedKinds: [MeetingDocumentKind] = []
     private(set) var generatedReplacingManualEdits: [Bool] = []
     private(set) var retriedKinds: [MeetingDocumentKind] = []
+    private(set) var syncedMeetingIDs: [UUID] = []
 
     func generate(
         meetingID: UUID,
@@ -2636,6 +2687,10 @@ private final class DetailDocumentManagerSpy: MeetingDocumentManaging {
     ) async throws {
         _ = meetingID
         retriedKinds.append(kind)
+    }
+
+    func syncToNotion(meetingID: UUID) async throws {
+        syncedMeetingIDs.append(meetingID)
     }
 }
 
@@ -2673,6 +2728,10 @@ private final class BlockingDetailDocumentManager: MeetingDocumentManaging {
     ) async throws {
         _ = meetingID
         _ = kind
+    }
+
+    func syncToNotion(meetingID: UUID) async throws {
+        _ = meetingID
     }
 
     func waitUntilStarted() async {
@@ -2737,6 +2796,10 @@ private final class CapturedKindDetailDocumentManager:
     ) async throws {
         _ = meetingID
         _ = kind
+    }
+
+    func syncToNotion(meetingID: UUID) async throws {
+        _ = meetingID
     }
 
     func waitUntilStarted() async {

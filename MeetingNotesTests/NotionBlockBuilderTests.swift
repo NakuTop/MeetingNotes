@@ -30,7 +30,7 @@ final class NotionBlockBuilderTests: XCTestCase {
         XCTAssertFalse(blocks.contains { $0.text.contains("独立议题深度内容") })
     }
 
-    func testDetailedMinutesKindContainsMinutesAndNoSummaryFields() throws {
+    func testDetailedMinutesKindContainsMinutesAndSharedCanonicalFields() throws {
         let content = try makeDetailedContent()
 
         let blocks = NotionBlockBuilder().blocks(for: content)
@@ -48,11 +48,11 @@ final class NotionBlockBuilderTests: XCTestCase {
         XCTAssertFalse(allText.contains("精简摘要关键点"))
         XCTAssertFalse(allText.contains("精简摘要书签洞察"))
         XCTAssertFalse(blocks.contains { $0.kind == .heading2 && $0.text == "摘要" })
-        XCTAssertFalse(blocks.contains { $0.kind == .heading2 && $0.text == "书签" })
-        XCTAssertFalse(blocks.contains { $0.kind == .heading2 && $0.text == "完整转录" })
+        XCTAssertTrue(blocks.contains { $0.kind == .heading2 && $0.text == "书签" })
+        XCTAssertTrue(blocks.contains { $0.kind == .heading2 && $0.text == "完整转录" })
     }
 
-    func testBuilderAcceptsExactlyOneDocumentKindPerCall() throws {
+    func testBuilderAcceptsEitherSingleDocumentKind() throws {
         let builder = NotionBlockBuilder()
         let summaryContent = try makeSummaryContent()
         let detailedContent = try makeDetailedContent()
@@ -60,8 +60,8 @@ final class NotionBlockBuilderTests: XCTestCase {
         let summarySection = builder.documentBlocks(for: summaryContent)
         let detailedSection = builder.documentBlocks(for: detailedContent)
 
-        XCTAssertEqual(summaryContent.kind, .summary)
-        XCTAssertEqual(detailedContent.kind, .detailedMinutes)
+        XCTAssertEqual(summaryContent.documentKinds, [.summary])
+        XCTAssertEqual(detailedContent.documentKinds, [.detailedMinutes])
         XCTAssertEqual(
             builder.blocks(for: summaryContent),
             builder.metadataBlocks(for: summaryContent) + summarySection
@@ -76,42 +76,82 @@ final class NotionBlockBuilderTests: XCTestCase {
         XCTAssertFalse(detailedSection.contains { $0.text == "摘要" })
     }
 
-    func testMissingRequestedDocumentIsRejectedBeforeBuildingBlocks() {
+    func testPageContentRequiresAtLeastOneLocalDocument() {
         XCTAssertThrowsError(
-            try makeContent(kind: .summary, summary: nil, detailedMinutes: nil)
+            try makeContent(summary: nil, detailedMinutes: nil)
         ) { error in
             XCTAssertEqual(
                 error as? NotionMeetingPageContentError,
-                .missingRequestedDocument(.summary)
-            )
-        }
-        XCTAssertThrowsError(
-            try makeContent(
-                kind: .detailedMinutes,
-                summary: conciseSummary,
-                detailedMinutes: nil
-            )
-        ) { error in
-            XCTAssertEqual(
-                error as? NotionMeetingPageContentError,
-                .missingRequestedDocument(.detailedMinutes)
+                .missingLocalDocument
             )
         }
     }
 
-    func testSimultaneousDocumentsAreRejectedBeforeBuildingBlocks() {
+    func testDecodedPageContentAlsoRequiresAtLeastOneLocalDocument()
+        throws {
+        let validData = try JSONEncoder().encode(makeSummaryContent())
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: validData) as? [String: Any]
+        )
+        object["summary"] = NSNull()
+        object["detailedMinutes"] = NSNull()
+        let invalidData = try JSONSerialization.data(withJSONObject: object)
+
         XCTAssertThrowsError(
-            try makeContent(
-                kind: .summary,
-                summary: conciseSummary,
-                detailedMinutes: detailedMinutes
+            try JSONDecoder().decode(
+                NotionMeetingPageContent.self,
+                from: invalidData
             )
         ) { error in
             XCTAssertEqual(
                 error as? NotionMeetingPageContentError,
-                .multipleDocuments
+                .missingLocalDocument
             )
         }
+    }
+
+    func testCanonicalPageBuildsSummaryMinutesAndSharedContentOnce() throws {
+        let content = try makeContent(
+            summary: conciseSummary,
+            detailedMinutes: detailedMinutes,
+            transcripts: [
+                .init(
+                    startTime: 2,
+                    endTime: 5,
+                    text: "采用最终方案",
+                    speakerLabel: "张三"
+                )
+            ]
+        )
+
+        let blocks = NotionBlockBuilder().blocks(for: content)
+        let headings = blocks
+            .filter { $0.kind == .heading2 }
+            .map(\.text)
+
+        XCTAssertEqual(content.documentKinds, [.summary, .detailedMinutes])
+        XCTAssertEqual(headings.filter { $0 == "元信息" }.count, 1)
+        XCTAssertEqual(headings.filter { $0 == "摘要" }.count, 1)
+        XCTAssertEqual(headings.filter { $0 == "完整纪要" }.count, 1)
+        XCTAssertEqual(headings.filter { $0 == "书签" }.count, 1)
+        XCTAssertEqual(headings.filter { $0 == "完整转录" }.count, 1)
+        XCTAssertTrue(blocks.contains { $0.text.contains("精简摘要概览") })
+        XCTAssertTrue(blocks.contains { $0.text.contains("深度提炼的会议概况") })
+        XCTAssertTrue(blocks.contains { $0.text.contains("负责人") })
+        XCTAssertTrue(
+            blocks.contains {
+                $0.text.contains("张三") && $0.text.contains("采用最终方案")
+            }
+        )
+
+        let encoded = try JSONEncoder().encode(content)
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                NotionMeetingPageContent.self,
+                from: encoded
+            ),
+            content
+        )
     }
 
     func testLongMinutesParagraphsRespectNotionTextAndBatchLimits() throws {
@@ -134,7 +174,6 @@ final class NotionBlockBuilderTests: XCTestCase {
             openQuestions: []
         )
         let content = try makeContent(
-            kind: .detailedMinutes,
             summary: nil,
             detailedMinutes: minutes
         )
@@ -300,7 +339,6 @@ final class NotionBlockBuilderTests: XCTestCase {
         ]
     ) throws -> NotionMeetingPageContent {
         try makeContent(
-            kind: .summary,
             summary: GeneratedMeetingSummary(
                 suggestedTitle: "产品路线图周会",
                 overview: overview,
@@ -318,14 +356,12 @@ final class NotionBlockBuilderTests: XCTestCase {
 
     private func makeDetailedContent() throws -> NotionMeetingPageContent {
         try makeContent(
-            kind: .detailedMinutes,
             summary: nil,
             detailedMinutes: detailedMinutes
         )
     }
 
     private func makeContent(
-        kind: MeetingDocumentKind,
         summary: GeneratedMeetingSummary?,
         detailedMinutes: GeneratedDetailedMinutes?,
         transcripts: [MeetingTranscriptInput] = []
@@ -335,7 +371,7 @@ final class NotionBlockBuilderTests: XCTestCase {
             startedAt: Date(timeIntervalSince1970: 0),
             duration: 125,
             mode: .online,
-            kind: kind,
+            contentRevision: 7,
             summary: summary,
             detailedMinutes: detailedMinutes,
             bookmarks: [.init(timestamp: 65, excerpt: "发布决定")],

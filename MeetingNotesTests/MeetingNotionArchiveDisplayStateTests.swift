@@ -3,57 +3,83 @@ import XCTest
 @testable import MeetingNotes
 
 final class MeetingNotionArchiveDisplayStateTests: XCTestCase {
-    func testNoArchivedDocumentIsNotArchived() {
+    func testCanonicalMeetingSyncOverridesLegacyPerDocumentStates() {
         XCTAssertEqual(
-            MeetingNotionArchiveDisplayState.resolve(
-                summary: .localOnly,
-                detailedMinutes: .failed,
-                legacyMeetingState: .summaryReady,
-                hasNotionPage: true
+            resolve(
+                syncState: .synced,
+                contentRevision: 7,
+                syncedContentRevision: 7,
+                summary: .archived,
+                detailedMinutes: .localOnly
+            ),
+            .complete
+        )
+    }
+
+    func testNewerLocalRevisionIsDirtyAfterEarlierSync() {
+        XCTAssertEqual(
+            resolve(
+                syncState: .localOnly,
+                contentRevision: 8,
+                syncedContentRevision: 7
+            ),
+            .dirty
+        )
+    }
+
+    func testMeetingSyncingAndFailureRemainDistinct() {
+        XCTAssertEqual(resolve(syncState: .syncing), .syncing)
+        XCTAssertEqual(resolve(syncState: .failed), .failed)
+    }
+
+    func testFirstUnsyncedMeetingHasNoSyncIndicator() {
+        XCTAssertEqual(
+            resolve(
+                syncState: .localOnly,
+                contentRevision: 3,
+                syncedContentRevision: nil
             ),
             .none
         )
     }
 
-    func testDetailedMinutesArchiveMakesMixedMeetingPartiallyArchived() {
+    func testSyncedStateWithoutMatchingRevisionIsNotComplete() {
+        XCTAssertEqual(
+            resolve(
+                syncState: .synced,
+                contentRevision: 4,
+                syncedContentRevision: 3
+            ),
+            .dirty
+        )
+        XCTAssertEqual(
+            resolve(
+                syncState: .synced,
+                contentRevision: 4,
+                syncedContentRevision: nil
+            ),
+            .none
+        )
+    }
+
+    func testLegacyRecordsWithoutMeetingSyncStateKeepArchiveMeaning() {
         XCTAssertEqual(
             MeetingNotionArchiveDisplayState.resolve(
+                notionSyncStateRawValue: nil,
+                contentRevision: 0,
+                syncedContentRevision: nil,
                 summary: .localOnly,
                 detailedMinutes: .archived,
                 legacyMeetingState: .summaryReady,
                 hasNotionPage: true
             ),
-            .partial
+            .dirty
         )
-    }
-
-    func testEveryExistingArchivedDocumentIsComplete() {
         XCTAssertEqual(
             MeetingNotionArchiveDisplayState.resolve(
-                summary: .archived,
-                detailedMinutes: .archived,
-                legacyMeetingState: .archived,
-                hasNotionPage: true
-            ),
-            .complete
-        )
-    }
-
-    func testSingleExistingArchivedDocumentIsComplete() {
-        XCTAssertEqual(
-            MeetingNotionArchiveDisplayState.resolve(
-                summary: nil,
-                detailedMinutes: .archived,
-                legacyMeetingState: .summaryReady,
-                hasNotionPage: true
-            ),
-            .complete
-        )
-    }
-
-    func testLegacyArchivedMeetingWithNotionPageRemainsComplete() {
-        XCTAssertEqual(
-            MeetingNotionArchiveDisplayState.resolve(
+                notionSyncStateRawValue: nil,
+                contentRevision: 0,
+                syncedContentRevision: nil,
                 summary: nil,
                 detailedMinutes: nil,
                 legacyMeetingState: .archived,
@@ -63,12 +89,12 @@ final class MeetingNotionArchiveDisplayStateTests: XCTestCase {
         )
     }
 
-    func testEmptyLegacyMeetingWithoutNotionPageIsNotArchived() {
+    func testNoNotionPageCanNeverAppearSynced() {
         XCTAssertEqual(
-            MeetingNotionArchiveDisplayState.resolve(
-                summary: nil,
-                detailedMinutes: nil,
-                legacyMeetingState: .archived,
+            resolve(
+                syncState: .synced,
+                contentRevision: 7,
+                syncedContentRevision: 7,
                 hasNotionPage: false
             ),
             .none
@@ -81,9 +107,11 @@ final class MeetingNotionArchiveDisplayStateTests: XCTestCase {
             symbol: String,
             label: String
         )] = [
-            (.none, "icloud.slash", "未归档到 Notion"),
-            (.partial, "checkmark.icloud", "部分内容已归档到 Notion"),
-            (.complete, "checkmark.icloud.fill", "全部内容已归档到 Notion"),
+            (.none, "icloud.slash", "尚未同步到 Notion"),
+            (.dirty, "icloud.and.arrow.up", "有本地更改待同步到 Notion"),
+            (.syncing, "arrow.triangle.2.circlepath.icloud", "正在同步到 Notion"),
+            (.failed, "exclamationmark.icloud", "同步到 Notion 失败"),
+            (.complete, "checkmark.icloud.fill", "已同步到 Notion"),
         ]
 
         for (state, symbol, label) in cases {
@@ -96,5 +124,24 @@ final class MeetingNotionArchiveDisplayStateTests: XCTestCase {
                 )
             )
         }
+    }
+
+    private func resolve(
+        syncState: MeetingNotionSyncState,
+        contentRevision: Int = 1,
+        syncedContentRevision: Int? = nil,
+        summary: MeetingDocumentArchiveState? = .localOnly,
+        detailedMinutes: MeetingDocumentArchiveState? = nil,
+        hasNotionPage: Bool = true
+    ) -> MeetingNotionArchiveDisplayState {
+        MeetingNotionArchiveDisplayState.resolve(
+            notionSyncStateRawValue: syncState.rawValue,
+            contentRevision: contentRevision,
+            syncedContentRevision: syncedContentRevision,
+            summary: summary,
+            detailedMinutes: detailedMinutes,
+            legacyMeetingState: .summaryReady,
+            hasNotionPage: hasNotionPage
+        )
     }
 }

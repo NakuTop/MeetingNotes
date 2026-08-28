@@ -14,15 +14,15 @@ enum MeetingDetailPrimaryAction: Equatable, Sendable {
 
     var title: String {
         switch self {
-        case .unavailable: "总结并归档"
+        case .unavailable: "总结并同步"
         case .unavailableLocal: "生成总结"
-        case .summarizeAndArchive: "总结并归档"
+        case .summarizeAndArchive: "总结并同步"
         case .summarizeLocally: "生成总结"
         case .summarizing: "正在总结"
-        case .archiveToNotion: "归档到 Notion"
+        case .archiveToNotion: "同步到 Notion"
         case .localSummarySaved: "已保存到本机"
-        case .archiving: "正在归档"
-        case .archived: "已归档"
+        case .archiving: "正在同步"
+        case .archived: "已同步"
         }
     }
 
@@ -159,6 +159,7 @@ final class MeetingDetailViewModel {
     private(set) var speakerNameErrorMessage: String?
     private(set) var replacementPreview: MeetingExactReplacementPreview?
     private(set) var replacementErrorMessage: String?
+    private(set) var notionSyncErrorMessage: String?
     var selectedDocumentKind: MeetingDocumentKind = .summary
     private(set) var documentOperation: MeetingDocumentOperation = .idle
     private var summaryDocumentErrorMessage: String?
@@ -222,30 +223,30 @@ final class MeetingDetailViewModel {
 
     var primaryAction: MeetingDetailPrimaryAction {
         guard let state = meeting?.state else {
-            return isNotionArchivingEnabled ? .unavailable : .unavailableLocal
+            return .unavailableLocal
         }
         if isPerforming {
             return switch operationState ?? state {
             case .summaryReady:
-                isNotionArchivingEnabled ? .archiving : .localSummarySaved
+                .localSummarySaved
             case .archiving:
                 .archiving
             case .archived:
-                .archived
+                .localSummarySaved
             default:
                 .summarizing
             }
         }
         return switch state {
         case .ready:
-            isNotionArchivingEnabled ? .summarizeAndArchive : .summarizeLocally
+            .summarizeLocally
         case .summarizing: .summarizing
         case .summaryReady:
-            isNotionArchivingEnabled ? .archiveToNotion : .localSummarySaved
+            .localSummarySaved
         case .archiving: .archiving
-        case .archived: .archived
+        case .archived: .localSummarySaved
         default:
-            isNotionArchivingEnabled ? .unavailable : .unavailableLocal
+            .unavailableLocal
         }
     }
 
@@ -272,23 +273,45 @@ final class MeetingDetailViewModel {
     }
 
     var selectedDocumentArchiveButtonTitle: String? {
-        guard isNotionArchivingEnabled,
-              hasSelectedDocument else {
-            return nil
-        }
-        return switch archiveStatus(for: selectedDocumentKind) {
-        case .localOnly: "归档到 Notion"
-        case .failed: "重新归档到 Notion"
-        case .archived: "重新归档并覆盖"
-        case .archiving: "正在归档"
-        }
+        notionSyncButtonTitle
     }
 
     var canArchiveSelectedDocumentToNotion: Bool {
+        canSyncMeetingToNotion
+    }
+
+    var notionSyncButtonTitle: String? {
+        guard isNotionArchivingEnabled, hasAnyLocalDocument else {
+            return nil
+        }
+        return "同步到 Notion"
+    }
+
+    var notionSyncStatusTitle: String? {
+        guard notionSyncButtonTitle != nil, let meeting else { return nil }
+        if documentOperation == .syncingNotion
+            || meeting.notionSyncState == .syncing {
+            return "正在同步"
+        }
+        if meeting.notionSyncState == .failed {
+            return "同步失败"
+        }
+        if meeting.notionSyncState == .synced,
+           meeting.notionSyncedContentRevision == meeting.contentRevision {
+            return "已同步"
+        }
+        if let syncedRevision = meeting.notionSyncedContentRevision,
+           syncedRevision < meeting.contentRevision {
+            return "有本地更改待同步"
+        }
+        return "尚未同步"
+    }
+
+    var canSyncMeetingToNotion: Bool {
         guard documentManager != nil,
-              selectedDocumentArchiveButtonTitle != nil,
-              archiveStatus(for: selectedDocumentKind) != .archiving,
+              notionSyncButtonTitle != nil,
               canStartDocumentOperation,
+              meeting?.notionSyncState != .syncing,
               let state = meeting?.state else {
             return false
         }
@@ -385,24 +408,34 @@ final class MeetingDetailViewModel {
     }
 
     func archiveSelectedDocumentToNotion() async {
-        guard canArchiveSelectedDocumentToNotion,
+        await syncMeetingToNotion()
+    }
+
+    func syncMeetingToNotion() async {
+        if hasPendingEdits {
+            await flushEdits()
+            guard !hasPendingEdits else {
+                notionSyncErrorMessage =
+                    "本地修改尚未安全保存，请重试后再同步到 Notion。"
+                return
+            }
+        }
+        guard canSyncMeetingToNotion,
               let documentManager else { return }
-        let kind = selectedDocumentKind
-        documentOperation = .archiving(kind)
-        setDocumentErrorMessage(nil, for: kind)
+        documentOperation = .syncingNotion
+        notionSyncErrorMessage = nil
         defer { documentOperation = .idle }
 
         do {
-            try await documentManager.retryArchive(
-                meetingID: meetingID,
-                kind: kind
+            try await documentManager.syncToNotion(
+                meetingID: meetingID
             ) { [weak self] operation in
                 self?.documentOperation = operation
             }
         } catch where Self.isCancellation(error) {
-            // Cancellation restores the persisted archive state without an error.
+            // Cancellation restores the persisted meeting-level sync state.
         } catch {
-            setDocumentErrorMessage(Self.documentMessage(for: error), for: kind)
+            notionSyncErrorMessage = Self.documentMessage(for: error)
         }
         load()
     }
@@ -848,15 +881,15 @@ final class MeetingDetailViewModel {
             return "说话人分离已取消，原有转录已保留。"
         }
         if errorCode?.hasPrefix("source_track_") == true {
-            return "部分分轨处理失败，已使用可用录音和转录，不影响播放、总结与归档。"
+            return "部分分轨处理失败，已使用可用录音和转录，不影响播放、总结与同步。"
         }
         if errorCode?.hasPrefix("speaker_diarization_") == true {
-            return "说话人区分未完成，已保留可用转录，不影响播放、总结与归档。"
+            return "说话人区分未完成，已保留可用转录，不影响播放、总结与同步。"
         }
         if errorCode == "speaker_transcript_replacement_failed" {
-            return "说话人标记未能保存，已保留普通转录，不影响播放、总结与归档。"
+            return "说话人标记未能保存，已保留普通转录，不影响播放、总结与同步。"
         }
-        return "说话人处理未完成，已使用普通转录，不影响播放、总结与归档。"
+        return "说话人处理未完成，已使用普通转录，不影响播放、总结与同步。"
     }
 
     var shouldShowSpeakerDiarizationRetryAction: Bool {
@@ -1191,6 +1224,10 @@ final class MeetingDetailViewModel {
         }
     }
 
+    private var hasAnyLocalDocument: Bool {
+        meeting?.summary != nil || meeting?.detailedMinutes != nil
+    }
+
     private func setDocumentErrorMessage(
         _ message: String?,
         for kind: MeetingDocumentKind
@@ -1230,7 +1267,7 @@ final class MeetingDetailViewModel {
         case .missingDeepSeekCredential:
             "请先在设置中保存 DeepSeek API Key。"
         case .missingNotionCredential:
-            "内容已保存在本机。请在设置中保存 Notion Token 后重试归档。"
+            "内容已保存在本机。请在设置中保存 Notion Token 后重试同步。"
         case .invalidNotionPageURL:
             "内容已保存在本机。请在设置中填写有效的 Notion 父页面链接。"
         case .missingLocalDocument:
@@ -1238,7 +1275,7 @@ final class MeetingDetailViewModel {
         case .invalidGeneratedDocument, .generationFailed:
             "DeepSeek 生成失败，原有内容仍保存在本机，请稍后重试。"
         case .archiveFailed:
-            "Notion 归档失败，新内容已保存在本机，可直接重试归档。"
+            "Notion 同步失败，新内容已保存在本机，可直接重试同步。"
         case .localPersistenceFailed:
             "无法保存本地内容，请检查磁盘空间后重试。"
         case .operationInProgress:
@@ -1268,13 +1305,13 @@ final class MeetingDetailViewModel {
         case .missingDeepSeekCredential:
             "请先在设置中保存 DeepSeek API Key。"
         case .missingNotionCredential:
-            "总结已保存在本机。请在设置中保存 Notion Token 后重试归档。"
+            "总结已保存在本机。请在设置中保存 Notion Token 后重试同步。"
         case .invalidNotionPageURL:
             "总结已保存在本机。请在设置中填写有效的 Notion 父页面链接。"
         case .summaryFailed:
             "DeepSeek 总结失败，会议记录仍保存在本机，请稍后重试。"
         case .archiveFailed:
-            "Notion 归档失败，可直接重试，不会再次生成总结。"
+            "Notion 同步失败，可直接重试，不会再次生成总结。"
         case .localPersistenceFailed:
             "无法保存本地总结，请检查磁盘空间后重试。"
         case .operationInProgress:
@@ -1523,7 +1560,7 @@ extension MeetingTitleUpdateError {
         case .localUpdateFailed:
             "无法保存会议标题，请检查本地存储后重试。"
         case .invalidState:
-            "会议正在总结或归档，暂时不能重命名。"
+            "会议正在总结或同步，暂时不能重命名。"
         case let .notion(error):
             switch error {
             case .unauthorized:

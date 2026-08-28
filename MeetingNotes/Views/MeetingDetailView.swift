@@ -518,7 +518,7 @@ struct MeetingDetailView: View {
     private func summarySection(_ meeting: MeetingRecord) -> some View {
         AdaptiveGlassCard {
             VStack(alignment: .leading, spacing: 14) {
-                Text("总结与归档")
+                Text("总结与同步")
                     .font(.headline)
 
                 MeetingDocumentModeSlider(
@@ -556,6 +556,12 @@ struct MeetingDetailView: View {
                     }
                 }
 
+                if let errorMessage = viewModel.notionSyncErrorMessage {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
+
                 HStack(spacing: 12) {
                     Button(
                         selectedGenerateButtonTitle(meeting),
@@ -582,33 +588,34 @@ struct MeetingDetailView: View {
                             .controlSize(.small)
                     }
 
-                    if hasSelectedDocument(meeting) {
-                        Text(selectedArchiveStatusTitle)
+                    if let syncStatus = viewModel.notionSyncStatusTitle {
+                        Text(syncStatus)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier(
-                                "meeting.documents.archiveStatus"
+                                "meeting.documents.notionSyncStatus"
                             )
                     }
 
-                    if let archiveButtonTitle = viewModel
-                        .selectedDocumentArchiveButtonTitle {
-                        Button(archiveButtonTitle) {
-                            beginArchiveSelectedDocumentToNotion()
+                    if viewModel.documentOperation == .syncingNotion {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+
+                    if let syncButtonTitle = viewModel.notionSyncButtonTitle {
+                        Button(syncButtonTitle) {
+                            beginSyncMeetingToNotion()
                         }
                         .buttonStyle(.bordered)
                         .disabled(
-                            !viewModel.canArchiveSelectedDocumentToNotion
+                            !viewModel.canSyncMeetingToNotion
                         )
                         .accessibilityIdentifier(
-                            "meeting.documents.retryArchive"
+                            "meeting.documents.syncNotion"
                         )
                     }
 
-                    if viewModel.archiveStatus(
-                        for: viewModel.selectedDocumentKind
-                    ) == .archived,
-                       let urlString = meeting.notionPageURL,
+                    if let urlString = meeting.notionPageURL,
                        let url = URL(string: urlString) {
                         Link("在 Notion 中打开", destination: url)
                     }
@@ -802,10 +809,10 @@ struct MeetingDetailView: View {
         }
     }
 
-    private func beginArchiveSelectedDocumentToNotion() {
+    private func beginSyncMeetingToNotion() {
         invalidateDocumentOperationTask()
         documentOperationTask = Task { @MainActor [viewModel] in
-            await viewModel.archiveSelectedDocumentToNotion()
+            await viewModel.syncMeetingToNotion()
         }
     }
 
@@ -830,23 +837,10 @@ struct MeetingDetailView: View {
         switch viewModel.documentOperation {
         case let .generating(kind), let .archiving(kind):
             kind == viewModel.selectedDocumentKind
+        case .syncingNotion:
+            false
         case .idle:
             false
-        }
-    }
-
-    private var selectedArchiveStatusTitle: String {
-        if case let .archiving(kind) = viewModel.documentOperation,
-           kind == viewModel.selectedDocumentKind {
-            return "正在归档"
-        }
-        return switch viewModel.archiveStatus(
-            for: viewModel.selectedDocumentKind
-        ) {
-        case .localOnly: "仅本地"
-        case .archiving: "正在归档"
-        case .archived: "已归档"
-        case .failed: "归档失败"
         }
     }
 
@@ -1092,8 +1086,8 @@ enum MeetingDisplayFormat {
         case .ready: "可总结"
         case .summarizing: "总结中"
         case .summaryReady: "总结完成"
-        case .archiving: "归档中"
-        case .archived: "已归档"
+        case .archiving: "同步中"
+        case .archived: "已同步"
         }
     }
 

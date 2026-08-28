@@ -45,6 +45,12 @@ protocol MeetingDocumentArchiving: AnyObject {
         parentPageID: UUID,
         kind: MeetingDocumentKind
     ) async throws
+    func sync(
+        token: String,
+        meetingID: UUID,
+        parentPageID: UUID,
+        content: NotionMeetingPageContent
+    ) async throws
 }
 
 @MainActor
@@ -55,6 +61,7 @@ protocol MeetingDocumentManaging: AnyObject {
         replacingManualEdits: Bool
     ) async throws
     func retryArchive(meetingID: UUID, kind: MeetingDocumentKind) async throws
+    func syncToNotion(meetingID: UUID) async throws
     func generate(
         meetingID: UUID,
         kind: MeetingDocumentKind,
@@ -63,6 +70,10 @@ protocol MeetingDocumentManaging: AnyObject {
     func retryArchive(
         meetingID: UUID,
         kind: MeetingDocumentKind,
+        onOperationChange: @escaping (MeetingDocumentOperation) -> Void
+    ) async throws
+    func syncToNotion(
+        meetingID: UUID,
         onOperationChange: @escaping (MeetingDocumentOperation) -> Void
     ) async throws
 }
@@ -96,6 +107,14 @@ extension MeetingDocumentManaging {
     ) async throws {
         onOperationChange(.archiving(kind))
         try await retryArchive(meetingID: meetingID, kind: kind)
+    }
+
+    func syncToNotion(
+        meetingID: UUID,
+        onOperationChange: @escaping (MeetingDocumentOperation) -> Void
+    ) async throws {
+        onOperationChange(.syncingNotion)
+        try await syncToNotion(meetingID: meetingID)
     }
 }
 
@@ -136,6 +155,20 @@ final class LegacyMeetingDocumentNotionArchiver: MeetingDocumentArchiving {
                 bookmarks: inputs.bookmarks,
                 transcripts: inputs.transcripts
             )
+        )
+    }
+
+    func sync(
+        token: String,
+        meetingID: UUID,
+        parentPageID: UUID,
+        content: NotionMeetingPageContent
+    ) async throws {
+        _ = try await archiver.archive(
+            token: token,
+            meetingID: meetingID,
+            parentPageID: parentPageID,
+            content: content
         )
     }
 
@@ -185,6 +218,7 @@ final class MeetingDocumentsUseCase: MeetingDocumentManaging {
     static let archiveFailureCode = "notion_archive_failed"
     static let missingNotionCredentialCode = "missing_notion_credential"
     static let invalidNotionPageURLCode = "invalid_notion_page_url"
+    static let syncFailureCode = "notion_sync_failed"
     static let detailedMinutesPromptVersion = 1
 
     private let repository: MeetingRepository
@@ -379,12 +413,8 @@ final class MeetingDocumentsUseCase: MeetingDocumentManaging {
             }
         }
 
-        guard settingsStore.isNotionArchivingEnabled else { return }
-        try await archiveSavedDocument(
-            meetingID: meetingID,
-            kind: kind,
-            onOperationChange: onOperationChange
-        )
+        // Generation is always a local operation. Notion synchronization is
+        // intentionally started only by the user's explicit sync action.
     }
 
     func retryArchive(
@@ -424,6 +454,139 @@ final class MeetingDocumentsUseCase: MeetingDocumentManaging {
             kind: kind,
             onOperationChange: onOperationChange
         )
+    }
+
+    func syncToNotion(meetingID: UUID) async throws {
+        try await syncToNotion(
+            meetingID: meetingID,
+            onOperationChange: { _ in }
+        )
+    }
+
+    func syncToNotion(
+        meetingID: UUID,
+        onOperationChange: @escaping (MeetingDocumentOperation) -> Void
+    ) async throws {
+        guard settingsStore.isNotionArchivingEnabled else { return }
+        try prepareForOperation(meetingID: meetingID)
+        guard operationGate.acquire(.summarizeArchive, for: meetingID) else {
+            throw MeetingDocumentsError.operationInProgress
+        }
+        operation = .syncingNotion
+        onOperationChange(operation)
+        defer {
+            operation = .idle
+            operationGate.release(.summarizeArchive, for: meetingID)
+        }
+
+        let meeting = try repository.meeting(id: meetingID)
+        _ = try validatedStableState(meeting.state)
+        let content = try notionPageContent(for: meeting)
+        guard let notionToken = try nonemptyCredential(.notionToken) else {
+            throw MeetingDocumentsError.missingNotionCredential
+        }
+        guard let parentPageID = NotionPageLinkParser.parse(
+            settingsStore.notionParentPageURL
+        ) else {
+            throw MeetingDocumentsError.invalidNotionPageURL
+        }
+
+        let syncSnapshot: MeetingNotionSyncSnapshot
+        do {
+            syncSnapshot = try repository.beginNotionSync(
+                meetingID: meetingID,
+                contentRevision: content.contentRevision
+            )
+        } catch let error as MeetingDocumentRepositoryError {
+            throw error
+        } catch {
+            throw MeetingDocumentsError.localPersistenceFailed
+        }
+
+        do {
+            try await archiver.sync(
+                token: notionToken,
+                meetingID: meetingID,
+                parentPageID: parentPageID,
+                content: content
+            )
+        } catch {
+            if Self.isCancellation(error) {
+                try restoreNotionSyncSnapshot(syncSnapshot)
+                throw error
+            }
+            do {
+                try repository.failNotionSync(
+                    meetingID: meetingID,
+                    contentRevision: content.contentRevision,
+                    errorCode: Self.syncFailureCode
+                )
+            } catch {
+                throw MeetingDocumentsError.localPersistenceFailed
+            }
+            throw MeetingDocumentsError.archiveFailed(content.kind)
+        }
+
+        do {
+            try repository.completeNotionSync(
+                meetingID: meetingID,
+                contentRevision: content.contentRevision
+            )
+        } catch {
+            throw MeetingDocumentsError.localPersistenceFailed
+        }
+    }
+
+    private func notionPageContent(
+        for meeting: MeetingRecord
+    ) throws -> NotionMeetingPageContent {
+        let summary = meeting.summary.map {
+            GeneratedMeetingSummary(
+                suggestedTitle: meeting.suggestedTitle ?? meeting.title,
+                overview: $0.overview,
+                keyPoints: $0.keyPoints,
+                decisions: $0.decisions,
+                actionItems: $0.actionItemRecords,
+                bookmarkInsights: $0.bookmarkInsights
+            )
+        }
+        let detailedMinutes: GeneratedDetailedMinutes?
+        if let minutes = meeting.detailedMinutes {
+            detailedMinutes = GeneratedDetailedMinutes(
+                overview: minutes.overview,
+                sections: try minutes.sections,
+                decisions: try minutes.decisions,
+                actionItems: try minutes.actionItems,
+                openQuestions: try minutes.openQuestions
+            )
+        } else {
+            detailedMinutes = nil
+        }
+        guard summary != nil || detailedMinutes != nil else {
+            throw MeetingDocumentsError.missingLocalDocument(.summary)
+        }
+        let inputs = MeetingDocumentInputBuilder.inputs(for: meeting)
+        return try NotionMeetingPageContent(
+            title: meeting.title,
+            startedAt: meeting.startedAt,
+            duration: meeting.activeDuration,
+            mode: meeting.mode,
+            contentRevision: meeting.contentRevision,
+            summary: summary,
+            detailedMinutes: detailedMinutes,
+            bookmarks: inputs.bookmarks,
+            transcripts: inputs.transcripts
+        )
+    }
+
+    private func restoreNotionSyncSnapshot(
+        _ snapshot: MeetingNotionSyncSnapshot
+    ) throws {
+        do {
+            try repository.restoreNotionSyncSnapshot(snapshot)
+        } catch {
+            throw MeetingDocumentsError.localPersistenceFailed
+        }
     }
 
     private func archiveSavedDocument(

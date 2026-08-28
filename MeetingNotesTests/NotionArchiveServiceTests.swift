@@ -505,6 +505,58 @@ final class NotionArchiveServiceTests: XCTestCase {
         XCTAssertEqual(meeting.summary?.archiveState, .archived)
     }
 
+    func testCanonicalMeetingSyncDoesNotReuseLegacyDocumentRevisionSkip()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeMeeting(in: repository)
+        try saveSummary(
+            in: repository,
+            meetingID: meetingID,
+            overview: "未改变的摘要"
+        )
+        let client = RecordingNotionAPIClient()
+        let service = NotionArchiveService(
+            repository: repository,
+            client: client
+        )
+        let legacyContent = try makeSummaryContent(overview: "未改变的摘要")
+        _ = try await service.archive(
+            meetingID: meetingID,
+            parentPageID: UUID(),
+            content: legacyContent
+        )
+        let firstAppendCount = await client.appendAttemptCount()
+        let oldManagedIDs = try XCTUnwrap(
+            repository.meeting(id: meetingID).archiveCheckpoint
+        ).blockIDs(for: .summary)
+        let meetingRevision = try repository.meeting(id: meetingID)
+            .contentRevision
+        let canonicalContent = try NotionMeetingPageContent(
+            title: "产品周会",
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            duration: 120,
+            mode: .online,
+            contentRevision: meetingRevision,
+            summary: legacyContent.summary,
+            detailedMinutes: nil,
+            bookmarks: legacyContent.bookmarks,
+            transcripts: [
+                .init(startTime: 0, endTime: 5, text: "人工修正后的转录")
+            ]
+        )
+
+        _ = try await service.archive(
+            meetingID: meetingID,
+            parentPageID: UUID(),
+            content: canonicalContent
+        )
+
+        let finalAppendCount = await client.appendAttemptCount()
+        let archivedIDs = await client.successfulArchiveIDs()
+        XCTAssertGreaterThan(finalAppendCount, firstAppendCount)
+        XCTAssertTrue(Set(archivedIDs).isSuperset(of: oldManagedIDs))
+    }
+
     func testLegacyPageWithoutManagedIDsAppendsOnceAndNeverDeletesUnknownBlocks() async throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try makeMeeting(in: repository)

@@ -273,7 +273,7 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         XCTAssertEqual(spy.receivedReplacingManualEdits, true)
     }
 
-    func testOperationCallbackReportsGenerationThenAutomaticArchive()
+    func testOperationCallbackReportsGenerationOnly()
         async throws {
         let fixture = try makeFixture()
         let meetingID = try fixture.makeMeeting()
@@ -286,13 +286,11 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
             kind: .detailedMinutes
         ) { operations.append($0) }
 
-        XCTAssertEqual(
-            operations,
-            [.generating(.detailedMinutes), .archiving(.detailedMinutes)]
-        )
+        XCTAssertEqual(operations, [.generating(.detailedMinutes)])
     }
 
-    func testSummaryGenerationSavesThenArchivesOnlySummary() async throws {
+    func testGenerateNeverArchivesAutomaticallyEvenWhenNotionEnabled()
+        async throws {
         let fixture = try makeFixture()
         let meetingID = try fixture.makeMeeting()
         try fixture.addFinalTranscript(to: meetingID)
@@ -305,18 +303,18 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         let meeting = try fixture.repository.meeting(id: meetingID)
         XCTAssertEqual(meeting.summary?.overview, Self.summary.overview)
         XCTAssertNil(meeting.detailedMinutes)
-        XCTAssertEqual(meeting.summary?.archiveState, .archived)
-        XCTAssertEqual(meeting.summary?.archivedContentRevision, 1)
-        XCTAssertEqual(meeting.state, .archived)
+        XCTAssertEqual(meeting.summary?.archiveState, .localOnly)
+        XCTAssertNil(meeting.summary?.archivedContentRevision)
+        XCTAssertEqual(meeting.state, .summaryReady)
         let summaryCalls = await fixture.summaryGenerator.callCount()
         let minutesCalls = await fixture.minutesGenerator.callCount()
         XCTAssertEqual(summaryCalls, 1)
         XCTAssertEqual(minutesCalls, 0)
-        XCTAssertEqual(fixture.archiver.kinds, [.summary])
-        XCTAssertEqual(fixture.archiver.statesAtCall, [.archiving])
+        XCTAssertTrue(fixture.archiver.kinds.isEmpty)
+        XCTAssertTrue(fixture.archiver.statesAtCall.isEmpty)
     }
 
-    func testDetailedGenerationSavesThenArchivesOnlyDetailedMinutes() async throws {
+    func testDetailedGenerationAlsoRemainsLocalUntilExplicitSync() async throws {
         let fixture = try makeFixture()
         let meetingID = try fixture.makeMeeting()
         try fixture.addFinalTranscript(to: meetingID)
@@ -329,14 +327,48 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         let meeting = try fixture.repository.meeting(id: meetingID)
         XCTAssertNil(meeting.summary)
         XCTAssertEqual(meeting.detailedMinutes?.overview, Self.minutes.overview)
-        XCTAssertEqual(meeting.detailedMinutes?.archiveState, .archived)
-        XCTAssertEqual(meeting.detailedMinutes?.archivedContentRevision, 1)
-        XCTAssertEqual(meeting.state, .archived)
+        XCTAssertEqual(meeting.detailedMinutes?.archiveState, .localOnly)
+        XCTAssertNil(meeting.detailedMinutes?.archivedContentRevision)
+        XCTAssertEqual(meeting.state, .summaryReady)
         let summaryCalls = await fixture.summaryGenerator.callCount()
         let minutesCalls = await fixture.minutesGenerator.callCount()
         XCTAssertEqual(summaryCalls, 0)
         XCTAssertEqual(minutesCalls, 1)
-        XCTAssertEqual(fixture.archiver.kinds, [.detailedMinutes])
+        XCTAssertTrue(fixture.archiver.kinds.isEmpty)
+    }
+
+    func testExplicitSyncBuildsSummaryMinutesAndCanonicalTranscriptTogether()
+        async throws {
+        let fixture = try makeFixture()
+        let meetingID = try fixture.makeMeeting()
+        try fixture.addFinalTranscript(to: meetingID)
+        try await fixture.useCase.generate(meetingID: meetingID, kind: .summary)
+        try await fixture.useCase.generate(
+            meetingID: meetingID,
+            kind: .detailedMinutes
+        )
+        try fixture.repository.setSpeakerDisplayName(
+            meetingID: meetingID,
+            speakerID: "room-1",
+            displayName: "张三"
+        )
+        let snapshotRevision = try fixture.repository
+            .meeting(id: meetingID).contentRevision
+
+        try await fixture.useCase.syncToNotion(meetingID: meetingID)
+
+        let content = try XCTUnwrap(fixture.archiver.contents.only)
+        XCTAssertEqual(content.contentRevision, snapshotRevision)
+        XCTAssertEqual(content.summary?.overview, Self.summary.overview)
+        XCTAssertEqual(content.detailedMinutes?.overview, Self.minutes.overview)
+        XCTAssertEqual(content.documentKinds, [.summary, .detailedMinutes])
+        XCTAssertEqual(content.bookmarks.count, 1)
+        XCTAssertEqual(content.transcripts.map(\.text), ["确认下周启动"])
+        XCTAssertEqual(content.transcripts.map(\.speakerLabel), ["张三"])
+        let meeting = try fixture.repository.meeting(id: meetingID)
+        XCTAssertEqual(meeting.notionSyncState, .synced)
+        XCTAssertEqual(meeting.notionSyncedContentRevision, snapshotRevision)
+        XCTAssertNil(meeting.notionSyncErrorCode)
     }
 
     func testDisabledNotionKeepsGeneratedDocumentLocal() async throws {
@@ -611,7 +643,8 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         XCTAssertTrue(fixture.archiver.kinds.isEmpty)
     }
 
-    func testArchiveFailureKeepsNewLocalDocumentAndRetryDoesNotGenerate() async throws {
+    func testExplicitSyncFailureKeepsLocalDocumentAndRetryDoesNotGenerate()
+        async throws {
         let fixture = try makeFixture(
             archiveResults: [
                 .failure(NotionClientError.rateLimited),
@@ -620,84 +653,91 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         )
         let meetingID = try fixture.makeMeeting()
         try fixture.addFinalTranscript(to: meetingID)
-
-        await assertThrows(.archiveFailed(.detailedMinutes)) {
-            try await fixture.useCase.generate(
-                meetingID: meetingID,
-                kind: .detailedMinutes
-            )
-        }
-
-        var meeting = try fixture.repository.meeting(id: meetingID)
-        XCTAssertEqual(meeting.detailedMinutes?.overview, Self.minutes.overview)
-        XCTAssertEqual(meeting.detailedMinutes?.archiveState, .failed)
-        XCTAssertEqual(
-            meeting.detailedMinutes?.lastArchiveErrorCode,
-            MeetingDocumentsUseCase.archiveFailureCode
-        )
-        XCTAssertEqual(meeting.state, .summaryReady)
-
-        try await fixture.useCase.retryArchive(
+        try await fixture.useCase.generate(
             meetingID: meetingID,
             kind: .detailedMinutes
         )
 
+        await assertThrows(.archiveFailed(.detailedMinutes)) {
+            try await fixture.useCase.syncToNotion(meetingID: meetingID)
+        }
+
+        var meeting = try fixture.repository.meeting(id: meetingID)
+        XCTAssertEqual(meeting.detailedMinutes?.overview, Self.minutes.overview)
+        XCTAssertEqual(meeting.detailedMinutes?.archiveState, .localOnly)
+        XCTAssertEqual(meeting.notionSyncState, .failed)
+        XCTAssertEqual(
+            meeting.notionSyncErrorCode,
+            MeetingDocumentsUseCase.syncFailureCode
+        )
+        XCTAssertEqual(meeting.state, .summaryReady)
+
+        try await fixture.useCase.syncToNotion(meetingID: meetingID)
+
         meeting = try fixture.repository.meeting(id: meetingID)
-        XCTAssertEqual(meeting.detailedMinutes?.archiveState, .archived)
-        XCTAssertEqual(meeting.state, .archived)
+        XCTAssertEqual(meeting.notionSyncState, .synced)
+        XCTAssertEqual(
+            meeting.notionSyncedContentRevision,
+            meeting.contentRevision
+        )
+        XCTAssertNil(meeting.notionSyncErrorCode)
+        XCTAssertEqual(meeting.detailedMinutes?.archiveState, .localOnly)
+        XCTAssertEqual(meeting.state, .summaryReady)
         let summaryCalls = await fixture.summaryGenerator.callCount()
         let minutesCalls = await fixture.minutesGenerator.callCount()
         XCTAssertEqual(summaryCalls, 0)
         XCTAssertEqual(minutesCalls, 1)
-        XCTAssertEqual(
-            fixture.archiver.kinds,
-            [.detailedMinutes, .detailedMinutes]
-        )
+        XCTAssertTrue(fixture.archiver.kinds.isEmpty)
+        XCTAssertEqual(fixture.archiver.contents.count, 2)
     }
 
-    func testMissingNotionCredentialKeepsNewDocumentAndMarksOnlyItsArchiveFailure()
+    func testMissingNotionCredentialLeavesGeneratedDocumentLocal()
         async throws {
         let fixture = try makeFixture()
-        try fixture.credentials.delete(.notionToken)
         let meetingID = try fixture.makeMeeting()
         try fixture.addFinalTranscript(to: meetingID)
+        try await fixture.useCase.generate(
+            meetingID: meetingID,
+            kind: .summary
+        )
+        try fixture.credentials.delete(.notionToken)
 
         await assertThrows(.missingNotionCredential) {
-            try await fixture.useCase.generate(
-                meetingID: meetingID,
-                kind: .summary
-            )
+            try await fixture.useCase.syncToNotion(meetingID: meetingID)
         }
 
         let meeting = try fixture.repository.meeting(id: meetingID)
         XCTAssertEqual(meeting.summary?.overview, Self.summary.overview)
-        XCTAssertEqual(meeting.summary?.archiveState, .failed)
-        XCTAssertEqual(
-            meeting.summary?.lastArchiveErrorCode,
-            MeetingDocumentsUseCase.missingNotionCredentialCode
-        )
+        XCTAssertEqual(meeting.summary?.archiveState, .localOnly)
+        XCTAssertEqual(meeting.notionSyncState, .localOnly)
+        XCTAssertNil(meeting.notionSyncErrorCode)
         XCTAssertEqual(meeting.state, .summaryReady)
         XCTAssertTrue(fixture.archiver.kinds.isEmpty)
+        XCTAssertTrue(fixture.archiver.contents.isEmpty)
     }
 
-    func testArchiveStateSaveFailureNeverLeavesMeetingArchiving() async throws {
+    func testSyncStateSaveFailureNeverLeavesMeetingSyncing() async throws {
         let failure = DocumentSaveFailureController()
         let fixture = try makeFixture(saveFailureController: failure)
         let meetingID = try fixture.makeMeeting()
         try fixture.addFinalTranscript(to: meetingID)
-        failure.fail(afterSuccessfulSaves: 2)
+        try await fixture.useCase.generate(
+            meetingID: meetingID,
+            kind: .summary
+        )
+        failure.fail(afterSuccessfulSaves: 0)
 
         await assertThrows(.localPersistenceFailed) {
-            try await fixture.useCase.generate(
-                meetingID: meetingID,
-                kind: .summary
-            )
+            try await fixture.useCase.syncToNotion(meetingID: meetingID)
         }
 
         let meeting = try fixture.repository.meeting(id: meetingID)
         XCTAssertEqual(meeting.summary?.archiveState, .localOnly)
+        XCTAssertEqual(meeting.notionSyncState, .localOnly)
+        XCTAssertNil(meeting.notionSyncErrorCode)
         XCTAssertEqual(meeting.state, .summaryReady)
         XCTAssertTrue(fixture.archiver.kinds.isEmpty)
+        XCTAssertTrue(fixture.archiver.contents.isEmpty)
     }
 
     func testGenerationCancellationRestoresStableStateAndPropagatesOriginalError()
@@ -972,7 +1012,8 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         )
     }
 
-    func testArchivedMeetingCanRegenerateEitherKindAndReturnsToArchived() async throws {
+    func testArchivedMeetingRegenerationBecomesLocalAndNeedsExplicitSync()
+        async throws {
         for kind in MeetingDocumentKind.allCases {
             let fixture = try makeFixture()
             let meetingID = try fixture.makeMeeting()
@@ -982,8 +1023,10 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
             try await fixture.useCase.generate(meetingID: meetingID, kind: kind)
 
             let meeting = try fixture.repository.meeting(id: meetingID)
-            XCTAssertEqual(meeting.state, .archived)
-            XCTAssertEqual(fixture.archiver.statesAtCall, [.archiving])
+            XCTAssertEqual(meeting.state, .summaryReady)
+            XCTAssertEqual(meeting.notionSyncState, .localOnly)
+            XCTAssertTrue(fixture.archiver.statesAtCall.isEmpty)
+            XCTAssertTrue(fixture.archiver.contents.isEmpty)
         }
     }
 
@@ -1196,6 +1239,10 @@ private final class ReplacementIntentDocumentManagerSpy:
         _ = meetingID
         _ = kind
     }
+
+    func syncToNotion(meetingID: UUID) async throws {
+        _ = meetingID
+    }
 }
 
 @MainActor
@@ -1377,6 +1424,7 @@ private final class DocumentArchiverSpy: MeetingDocumentArchiving {
     private var results: [Result<Void, Error>]
     private(set) var kinds: [MeetingDocumentKind] = []
     private(set) var statesAtCall: [RecordingState] = []
+    private(set) var contents: [NotionMeetingPageContent] = []
 
     init(
         repository: MeetingRepository,
@@ -1398,6 +1446,26 @@ private final class DocumentArchiverSpy: MeetingDocumentArchiving {
         statesAtCall.append(try repository.meeting(id: meetingID).state)
         guard !results.isEmpty else { throw NotionClientError.transport }
         try results.removeFirst().get()
+    }
+
+    func sync(
+        token: String,
+        meetingID: UUID,
+        parentPageID: UUID,
+        content: NotionMeetingPageContent
+    ) async throws {
+        _ = token
+        _ = parentPageID
+        contents.append(content)
+        statesAtCall.append(try repository.meeting(id: meetingID).state)
+        guard !results.isEmpty else { throw NotionClientError.transport }
+        try results.removeFirst().get()
+    }
+}
+
+private extension Array {
+    var only: Element? {
+        count == 1 ? first : nil
     }
 }
 
