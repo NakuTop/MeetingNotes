@@ -28,6 +28,7 @@ if [[ -n "${DEVELOPER_ID_APPLICATION:-}" ]]; then
 else
     SIGNING_MODE="ad-hoc"
 fi
+PUBLISHABLE=NO
 
 if [[ "$CONFIGURATION" == "Beta" ]]; then
     APP_NAME="MeetingNotesBeta"
@@ -140,6 +141,12 @@ if [[ "$SIGNING_MODE" == "developer-id" ]]; then
     fi
 fi
 
+if [[ "$SIGNING_MODE" == "developer-id" ]] \
+    && [[ "$NOTARIZATION_STATUS" == "accepted" ]] \
+    && [[ "$STAPLER" == "PASS" ]]; then
+    PUBLISHABLE=YES
+fi
+
 ENTITLEMENTS_PLIST="$(codesign -d --entitlements :- "$APP" 2>/dev/null \
     | plutil -p - 2>/dev/null || true)"
 grep -q '"com.apple.security.app-sandbox" => true' \
@@ -249,6 +256,9 @@ elif [[ "$SIGNING_MODE" == "ad-hoc" ]]; then
 fi
 
 PACKAGE_VALIDATION="PASS"
+DMG_ABSOLUTE_PATH="$(pwd)/$DMG"
+DMG_SIZE="$(stat -f '%z' "$DMG")"
+DMG_SHA256="$(shasum -a 256 "$DMG" | awk '{print $1}')"
 
 echo ""
 echo "CONFIGURATION=$CONFIGURATION"
@@ -261,3 +271,7 @@ echo "BUILD=$BUILD"
 echo "SIGNING_MODE=$SIGNING_MODE"
 echo "NOTARIZATION_STATUS=$NOTARIZATION_STATUS"
 echo "PACKAGE_VALIDATION=$PACKAGE_VALIDATION"
+echo "PUBLISHABLE=$PUBLISHABLE"
+echo "DMG_ABSOLUTE_PATH=$DMG_ABSOLUTE_PATH"
+echo "DMG_SIZE=$DMG_SIZE"
+echo "DMG_SHA256=$DMG_SHA256"
