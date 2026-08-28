@@ -15,6 +15,8 @@ final class ArchiveCheckpointRecord {
     var metadataBlockIDsData: Data?
     var summaryBlockIDsData: Data?
     var detailedMinutesBlockIDsData: Data?
+    var pageBlockIDsData: Data?
+    var pageSyncRunData: Data?
     var pendingKindRawValue: String?
     var pendingNewBlockIDsData: Data?
     var pendingOldBlockIDsData: Data?
@@ -40,6 +42,8 @@ final class ArchiveCheckpointRecord {
         metadataBlockIDsData = nil
         summaryBlockIDsData = nil
         detailedMinutesBlockIDsData = nil
+        pageBlockIDsData = nil
+        pageSyncRunData = nil
         pendingKindRawValue = nil
         pendingNewBlockIDsData = nil
         pendingOldBlockIDsData = nil
@@ -58,6 +62,23 @@ final class ArchiveCheckpointRecord {
                 field: "metadataBlockIDsData"
             )
         }
+    }
+
+    var pageBlockIDs: [String] {
+        get throws {
+            try Self.decodeIDs(
+                pageBlockIDsData,
+                field: "pageBlockIDsData"
+            )
+        }
+    }
+
+    func pageSyncRun() throws -> NotionPageSyncRun? {
+        try Self.decode(
+            NotionPageSyncRun.self,
+            from: pageSyncRunData,
+            field: "pageSyncRunData"
+        )
     }
 
     func blockIDs(for kind: MeetingDocumentKind) throws -> [String] {
@@ -86,6 +107,19 @@ final class ArchiveCheckpointRecord {
             blockIDs,
             field: "metadataBlockIDsData"
         )
+    }
+
+    func setPageBlockIDs(_ blockIDs: [String]) throws {
+        pageBlockIDsData = try Self.encode(
+            blockIDs,
+            field: "pageBlockIDsData"
+        )
+    }
+
+    func setPageSyncRun(_ run: NotionPageSyncRun?) throws {
+        pageSyncRunData = try run.map {
+            try Self.encode($0, field: "pageSyncRunData")
+        }
     }
 
     func setBlockIDs(

@@ -41,28 +41,38 @@ final class NotionArchiveService {
                 parentPageID: parentPageID,
                 content: content
             )
-            try await appendMetadataIfNeeded(
-                meetingID: meetingID,
-                pageID: page.id,
-                content: content
-            )
-            try await replaceManagedSection(
-                meetingID: meetingID,
-                pageID: page.id,
-                content: content
-            )
+            if content.contentRevision > 0 {
+                try await replaceWholePage(
+                    meetingID: meetingID,
+                    pageID: page.id,
+                    content: content
+                )
+            } else {
+                try await appendMetadataIfNeeded(
+                    meetingID: meetingID,
+                    pageID: page.id,
+                    content: content
+                )
+                try await replaceManagedSection(
+                    meetingID: meetingID,
+                    pageID: page.id,
+                    content: content
+                )
+            }
             return page
         } catch {
             if Self.isCancellation(error) {
                 throw CancellationError()
             }
-            try? repository.updateDocumentArchiveState(
-                meetingID: meetingID,
-                kind: content.kind,
-                archiveState: .failed,
-                meetingState: .summaryReady,
-                errorCode: "notion_archive_failed"
-            )
+            if content.contentRevision == 0 {
+                try? repository.updateDocumentArchiveState(
+                    meetingID: meetingID,
+                    kind: content.kind,
+                    archiveState: .failed,
+                    meetingState: .summaryReady,
+                    errorCode: "notion_archive_failed"
+                )
+            }
             throw error
         }
     }
@@ -217,6 +227,246 @@ final class NotionArchiveService {
                 kind: content.kind,
                 contentRevision: contentRevision,
                 blockID: oldBlockID
+            )
+        }
+    }
+
+    private func replaceWholePage(
+        meetingID: UUID,
+        pageID: String,
+        content: NotionMeetingPageContent
+    ) async throws {
+        while true {
+            let meeting = try repository.meeting(id: meetingID)
+            guard let checkpoint = meeting.archiveCheckpoint,
+                  checkpoint.notionPageID == pageID else {
+                throw MeetingDocumentRepositoryError.missingArchiveCheckpoint
+            }
+
+            guard let run = try checkpoint.pageSyncRun() else {
+                let oldBlockIDs = try await allChildBlockIDs(pageID: pageID)
+                let snapshotData = try encodePageSnapshot(content)
+                _ = try repository.beginNotionPageSyncRun(
+                    meetingID: meetingID,
+                    contentRevision: content.contentRevision,
+                    snapshotData: snapshotData,
+                    oldBlockIDs: oldBlockIDs
+                )
+                continue
+            }
+
+            switch run.phase {
+            case .appendingNew:
+                if run.contentRevision != content.contentRevision {
+                    try repository.transitionNotionPageSyncRun(
+                        meetingID: meetingID,
+                        contentRevision: run.contentRevision,
+                        to: .rollingBackPartialNew
+                    )
+                    try await rollBackPartialNewBlocks(
+                        meetingID: meetingID,
+                        contentRevision: run.contentRevision
+                    )
+                    continue
+                }
+                let snapshot = try decodePageSnapshot(run.snapshotData)
+                guard snapshot.contentRevision == run.contentRevision else {
+                    throw ArchiveCheckpointCodingError.invalidData(
+                        "pageSyncSnapshotData"
+                    )
+                }
+                try await appendWholePageSnapshot(
+                    meetingID: meetingID,
+                    pageID: pageID,
+                    run: run,
+                    content: snapshot
+                )
+                return
+
+            case .rollingBackPartialNew:
+                try await rollBackPartialNewBlocks(
+                    meetingID: meetingID,
+                    contentRevision: run.contentRevision
+                )
+                continue
+
+            case .cleaningOld:
+                try await cleanOldPageBlocks(
+                    meetingID: meetingID,
+                    contentRevision: run.contentRevision
+                )
+                if run.contentRevision == content.contentRevision {
+                    return
+                }
+                continue
+            }
+        }
+    }
+
+    private func appendWholePageSnapshot(
+        meetingID: UUID,
+        pageID: String,
+        run: NotionPageSyncRun,
+        content: NotionMeetingPageContent
+    ) async throws {
+        let batches = blockBuilder.batches(for: content)
+        guard run.nextBatchIndex <= batches.count else {
+            throw MeetingDocumentRepositoryError.invalidNotionPageSyncRun
+        }
+        do {
+            for index in run.nextBatchIndex..<batches.count {
+                let blockIDs = try await client.append(
+                    blocks: batches[index],
+                    to: pageID
+                )
+                try await persistAppendedBatch(blockIDs: blockIDs) {
+                    try repository.recordNotionPageSyncBatch(
+                        meetingID: meetingID,
+                        contentRevision: run.contentRevision,
+                        blockIDs: blockIDs,
+                        nextBatchIndex: index + 1
+                    )
+                }
+            }
+        } catch {
+            if Self.isCancellation(error) {
+                throw CancellationError()
+            }
+            try repository.transitionNotionPageSyncRun(
+                meetingID: meetingID,
+                contentRevision: run.contentRevision,
+                to: .rollingBackPartialNew
+            )
+            try await rollBackPartialNewBlocks(
+                meetingID: meetingID,
+                contentRevision: run.contentRevision
+            )
+            throw error
+        }
+
+        try repository.transitionNotionPageSyncRun(
+            meetingID: meetingID,
+            contentRevision: run.contentRevision,
+            to: .cleaningOld
+        )
+        try await cleanOldPageBlocks(
+            meetingID: meetingID,
+            contentRevision: run.contentRevision
+        )
+    }
+
+    private func rollBackPartialNewBlocks(
+        meetingID: UUID,
+        contentRevision: Int
+    ) async throws {
+        let run = try repository.meeting(id: meetingID)
+            .archiveCheckpoint?.pageSyncRun()
+        guard let run,
+              run.contentRevision == contentRevision,
+              run.phase == .rollingBackPartialNew else {
+            throw MeetingDocumentRepositoryError.invalidNotionPageSyncRun
+        }
+        for blockID in run.newBlockIDs {
+            try await client.archiveBlock(id: blockID)
+            try repository.recordNotionPageSyncBlockRemoval(
+                meetingID: meetingID,
+                contentRevision: contentRevision,
+                blockID: blockID,
+                phase: .rollingBackPartialNew
+            )
+        }
+        try repository.finishNotionPageSyncRollback(
+            meetingID: meetingID,
+            contentRevision: contentRevision
+        )
+    }
+
+    private func cleanOldPageBlocks(
+        meetingID: UUID,
+        contentRevision: Int
+    ) async throws {
+        let run = try repository.meeting(id: meetingID)
+            .archiveCheckpoint?.pageSyncRun()
+        guard let run,
+              run.contentRevision == contentRevision,
+              run.phase == .cleaningOld else {
+            throw MeetingDocumentRepositoryError.invalidNotionPageSyncRun
+        }
+        for blockID in run.oldBlockIDs {
+            try await client.archiveBlock(id: blockID)
+            try repository.recordNotionPageSyncBlockRemoval(
+                meetingID: meetingID,
+                contentRevision: contentRevision,
+                blockID: blockID,
+                phase: .cleaningOld
+            )
+        }
+        try repository.completeNotionPageSyncRun(
+            meetingID: meetingID,
+            contentRevision: contentRevision
+        )
+    }
+
+    private func allChildBlockIDs(pageID: String) async throws -> [String] {
+        var result: [String] = []
+        var seenBlockIDs: Set<String> = []
+        var seenCursors: Set<String> = []
+        var cursor: String?
+
+        while true {
+            if let cursor, !seenCursors.insert(cursor).inserted {
+                throw NotionClientError.invalidResponse
+            }
+            let page = try await client.childBlocks(
+                pageID: pageID,
+                startCursor: cursor
+            )
+            for blockID in page.blockIDs {
+                let canonical = blockID.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+                guard !canonical.isEmpty,
+                      canonical == blockID,
+                      seenBlockIDs.insert(canonical).inserted else {
+                    throw NotionClientError.invalidResponse
+                }
+                result.append(canonical)
+            }
+            guard let nextCursor = page.nextCursor else { return result }
+            let canonicalCursor = nextCursor.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            guard !canonicalCursor.isEmpty,
+                  canonicalCursor == nextCursor else {
+                throw NotionClientError.invalidResponse
+            }
+            cursor = canonicalCursor
+        }
+    }
+
+    private func encodePageSnapshot(
+        _ content: NotionMeetingPageContent
+    ) throws -> Data {
+        do {
+            return try JSONEncoder().encode(content)
+        } catch {
+            throw ArchiveCheckpointCodingError.encodingFailed(
+                "pageSyncSnapshotData"
+            )
+        }
+    }
+
+    private func decodePageSnapshot(
+        _ data: Data
+    ) throws -> NotionMeetingPageContent {
+        do {
+            return try JSONDecoder().decode(
+                NotionMeetingPageContent.self,
+                from: data
+            )
+        } catch {
+            throw ArchiveCheckpointCodingError.invalidData(
+                "pageSyncSnapshotData"
             )
         }
     }

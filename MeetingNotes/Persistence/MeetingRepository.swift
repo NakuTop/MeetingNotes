@@ -12,6 +12,7 @@ enum MeetingDocumentRepositoryError: Error, Equatable, Sendable {
     case missingArchiveCheckpoint
     case invalidMetadataArchiveCheckpoint
     case invalidArchiveRun(MeetingDocumentKind)
+    case invalidNotionPageSyncRun
     case staleDocumentRevision(
         MeetingDocumentKind,
         expected: Int,
@@ -2044,6 +2045,8 @@ final class MeetingRepository {
             checkpoint.nextSection = "metadata"
             checkpoint.nextBatchIndex = 0
             try checkpoint.setMetadataBlockIDs([])
+            try checkpoint.setPageBlockIDs([])
+            try checkpoint.setPageSyncRun(nil)
             for kind in MeetingDocumentKind.allCases {
                 try checkpoint.setBlockIDs([], for: kind)
                 try checkpoint.setPendingRun(nil, for: kind)
@@ -2096,6 +2099,8 @@ final class MeetingRepository {
             checkpoint.nextSection = "managed"
             checkpoint.nextBatchIndex = 0
             try checkpoint.setMetadataBlockIDs([])
+            try checkpoint.setPageBlockIDs([])
+            try checkpoint.setPageSyncRun(nil)
             for kind in MeetingDocumentKind.allCases {
                 try checkpoint.setBlockIDs([], for: kind)
                 try checkpoint.setPendingRun(nil, for: kind)
@@ -2453,6 +2458,206 @@ final class MeetingRepository {
         }
     }
 
+    func beginNotionPageSyncRun(
+        meetingID: UUID,
+        contentRevision: Int,
+        snapshotData: Data,
+        oldBlockIDs: [String]
+    ) throws -> NotionPageSyncRun {
+        let meeting = try meeting(id: meetingID)
+        guard let checkpoint = meeting.archiveCheckpoint,
+              try checkpoint.pageSyncRun() == nil,
+              meeting.contentRevision == contentRevision,
+              Self.areCanonicalUniqueBlockIDs(oldBlockIDs),
+              let content = try? JSONDecoder().decode(
+                  NotionMeetingPageContent.self,
+                  from: snapshotData
+              ),
+              content.contentRevision == contentRevision else {
+            throw MeetingDocumentRepositoryError.invalidNotionPageSyncRun
+        }
+        let checkpointSnapshot = ArchiveCheckpointMutationSnapshot(checkpoint)
+        let previousMeetingUpdatedAt = meeting.updatedAt
+        let run = NotionPageSyncRun(
+            contentRevision: contentRevision,
+            snapshotData: snapshotData,
+            oldBlockIDs: oldBlockIDs
+        )
+        try checkpoint.setPageSyncRun(run)
+        checkpoint.updatedAt = .now
+        meeting.updatedAt = .now
+        do {
+            try saveContext()
+            return run
+        } catch {
+            checkpointSnapshot.restore(checkpoint)
+            meeting.updatedAt = previousMeetingUpdatedAt
+            throw error
+        }
+    }
+
+    func recordNotionPageSyncBatch(
+        meetingID: UUID,
+        contentRevision: Int,
+        blockIDs: [String],
+        nextBatchIndex: Int
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+        guard let checkpoint = meeting.archiveCheckpoint,
+              var run = try checkpoint.pageSyncRun(),
+              run.contentRevision == contentRevision,
+              run.phase == .appendingNew,
+              nextBatchIndex == run.nextBatchIndex + 1,
+              !blockIDs.isEmpty,
+              Self.areCanonicalUniqueBlockIDs(blockIDs),
+              Set(blockIDs).isDisjoint(with: run.oldBlockIDs),
+              Set(blockIDs).isDisjoint(with: run.newBlockIDs) else {
+            throw MeetingDocumentRepositoryError.invalidNotionPageSyncRun
+        }
+        let checkpointSnapshot = ArchiveCheckpointMutationSnapshot(checkpoint)
+        let previousMeetingUpdatedAt = meeting.updatedAt
+        run.newBlockIDs.append(contentsOf: blockIDs)
+        run.nextBatchIndex = nextBatchIndex
+        try checkpoint.setPageSyncRun(run)
+        checkpoint.updatedAt = .now
+        meeting.updatedAt = .now
+        do {
+            try saveContext()
+        } catch {
+            checkpointSnapshot.restore(checkpoint)
+            meeting.updatedAt = previousMeetingUpdatedAt
+            throw error
+        }
+    }
+
+    func transitionNotionPageSyncRun(
+        meetingID: UUID,
+        contentRevision: Int,
+        to phase: NotionPageSyncPhase
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+        guard let checkpoint = meeting.archiveCheckpoint,
+              var run = try checkpoint.pageSyncRun(),
+              run.contentRevision == contentRevision,
+              run.phase == .appendingNew,
+              phase == .rollingBackPartialNew || phase == .cleaningOld else {
+            throw MeetingDocumentRepositoryError.invalidNotionPageSyncRun
+        }
+        let checkpointSnapshot = ArchiveCheckpointMutationSnapshot(checkpoint)
+        let previousMeetingUpdatedAt = meeting.updatedAt
+        run.phase = phase
+        try checkpoint.setPageSyncRun(run)
+        checkpoint.updatedAt = .now
+        meeting.updatedAt = .now
+        do {
+            try saveContext()
+        } catch {
+            checkpointSnapshot.restore(checkpoint)
+            meeting.updatedAt = previousMeetingUpdatedAt
+            throw error
+        }
+    }
+
+    func recordNotionPageSyncBlockRemoval(
+        meetingID: UUID,
+        contentRevision: Int,
+        blockID: String,
+        phase: NotionPageSyncPhase
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+        guard let checkpoint = meeting.archiveCheckpoint,
+              var run = try checkpoint.pageSyncRun(),
+              run.contentRevision == contentRevision,
+              run.phase == phase else {
+            throw MeetingDocumentRepositoryError.invalidNotionPageSyncRun
+        }
+        switch phase {
+        case .rollingBackPartialNew:
+            guard run.newBlockIDs.contains(blockID) else {
+                throw MeetingDocumentRepositoryError.invalidNotionPageSyncRun
+            }
+            run.newBlockIDs.removeAll { $0 == blockID }
+        case .cleaningOld:
+            guard run.oldBlockIDs.contains(blockID) else {
+                throw MeetingDocumentRepositoryError.invalidNotionPageSyncRun
+            }
+            run.oldBlockIDs.removeAll { $0 == blockID }
+        case .appendingNew:
+            throw MeetingDocumentRepositoryError.invalidNotionPageSyncRun
+        }
+
+        let checkpointSnapshot = ArchiveCheckpointMutationSnapshot(checkpoint)
+        let previousMeetingUpdatedAt = meeting.updatedAt
+        try checkpoint.setPageSyncRun(run)
+        checkpoint.updatedAt = .now
+        meeting.updatedAt = .now
+        do {
+            try saveContext()
+        } catch {
+            checkpointSnapshot.restore(checkpoint)
+            meeting.updatedAt = previousMeetingUpdatedAt
+            throw error
+        }
+    }
+
+    func finishNotionPageSyncRollback(
+        meetingID: UUID,
+        contentRevision: Int
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+        guard let checkpoint = meeting.archiveCheckpoint,
+              let run = try checkpoint.pageSyncRun(),
+              run.contentRevision == contentRevision,
+              run.phase == .rollingBackPartialNew,
+              run.newBlockIDs.isEmpty else {
+            throw MeetingDocumentRepositoryError.invalidNotionPageSyncRun
+        }
+        let checkpointSnapshot = ArchiveCheckpointMutationSnapshot(checkpoint)
+        let previousMeetingUpdatedAt = meeting.updatedAt
+        try checkpoint.setPageSyncRun(nil)
+        checkpoint.updatedAt = .now
+        meeting.updatedAt = .now
+        do {
+            try saveContext()
+        } catch {
+            checkpointSnapshot.restore(checkpoint)
+            meeting.updatedAt = previousMeetingUpdatedAt
+            throw error
+        }
+    }
+
+    func completeNotionPageSyncRun(
+        meetingID: UUID,
+        contentRevision: Int
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+        guard let checkpoint = meeting.archiveCheckpoint,
+              let run = try checkpoint.pageSyncRun(),
+              run.contentRevision == contentRevision,
+              run.phase == .cleaningOld,
+              run.oldBlockIDs.isEmpty else {
+            throw MeetingDocumentRepositoryError.invalidNotionPageSyncRun
+        }
+        let checkpointSnapshot = ArchiveCheckpointMutationSnapshot(checkpoint)
+        let syncSnapshot = notionSyncSnapshot(for: meeting)
+        try checkpoint.setPageBlockIDs(run.newBlockIDs)
+        try checkpoint.setPageSyncRun(nil)
+        meeting.notionSyncedContentRevision = contentRevision
+        meeting.notionSyncState = meeting.contentRevision == contentRevision
+            ? .synced
+            : .localOnly
+        meeting.notionSyncErrorCode = nil
+        checkpoint.updatedAt = .now
+        meeting.updatedAt = .now
+        do {
+            try saveContext()
+        } catch {
+            checkpointSnapshot.restore(checkpoint)
+            restoreNotionSyncFields(from: syncSnapshot, to: meeting)
+            throw error
+        }
+    }
+
     func beginDocumentArchiveRun(
         meetingID: UUID,
         kind: MeetingDocumentKind,
@@ -2717,6 +2922,16 @@ final class MeetingRepository {
         return ids.filter { seen.insert($0).inserted }
     }
 
+    private static func areCanonicalUniqueBlockIDs(_ ids: [String]) -> Bool {
+        guard ids.allSatisfy({
+            !$0.isEmpty
+                && $0 == $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }) else {
+            return false
+        }
+        return Set(ids).count == ids.count
+    }
+
     func saveArchiveCheckpoint(
         meetingID: UUID,
         notionPageID: String,
@@ -2923,6 +3138,8 @@ private struct ArchiveCheckpointMutationSnapshot {
     let metadataBlockIDsData: Data?
     let summaryBlockIDsData: Data?
     let detailedMinutesBlockIDsData: Data?
+    let pageBlockIDsData: Data?
+    let pageSyncRunData: Data?
     let pendingKindRawValue: String?
     let pendingNewBlockIDsData: Data?
     let pendingOldBlockIDsData: Data?
@@ -2939,6 +3156,8 @@ private struct ArchiveCheckpointMutationSnapshot {
         metadataBlockIDsData = checkpoint.metadataBlockIDsData
         summaryBlockIDsData = checkpoint.summaryBlockIDsData
         detailedMinutesBlockIDsData = checkpoint.detailedMinutesBlockIDsData
+        pageBlockIDsData = checkpoint.pageBlockIDsData
+        pageSyncRunData = checkpoint.pageSyncRunData
         pendingKindRawValue = checkpoint.pendingKindRawValue
         pendingNewBlockIDsData = checkpoint.pendingNewBlockIDsData
         pendingOldBlockIDsData = checkpoint.pendingOldBlockIDsData
@@ -2956,6 +3175,8 @@ private struct ArchiveCheckpointMutationSnapshot {
         checkpoint.metadataBlockIDsData = metadataBlockIDsData
         checkpoint.summaryBlockIDsData = summaryBlockIDsData
         checkpoint.detailedMinutesBlockIDsData = detailedMinutesBlockIDsData
+        checkpoint.pageBlockIDsData = pageBlockIDsData
+        checkpoint.pageSyncRunData = pageSyncRunData
         checkpoint.pendingKindRawValue = pendingKindRawValue
         checkpoint.pendingNewBlockIDsData = pendingNewBlockIDsData
         checkpoint.pendingOldBlockIDsData = pendingOldBlockIDsData

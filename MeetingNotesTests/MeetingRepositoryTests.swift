@@ -871,6 +871,20 @@ final class MeetingRepositoryTests: XCTestCase {
             NotionDocumentArchiveRun(contentRevision: 1),
             for: .detailedMinutes
         )
+        try checkpoint.setPageBlockIDs(["old-whole-page"])
+        try checkpoint.setPageSyncRun(
+            NotionPageSyncRun(
+                contentRevision: repository.meeting(id: meetingID)
+                    .contentRevision,
+                snapshotData: try makePageSyncSnapshotData(
+                    repository: repository,
+                    meetingID: meetingID
+                ),
+                oldBlockIDs: ["old-whole-page"],
+                newBlockIDs: ["partial-whole-page"],
+                nextBatchIndex: 1
+            )
+        )
 
         try repository.resetNotionArchiveCheckpoint(
             meetingID: meetingID,
@@ -890,6 +904,8 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertNil(try reset.pendingRun(for: .detailedMinutes))
         XCTAssertNil(reset.pendingKindRawValue)
         XCTAssertNil(reset.pendingRunsData)
+        XCTAssertEqual(try reset.pageBlockIDs, [])
+        XCTAssertNil(try reset.pageSyncRun())
     }
 
     func testCorruptManagedBlockIDsThrowInsteadOfBecomingLegacyEmpty() {
@@ -922,6 +938,22 @@ final class MeetingRepositoryTests: XCTestCase {
             XCTAssertEqual(
                 error as? ArchiveCheckpointCodingError,
                 .invalidData("pendingRunsData")
+            )
+        }
+    }
+
+    func testCorruptPageSyncRunThrowsInsteadOfBecomingEmpty() {
+        let checkpoint = ArchiveCheckpointRecord(
+            notionPageID: "page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        checkpoint.pageSyncRunData = Data("not-json".utf8)
+
+        XCTAssertThrowsError(try checkpoint.pageSyncRun()) { error in
+            XCTAssertEqual(
+                error as? ArchiveCheckpointCodingError,
+                .invalidData("pageSyncRunData")
             )
         }
     }
@@ -973,10 +1005,77 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertNil(checkpoint.pendingNewBlockIDsData)
         XCTAssertNil(checkpoint.pendingOldBlockIDsData)
         XCTAssertNil(checkpoint.pendingNextBatchIndex)
+        XCTAssertNil(checkpoint.pageBlockIDsData)
+        XCTAssertNil(checkpoint.pageSyncRunData)
         XCTAssertEqual(try checkpoint.blockIDs(for: .summary), [])
         XCTAssertEqual(try checkpoint.blockIDs(for: .detailedMinutes), [])
+        XCTAssertEqual(try checkpoint.pageBlockIDs, [])
+        XCTAssertNil(try checkpoint.pageSyncRun())
         XCTAssertNil(try checkpoint.pendingRun(for: .summary))
         XCTAssertNil(try checkpoint.pendingRun(for: .detailedMinutes))
+    }
+
+    func testCompletingOldPageSyncRevisionLeavesNewerMeetingDirty() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            title: "产品周会"
+        )
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: makeMeetingSummary(overview: "同步快照"),
+            model: "test"
+        )
+        try repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "page",
+            pageURL: "https://www.notion.so/page"
+        )
+        try repository.saveArchiveCheckpoint(
+            meetingID: meetingID,
+            notionPageID: "page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        let oldRevision = try repository.meeting(id: meetingID).contentRevision
+        _ = try repository.beginNotionPageSyncRun(
+            meetingID: meetingID,
+            contentRevision: oldRevision,
+            snapshotData: try makePageSyncSnapshotData(
+                repository: repository,
+                meetingID: meetingID
+            ),
+            oldBlockIDs: []
+        )
+        try repository.recordNotionPageSyncBatch(
+            meetingID: meetingID,
+            contentRevision: oldRevision,
+            blockIDs: ["new-block"],
+            nextBatchIndex: 1
+        )
+        try repository.transitionNotionPageSyncRun(
+            meetingID: meetingID,
+            contentRevision: oldRevision,
+            to: .cleaningOld
+        )
+
+        try repository.updateSummaryManually(
+            meetingID: meetingID,
+            value: makeMeetingSummary(overview: "同步期间的新编辑")
+        )
+        try repository.completeNotionPageSyncRun(
+            meetingID: meetingID,
+            contentRevision: oldRevision
+        )
+
+        let meeting = try repository.meeting(id: meetingID)
+        let checkpoint = try XCTUnwrap(meeting.archiveCheckpoint)
+        XCTAssertGreaterThan(meeting.contentRevision, oldRevision)
+        XCTAssertEqual(meeting.notionSyncedContentRevision, oldRevision)
+        XCTAssertEqual(meeting.notionSyncState, .localOnly)
+        XCTAssertEqual(try checkpoint.pageBlockIDs, ["new-block"])
+        XCTAssertNil(try checkpoint.pageSyncRun())
     }
 
     func testClearingLastPendingRunCannotBeRehydratedFromLegacyMirror() throws {
@@ -4437,6 +4536,29 @@ final class MeetingRepositoryTests: XCTestCase {
             ["旧名未修正", "旧名已修正底稿"]
         )
     }
+}
+
+@MainActor
+private func makePageSyncSnapshotData(
+    repository: MeetingRepository,
+    meetingID: UUID
+) throws -> Data {
+    let meeting = try repository.meeting(id: meetingID)
+    guard let summary = meeting.summary else {
+        throw MeetingDocumentRepositoryError.missingDocument(.summary)
+    }
+    let content = try NotionMeetingPageContent(
+        title: meeting.title,
+        startedAt: meeting.startedAt,
+        duration: meeting.activeDuration,
+        mode: meeting.mode,
+        contentRevision: meeting.contentRevision,
+        summary: makeMeetingSummary(overview: summary.overview),
+        detailedMinutes: nil,
+        bookmarks: [],
+        transcripts: []
+    )
+    return try JSONEncoder().encode(content)
 }
 
 @MainActor

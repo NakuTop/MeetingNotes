@@ -695,6 +695,538 @@ final class NotionArchiveServiceTests: XCTestCase {
         XCTAssertEqual(completed.summary?.archivedContentRevision, 2)
     }
 
+    func testExistingLegacyAndManagedBlocksAreAllCapturedAsOldBlocks()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeMeeting(in: repository)
+        try saveSummary(in: repository, meetingID: meetingID, overview: "摘要")
+        try repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "existing-page",
+            pageURL: "https://www.notion.so/existing-page"
+        )
+        try repository.saveArchiveCheckpoint(
+            meetingID: meetingID,
+            notionPageID: "existing-page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        let oldIDs = ["legacy-heading", "managed-summary", "manual-note"]
+        let checkpoint = try XCTUnwrap(
+            repository.meeting(id: meetingID).archiveCheckpoint
+        )
+        try checkpoint.setBlockIDs(["managed-summary"], for: .summary)
+        let client = RecordingNotionAPIClient(
+            initialChildBlockIDs: oldIDs,
+            suspendAppendAttempts: [0]
+        )
+        let service = NotionArchiveService(repository: repository, client: client)
+        let content = try makeCanonicalSummaryContent(
+            in: repository,
+            meetingID: meetingID,
+            overview: "摘要"
+        )
+
+        let archive = Task { @MainActor in
+            try await service.archive(
+                meetingID: meetingID,
+                parentPageID: UUID(),
+                content: content
+            )
+        }
+        await client.waitUntilAppendAttemptCount(1)
+
+        XCTAssertEqual(
+            try repository.meeting(id: meetingID)
+                .archiveCheckpoint?.pageSyncRun()?.oldBlockIDs,
+            oldIDs
+        )
+        let archiveAttemptsBeforeRelease = await client.archiveAttempts()
+        XCTAssertTrue(archiveAttemptsBeforeRelease.isEmpty)
+        await client.releaseAppend(attempt: 0)
+        _ = try await archive.value
+
+        let archivedOldIDs = await client.successfulArchiveIDs()
+        XCTAssertEqual(archivedOldIDs, oldIDs)
+        let completed = try XCTUnwrap(
+            repository.meeting(id: meetingID).archiveCheckpoint
+        )
+        XCTAssertNil(try completed.pageSyncRun())
+        XCTAssertFalse(try completed.pageBlockIDs.isEmpty)
+    }
+
+    func testOldBlocksAreNotArchivedUntilEveryNewBatchIsPersisted()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeMeeting(in: repository)
+        try saveSummary(in: repository, meetingID: meetingID, overview: "摘要")
+        try repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "existing-page",
+            pageURL: "https://www.notion.so/existing-page"
+        )
+        try repository.saveArchiveCheckpoint(
+            meetingID: meetingID,
+            notionPageID: "existing-page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        let client = RecordingNotionAPIClient(
+            initialChildBlockIDs: ["old-a", "old-b"],
+            suspendAppendAttempts: [1]
+        )
+        let service = NotionArchiveService(
+            repository: repository,
+            client: client,
+            blockBuilder: NotionBlockBuilder(maximumBlocksPerBatch: 2)
+        )
+        let content = try makeCanonicalSummaryContent(
+            in: repository,
+            meetingID: meetingID,
+            overview: "摘要"
+        )
+
+        let archive = Task { @MainActor in
+            try await service.archive(
+                meetingID: meetingID,
+                parentPageID: UUID(),
+                content: content
+            )
+        }
+        await client.waitUntilAppendAttemptCount(2)
+
+        let run = try XCTUnwrap(
+            try repository.meeting(id: meetingID)
+                .archiveCheckpoint?.pageSyncRun()
+        )
+        XCTAssertEqual(run.phase, .appendingNew)
+        XCTAssertEqual(run.nextBatchIndex, 1)
+        XCTAssertFalse(run.newBlockIDs.isEmpty)
+        let archiveAttemptsBeforeRelease = await client.archiveAttempts()
+        XCTAssertTrue(archiveAttemptsBeforeRelease.isEmpty)
+
+        await client.releaseAppend(attempt: 1)
+        _ = try await archive.value
+        let archivedOldIDs = await client.successfulArchiveIDs()
+        XCTAssertEqual(archivedOldIDs, ["old-a", "old-b"])
+    }
+
+    func testPartialAppendFailureRollsBackKnownNewBlocksAndKeepsOldPage()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeMeeting(in: repository)
+        try saveSummary(in: repository, meetingID: meetingID, overview: "摘要")
+        try repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "existing-page",
+            pageURL: "https://www.notion.so/existing-page"
+        )
+        try repository.saveArchiveCheckpoint(
+            meetingID: meetingID,
+            notionPageID: "existing-page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        let oldIDs = ["old-a", "old-b"]
+        let client = RecordingNotionAPIClient(
+            failOnAppendAttempts: [1],
+            initialChildBlockIDs: oldIDs
+        )
+        let service = NotionArchiveService(
+            repository: repository,
+            client: client,
+            blockBuilder: NotionBlockBuilder(maximumBlocksPerBatch: 2)
+        )
+
+        do {
+            _ = try await service.archive(
+                meetingID: meetingID,
+                parentPageID: UUID(),
+                content: try makeCanonicalSummaryContent(
+                    in: repository,
+                    meetingID: meetingID,
+                    overview: "摘要"
+                )
+            )
+            XCTFail("Expected the second append to fail")
+        } catch {
+            XCTAssertEqual(error as? NotionClientError, .rateLimited)
+        }
+
+        let firstBatchIDs = await client.generatedBlockIDs(forAttempt: 0)
+        let rolledBackIDs = await client.successfulArchiveIDs()
+        let liveIDs = await client.liveChildBlockIDs()
+        XCTAssertEqual(rolledBackIDs, firstBatchIDs)
+        XCTAssertTrue(Set(rolledBackIDs).isDisjoint(with: oldIDs))
+        XCTAssertEqual(liveIDs, oldIDs)
+        XCTAssertNil(
+            try repository.meeting(id: meetingID)
+                .archiveCheckpoint?.pageSyncRun()
+        )
+    }
+
+    func testRetryDuringCleanupDoesNotAppendAgain() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeMeeting(in: repository)
+        try saveSummary(in: repository, meetingID: meetingID, overview: "摘要")
+        try repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "existing-page",
+            pageURL: "https://www.notion.so/existing-page"
+        )
+        try repository.saveArchiveCheckpoint(
+            meetingID: meetingID,
+            notionPageID: "existing-page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        let client = RecordingNotionAPIClient(
+            initialChildBlockIDs: ["old-a", "old-b"]
+        )
+        await client.failNextArchiveCall()
+        let service = NotionArchiveService(repository: repository, client: client)
+        let content = try makeCanonicalSummaryContent(
+            in: repository,
+            meetingID: meetingID,
+            overview: "摘要"
+        )
+
+        do {
+            _ = try await service.archive(
+                meetingID: meetingID,
+                parentPageID: UUID(),
+                content: content
+            )
+            XCTFail("Expected cleanup failure")
+        } catch {
+            XCTAssertEqual(error as? NotionClientError, .rateLimited)
+        }
+        let appendCountBeforeRetry = await client.appendAttemptCount()
+        XCTAssertEqual(
+            try repository.meeting(id: meetingID)
+                .archiveCheckpoint?.pageSyncRun()?.phase,
+            .cleaningOld
+        )
+
+        _ = try await service.archive(
+            meetingID: meetingID,
+            parentPageID: UUID(),
+            content: content
+        )
+
+        let appendCountAfterRetry = await client.appendAttemptCount()
+        XCTAssertEqual(appendCountAfterRetry, appendCountBeforeRetry)
+        XCTAssertNil(
+            try repository.meeting(id: meetingID)
+                .archiveCheckpoint?.pageSyncRun()
+        )
+    }
+
+    func testEditsDuringSyncLeaveMeetingDirtyAfterOldSnapshotCompletes()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeMeeting(in: repository)
+        try saveSummary(in: repository, meetingID: meetingID, overview: "同步快照")
+        try repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "existing-page",
+            pageURL: "https://www.notion.so/existing-page"
+        )
+        try repository.saveArchiveCheckpoint(
+            meetingID: meetingID,
+            notionPageID: "existing-page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        let client = RecordingNotionAPIClient(
+            initialChildBlockIDs: ["old"],
+            suspendArchiveAttempts: [0]
+        )
+        let service = NotionArchiveService(repository: repository, client: client)
+        let content = try makeCanonicalSummaryContent(
+            in: repository,
+            meetingID: meetingID,
+            overview: "同步快照"
+        )
+
+        let archive = Task { @MainActor in
+            try await service.archive(
+                meetingID: meetingID,
+                parentPageID: UUID(),
+                content: content
+            )
+        }
+        await client.waitUntilArchiveAttemptCount(1)
+        try repository.updateSummaryManually(
+            meetingID: meetingID,
+            value: GeneratedMeetingSummary(
+                suggestedTitle: "产品周会",
+                overview: "同步期间的新编辑",
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            )
+        )
+        await client.releaseArchive(attempt: 0)
+        _ = try await archive.value
+
+        let meeting = try repository.meeting(id: meetingID)
+        XCTAssertGreaterThan(meeting.contentRevision, content.contentRevision)
+        XCTAssertEqual(
+            meeting.notionSyncedContentRevision,
+            content.contentRevision
+        )
+        XCTAssertEqual(meeting.notionSyncState, .localOnly)
+    }
+
+    func testPaginationLoopOrDuplicateOldIDsStopsBeforeRemoteMutation()
+        async throws {
+        let malformedPages: [[NotionChildBlockPage]] = [
+            [
+                NotionChildBlockPage(
+                    blockIDs: ["old-a"],
+                    nextCursor: "repeat"
+                ),
+                NotionChildBlockPage(
+                    blockIDs: ["old-b"],
+                    nextCursor: "repeat"
+                )
+            ],
+            [
+                NotionChildBlockPage(
+                    blockIDs: ["duplicate"],
+                    nextCursor: "next"
+                ),
+                NotionChildBlockPage(
+                    blockIDs: ["duplicate"],
+                    nextCursor: nil
+                )
+            ]
+        ]
+
+        for pages in malformedPages {
+            let repository = try MeetingRepository.inMemory()
+            let meetingID = try makeMeeting(in: repository)
+            try saveSummary(
+                in: repository,
+                meetingID: meetingID,
+                overview: "摘要"
+            )
+            try repository.setNotionPage(
+                meetingID: meetingID,
+                pageID: "existing-page",
+                pageURL: "https://www.notion.so/existing-page"
+            )
+            try repository.saveArchiveCheckpoint(
+                meetingID: meetingID,
+                notionPageID: "existing-page",
+                nextSection: "managed",
+                nextBatchIndex: 0
+            )
+            let client = RecordingNotionAPIClient(childBlockPages: pages)
+            let service = NotionArchiveService(
+                repository: repository,
+                client: client
+            )
+
+            do {
+                _ = try await service.archive(
+                    meetingID: meetingID,
+                    parentPageID: UUID(),
+                    content: try makeCanonicalSummaryContent(
+                        in: repository,
+                        meetingID: meetingID,
+                        overview: "摘要"
+                    )
+                )
+                XCTFail("Expected malformed pagination to stop sync")
+            } catch {
+                XCTAssertEqual(error as? NotionClientError, .invalidResponse)
+            }
+
+            let appendAttempts = await client.appendAttemptCount()
+            let archiveAttempts = await client.archiveAttempts()
+            XCTAssertEqual(appendAttempts, 0)
+            XCTAssertTrue(archiveAttempts.isEmpty)
+            XCTAssertNil(
+                try repository.meeting(id: meetingID)
+                    .archiveCheckpoint?.pageSyncRun()
+            )
+        }
+    }
+
+    func testCancellationPreservesRecoverableCheckpoint() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeMeeting(in: repository)
+        try saveSummary(in: repository, meetingID: meetingID, overview: "摘要")
+        try repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "existing-page",
+            pageURL: "https://www.notion.so/existing-page"
+        )
+        try repository.saveArchiveCheckpoint(
+            meetingID: meetingID,
+            notionPageID: "existing-page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        let client = RecordingNotionAPIClient(
+            cancelOnAppendAttempts: [1],
+            initialChildBlockIDs: ["old"]
+        )
+        let service = NotionArchiveService(
+            repository: repository,
+            client: client,
+            blockBuilder: NotionBlockBuilder(maximumBlocksPerBatch: 2)
+        )
+
+        do {
+            _ = try await service.archive(
+                meetingID: meetingID,
+                parentPageID: UUID(),
+                content: try makeCanonicalSummaryContent(
+                    in: repository,
+                    meetingID: meetingID,
+                    overview: "摘要"
+                )
+            )
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected control-flow cancellation.
+        }
+
+        let run = try XCTUnwrap(
+            try repository.meeting(id: meetingID)
+                .archiveCheckpoint?.pageSyncRun()
+        )
+        XCTAssertEqual(run.phase, .appendingNew)
+        XCTAssertEqual(run.nextBatchIndex, 1)
+        XCTAssertFalse(run.newBlockIDs.isEmpty)
+        let archiveAttempts = await client.archiveAttempts()
+        let liveIDs = await client.liveChildBlockIDs()
+        XCTAssertTrue(archiveAttempts.isEmpty)
+        XCTAssertTrue(liveIDs.contains("old"))
+    }
+
+    func testCancellationRetryUsesStoredSnapshotInsteadOfCallerRebuild()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeMeeting(in: repository)
+        try saveSummary(
+            in: repository,
+            meetingID: meetingID,
+            overview: "持久化快照"
+        )
+        try repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "existing-page",
+            pageURL: "https://www.notion.so/existing-page"
+        )
+        try repository.saveArchiveCheckpoint(
+            meetingID: meetingID,
+            notionPageID: "existing-page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        let client = RecordingNotionAPIClient(cancelOnAppendAttempts: [1])
+        let service = NotionArchiveService(
+            repository: repository,
+            client: client,
+            blockBuilder: NotionBlockBuilder(maximumBlocksPerBatch: 2)
+        )
+        let original = try makeCanonicalSummaryContent(
+            in: repository,
+            meetingID: meetingID,
+            overview: "持久化快照"
+        )
+
+        do {
+            _ = try await service.archive(
+                meetingID: meetingID,
+                parentPageID: UUID(),
+                content: original
+            )
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let rebuiltWithSameRevision = try NotionMeetingPageContent(
+            title: original.title,
+            startedAt: original.startedAt,
+            duration: original.duration,
+            mode: original.mode,
+            contentRevision: original.contentRevision,
+            summary: GeneratedMeetingSummary(
+                suggestedTitle: "产品周会",
+                overview: "不应进入重试的调用方重建内容",
+                keyPoints: [],
+                decisions: [],
+                actionItems: [],
+                bookmarkInsights: []
+            ),
+            detailedMinutes: nil,
+            bookmarks: [],
+            transcripts: []
+        )
+        _ = try await service.archive(
+            meetingID: meetingID,
+            parentPageID: UUID(),
+            content: rebuiltWithSameRevision
+        )
+
+        let appendedText = await client.successfulAppendCalls()
+            .flatMap { $0 }
+            .map(\.text)
+        XCTAssertTrue(appendedText.contains("持久化快照"))
+        XCTAssertFalse(
+            appendedText.contains("不应进入重试的调用方重建内容")
+        )
+    }
+
+    func testCanonicalPageFailureDoesNotMutateLegacyDocumentArchiveState()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeMeeting(in: repository)
+        try saveSummary(in: repository, meetingID: meetingID, overview: "摘要")
+        try repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "existing-page",
+            pageURL: "https://www.notion.so/existing-page"
+        )
+        try repository.saveArchiveCheckpoint(
+            meetingID: meetingID,
+            notionPageID: "existing-page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        let client = RecordingNotionAPIClient(failOnAppendAttempts: [0])
+        let service = NotionArchiveService(repository: repository, client: client)
+
+        do {
+            _ = try await service.archive(
+                meetingID: meetingID,
+                parentPageID: UUID(),
+                content: try makeCanonicalSummaryContent(
+                    in: repository,
+                    meetingID: meetingID,
+                    overview: "摘要"
+                )
+            )
+            XCTFail("Expected canonical page append failure")
+        } catch {
+            XCTAssertEqual(error as? NotionClientError, .rateLimited)
+        }
+
+        let summary = try XCTUnwrap(
+            repository.meeting(id: meetingID).summary
+        )
+        XCTAssertEqual(summary.archiveState, .localOnly)
+        XCTAssertNil(summary.archivedContentRevision)
+        XCTAssertNil(summary.lastArchiveErrorCode)
+    }
+
     private func makeMeeting(in repository: MeetingRepository) throws -> UUID {
         try repository.createMeeting(
             mode: .online,
@@ -806,6 +1338,35 @@ final class NotionArchiveServiceTests: XCTestCase {
             transcripts: []
         )
     }
+
+    private func makeCanonicalSummaryContent(
+        in repository: MeetingRepository,
+        meetingID: UUID,
+        overview: String
+    ) throws -> NotionMeetingPageContent {
+        try NotionMeetingPageContent(
+            title: "产品周会",
+            startedAt: Date(timeIntervalSince1970: 1_000),
+            duration: 120,
+            mode: .online,
+            contentRevision: repository.meeting(id: meetingID).contentRevision,
+            summary: GeneratedMeetingSummary(
+                suggestedTitle: "产品周会",
+                overview: overview,
+                keyPoints: ["优先稳定性"],
+                decisions: ["下周发布"],
+                actionItems: [
+                    .init(task: "准备发布", owner: "小王", dueDate: "下周一")
+                ],
+                bookmarkInsights: ["发布决定"]
+            ),
+            detailedMinutes: nil,
+            bookmarks: [.init(timestamp: 60, excerpt: "发布决定")],
+            transcripts: [
+                .init(startTime: 0, endTime: 5, text: "讨论路线图")
+            ]
+        )
+    }
 }
 
 private actor RecordingNotionAPIClient: NotionAPIClient {
@@ -814,15 +1375,40 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
         url: "https://www.notion.so/created-page-id"
     )
     private let failOnAppendAttempts: Set<Int>
+    private let cancelOnAppendAttempts: Set<Int>
+    private let explicitChildBlockPages: [NotionChildBlockPage]?
+    private let suspendAppendAttempts: Set<Int>
+    private let suspendArchiveAttempts: Set<Int>
     private var createCalls = 0
     private var appendAttempts = 0
+    private var childBlockPageIndex = 0
     private var completedAppendCalls: [[NotionBlockDraft]] = []
     private var completedArchiveIDs: [String] = []
     private var attemptedArchiveIDs: [String] = []
     private var shouldFailNextArchive = false
+    private var childBlockIDs: [String]
+    private var generatedIDsByAttempt: [Int: [String]] = [:]
+    private var appendWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var appendReleases: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var releasedAppendAttempts: Set<Int> = []
+    private var archiveWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var archiveReleases: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var releasedArchiveAttempts: Set<Int> = []
 
-    init(failOnAppendAttempts: Set<Int> = []) {
+    init(
+        failOnAppendAttempts: Set<Int> = [],
+        cancelOnAppendAttempts: Set<Int> = [],
+        initialChildBlockIDs: [String] = [],
+        childBlockPages: [NotionChildBlockPage]? = nil,
+        suspendAppendAttempts: Set<Int> = [],
+        suspendArchiveAttempts: Set<Int> = []
+    ) {
         self.failOnAppendAttempts = failOnAppendAttempts
+        self.cancelOnAppendAttempts = cancelOnAppendAttempts
+        childBlockIDs = initialChildBlockIDs
+        explicitChildBlockPages = childBlockPages
+        self.suspendAppendAttempts = suspendAppendAttempts
+        self.suspendArchiveAttempts = suspendArchiveAttempts
     }
 
     func testConnection(
@@ -846,6 +1432,23 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
         return page
     }
 
+    func childBlocks(
+        pageID: String,
+        startCursor: String?
+    ) async throws -> NotionChildBlockPage {
+        _ = pageID
+        _ = startCursor
+        if let explicitChildBlockPages {
+            guard childBlockPageIndex < explicitChildBlockPages.count else {
+                throw NotionClientError.invalidResponse
+            }
+            let result = explicitChildBlockPages[childBlockPageIndex]
+            childBlockPageIndex += 1
+            return result
+        }
+        return NotionChildBlockPage(blockIDs: childBlockIDs, nextCursor: nil)
+    }
+
     func append(
         blocks: [NotionBlockDraft],
         to pageID: String
@@ -853,20 +1456,48 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
         _ = pageID
         let attempt = appendAttempts
         appendAttempts += 1
+        resumeAppendWaiters()
+        if suspendAppendAttempts.contains(attempt) {
+            await withCheckedContinuation { continuation in
+                if releasedAppendAttempts.contains(attempt) {
+                    continuation.resume()
+                } else {
+                    appendReleases[attempt] = continuation
+                }
+            }
+        }
+        if cancelOnAppendAttempts.contains(attempt) {
+            throw CancellationError()
+        }
         if failOnAppendAttempts.contains(attempt) {
             throw NotionClientError.rateLimited
         }
         completedAppendCalls.append(blocks)
-        return blocks.indices.map { "block-\(attempt)-\($0)" }
+        let blockIDs = blocks.indices.map { "block-\(attempt)-\($0)" }
+        generatedIDsByAttempt[attempt] = blockIDs
+        childBlockIDs.append(contentsOf: blockIDs)
+        return blockIDs
     }
 
     func archiveBlock(id: String) async throws {
         attemptedArchiveIDs.append(id)
+        let attempt = attemptedArchiveIDs.count - 1
+        resumeArchiveWaiters()
+        if suspendArchiveAttempts.contains(attempt) {
+            await withCheckedContinuation { continuation in
+                if releasedArchiveAttempts.contains(attempt) {
+                    continuation.resume()
+                } else {
+                    archiveReleases[attempt] = continuation
+                }
+            }
+        }
         if shouldFailNextArchive {
             shouldFailNextArchive = false
             throw NotionClientError.rateLimited
         }
         completedArchiveIDs.append(id)
+        childBlockIDs.removeAll { $0 == id }
     }
 
     func updatePageTitle(pageID: String, title: String) async throws {
@@ -885,6 +1516,50 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
     }
     func successfulArchiveIDs() -> [String] { completedArchiveIDs }
     func archiveAttempts() -> [String] { attemptedArchiveIDs }
+    func liveChildBlockIDs() -> [String] { childBlockIDs }
+    func generatedBlockIDs(forAttempt attempt: Int) -> [String] {
+        generatedIDsByAttempt[attempt] ?? []
+    }
+
+    func waitUntilAppendAttemptCount(_ count: Int) async {
+        if appendAttempts >= count { return }
+        await withCheckedContinuation { continuation in
+            appendWaiters.append((count, continuation))
+        }
+    }
+
+    func releaseAppend(attempt: Int) {
+        releasedAppendAttempts.insert(attempt)
+        appendReleases.removeValue(forKey: attempt)?.resume()
+    }
+
+    func waitUntilArchiveAttemptCount(_ count: Int) async {
+        if attemptedArchiveIDs.count >= count { return }
+        await withCheckedContinuation { continuation in
+            archiveWaiters.append((count, continuation))
+        }
+    }
+
+    func releaseArchive(attempt: Int) {
+        releasedArchiveAttempts.insert(attempt)
+        archiveReleases.removeValue(forKey: attempt)?.resume()
+    }
+
+    private func resumeAppendWaiters() {
+        let ready = appendWaiters.filter { appendAttempts >= $0.0 }
+        appendWaiters.removeAll { appendAttempts >= $0.0 }
+        ready.forEach { $0.1.resume() }
+    }
+
+    private func resumeArchiveWaiters() {
+        let ready = archiveWaiters.filter {
+            attemptedArchiveIDs.count >= $0.0
+        }
+        archiveWaiters.removeAll {
+            attemptedArchiveIDs.count >= $0.0
+        }
+        ready.forEach { $0.1.resume() }
+    }
 }
 
 private actor SuspendingNotionAPIClient: NotionAPIClient {

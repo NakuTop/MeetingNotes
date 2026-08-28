@@ -29,6 +29,37 @@ struct NotionChildBlockPage: Equatable, Sendable {
     let nextCursor: String?
 }
 
+enum NotionPageSyncPhase: String, Codable, Equatable, Sendable {
+    case appendingNew
+    case rollingBackPartialNew
+    case cleaningOld
+}
+
+struct NotionPageSyncRun: Codable, Equatable, Sendable {
+    let contentRevision: Int
+    let snapshotData: Data
+    var oldBlockIDs: [String]
+    var newBlockIDs: [String]
+    var nextBatchIndex: Int
+    var phase: NotionPageSyncPhase
+
+    init(
+        contentRevision: Int,
+        snapshotData: Data,
+        oldBlockIDs: [String],
+        newBlockIDs: [String] = [],
+        nextBatchIndex: Int = 0,
+        phase: NotionPageSyncPhase = .appendingNew
+    ) {
+        self.contentRevision = contentRevision
+        self.snapshotData = snapshotData
+        self.oldBlockIDs = oldBlockIDs
+        self.newBlockIDs = newBlockIDs
+        self.nextBatchIndex = nextBatchIndex
+        self.phase = phase
+    }
+}
+
 enum NotionArchiveRunPhase: String, Codable, Equatable, Sendable {
     case appending
     case cleaningUp
