@@ -5,6 +5,58 @@ import XCTest
 
 @MainActor
 final class SettingsViewModelTests: XCTestCase {
+    func testUpdateSettingsExposeManualCheckAutomaticPreferenceAndChannel()
+        throws {
+        let updateFixture = SettingsUpdateFixture(states: [.idle])
+        let fixture = try makeFixture(
+            updateCoordinator: updateFixture.coordinator,
+            updateAbout: ApplicationUpdateAbout(
+                version: "1.2.0",
+                build: "13",
+                channel: .beta
+            )
+        )
+
+        fixture.viewModel.automaticallyChecksForUpdates = false
+        fixture.viewModel.checkForUpdates()
+
+        XCTAssertFalse(updateFixture.driver.automaticallyChecksForUpdates)
+        XCTAssertEqual(updateFixture.driver.checkCallCount, 1)
+        XCTAssertTrue(fixture.viewModel.canCheckForUpdates)
+        XCTAssertEqual(fixture.viewModel.updateVersionText, "1.2.0 (13)")
+        XCTAssertEqual(fixture.viewModel.updateChannelText, "Beta")
+    }
+
+    func testDeferredUpdateExposesBlockerAndRequiresSecondUserAction()
+        async throws {
+        let updateFixture = SettingsUpdateFixture(states: [.recording])
+        let fixture = try makeFixture(
+            updateCoordinator: updateFixture.coordinator
+        )
+        updateFixture.coordinator.updateDidBecomeAvailable(
+            source: .automatic
+        )
+
+        await fixture.viewModel.installAvailableUpdate()
+
+        XCTAssertEqual(updateFixture.driver.installCallCount, 0)
+        XCTAssertEqual(
+            fixture.viewModel.updateBlockerMessage,
+            "会议正在进行或处理中，请结束后再安装更新。"
+        )
+
+        updateFixture.source.states = [.ready]
+        fixture.viewModel.refreshUpdateInstallationState()
+
+        XCTAssertEqual(updateFixture.driver.installCallCount, 0)
+        XCTAssertTrue(fixture.viewModel.canInstallAvailableUpdate)
+
+        await fixture.viewModel.installAvailableUpdate()
+
+        XCTAssertEqual(updateFixture.flusher.flushCallCount, 1)
+        XCTAssertEqual(updateFixture.driver.installCallCount, 1)
+    }
+
     func testLoadReadsPersistedTranscriptionQualityMode() throws {
         let fixture = try makeFixture()
         fixture.settings.transcriptionQualityMode = .highAccuracy
@@ -1521,7 +1573,9 @@ final class SettingsViewModelTests: XCTestCase {
         diagnosticEnvironment:
             any AudioDiagnosticEnvironmentInfoProviding =
                 SettingsDiagnosticEnvironmentStub(),
-        microphoneRuntime: (any MicrophoneRuntimeReporting)? = nil
+        microphoneRuntime: (any MicrophoneRuntimeReporting)? = nil,
+        updateCoordinator: UpdateCoordinator? = nil,
+        updateAbout: ApplicationUpdateAbout = .current()
     ) throws -> Fixture {
         let suiteName = "SettingsViewModelTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -1544,7 +1598,9 @@ final class SettingsViewModelTests: XCTestCase {
                 diagnosticCoordinatorFactory: diagnosticCoordinatorFactory,
                 diagnosticExplainer: diagnosticExplainer,
                 diagnosticEnvironment: diagnosticEnvironment,
-                microphoneRuntime: microphoneRuntime
+                microphoneRuntime: microphoneRuntime,
+                updateCoordinator: updateCoordinator,
+                updateAbout: updateAbout
             ),
             credentials: credentials,
             settings: settings
@@ -1595,6 +1651,61 @@ final class SettingsViewModelTests: XCTestCase {
         let viewModel: SettingsViewModel
         let credentials: InMemoryCredentialStore
         let settings: AppSettingsStore
+    }
+}
+
+@MainActor
+private final class SettingsUpdateFixture {
+    let source: SettingsUpdateActivitySource
+    let driver = SettingsUpdateDriver()
+    let flusher = SettingsUpdateFlusher()
+    let coordinator: UpdateCoordinator
+
+    init(states: [RecordingState]) {
+        source = SettingsUpdateActivitySource(states: states)
+        coordinator = UpdateCoordinator(
+            driver: driver,
+            activityPolicy: UpdateActivityPolicy(
+                loadMeetingStates: { [source] in source.states }
+            ),
+            editFlusher: flusher
+        )
+    }
+}
+
+@MainActor
+private final class SettingsUpdateActivitySource {
+    var states: [RecordingState]
+
+    init(states: [RecordingState]) {
+        self.states = states
+    }
+}
+
+@MainActor
+private final class SettingsUpdateDriver: ApplicationUpdateDriving {
+    var isUpdateServiceEnabled = true
+    var canCheckForUpdates = true
+    var automaticallyChecksForUpdates = true
+    var hasDeferredInstallation = true
+    private(set) var checkCallCount = 0
+    private(set) var installCallCount = 0
+
+    func checkForUpdates() {
+        checkCallCount += 1
+    }
+
+    func installDeferredUpdate() {
+        installCallCount += 1
+    }
+}
+
+@MainActor
+private final class SettingsUpdateFlusher: PendingMeetingEditFlushing {
+    private(set) var flushCallCount = 0
+
+    func flushAllEdits() async throws {
+        flushCallCount += 1
     }
 }
 

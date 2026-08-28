@@ -52,6 +52,18 @@ struct MeetingNotesApp: App {
                 .frame(minWidth: 640, minHeight: 420)
             }
         }
+        .commands {
+            CommandGroup(after: .appInfo) {
+                if case let .ready(container) = startupState {
+                    Button("检查更新…") {
+                        container.settingsViewModel.checkForUpdates()
+                    }
+                    .disabled(
+                        !container.settingsViewModel.canCheckForUpdates
+                    )
+                }
+            }
+        }
 
         Settings {
             switch startupState {

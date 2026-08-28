@@ -24,6 +24,24 @@ final class UpdateCoordinator {
         driver.canCheckForUpdates
     }
 
+    var isUpdateServiceEnabled: Bool {
+        driver.isUpdateServiceEnabled
+    }
+
+    var hasDeferredInstallation: Bool {
+        driver.hasDeferredInstallation
+    }
+
+    var canRequestInstallation: Bool {
+        guard driver.hasDeferredInstallation else { return false }
+        return switch state {
+        case .updateAvailable, .awaitingUserConfirmation, .preflightFailed:
+            true
+        case .idle, .checkFailed, .deferred, .installing:
+            false
+        }
+    }
+
     var automaticallyChecksForUpdates: Bool {
         get { driver.automaticallyChecksForUpdates }
         set { driver.automaticallyChecksForUpdates = newValue }
@@ -47,6 +65,18 @@ final class UpdateCoordinator {
         state = .updateAvailable
     }
 
+    func updateDidNotFindNewVersion() {
+        guard !driver.hasDeferredInstallation else { return }
+        hasAvailableUpdate = false
+        state = .idle
+    }
+
+    func updateCheckDidFail() {
+        guard !driver.hasDeferredInstallation else { return }
+        hasAvailableUpdate = false
+        state = .checkFailed
+    }
+
     func refreshDeferredInstallationState() {
         guard case .deferred = state else { return }
 
@@ -60,6 +90,7 @@ final class UpdateCoordinator {
 
     func requestInstallation() async {
         guard hasAvailableUpdate,
+              driver.hasDeferredInstallation,
               state != .installing else {
             return
         }

@@ -120,6 +120,26 @@ final class UpdateCoordinatorTests: XCTestCase {
         XCTAssertTrue(coordinator.canCheckForUpdates)
     }
 
+    func testInstallationWithoutDeferredHandlerDoesNotFlushOrRestart()
+        async {
+        let source = MutableUpdateActivitySource(states: [.idle])
+        let driver = RecordingApplicationUpdateDriver()
+        driver.hasDeferredInstallation = false
+        let flusher = RecordingPendingMeetingEditFlusher()
+        let coordinator = makeCoordinator(
+            source: source,
+            driver: driver,
+            flusher: flusher
+        )
+        coordinator.updateDidBecomeAvailable(source: .automatic)
+
+        await coordinator.requestInstallation()
+
+        XCTAssertEqual(flusher.flushCallCount, 0)
+        XCTAssertEqual(driver.installCallCount, 0)
+        XCTAssertEqual(coordinator.state, .updateAvailable)
+    }
+
     private func makeCoordinator(
         source: MutableUpdateActivitySource,
         driver: RecordingApplicationUpdateDriver,
@@ -148,8 +168,10 @@ private final class MutableUpdateActivitySource {
 @MainActor
 private final class RecordingApplicationUpdateDriver:
     ApplicationUpdateDriving {
+    var isUpdateServiceEnabled = true
     var canCheckForUpdates = true
     var automaticallyChecksForUpdates = true
+    var hasDeferredInstallation = true
     private(set) var checkCallCount = 0
     private(set) var installCallCount = 0
 

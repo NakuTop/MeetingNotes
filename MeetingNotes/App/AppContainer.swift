@@ -42,6 +42,7 @@ final class AppContainer {
     let onboardingState: OnboardingState
     let transcriptionModelViewModel: TranscriptionModelViewModel
     let recordingPresentationStore: RecordingSessionPresentationStore
+    let updateCoordinator: UpdateCoordinator
 
     private let controlRouter: MeetingControlRouter
     private let settingsStore: AppSettingsStore
@@ -51,6 +52,7 @@ final class AppContainer {
     private let speakerDiarizationRetryer:
         any MeetingSpeakerDiarizationRetrying
     private let operationGate: MeetingOperationGate
+    private let pendingMeetingEditFlusher: MeetingDetailPendingEditFlusher
     private var detailViewModels: [UUID: MeetingDetailViewModel] = [:]
 
     init(
@@ -81,10 +83,44 @@ final class AppContainer {
         audioDiagnosticCoordinatorFactory:
             (any AudioDiagnosticCoordinatorCreating)? = nil,
         audioDiagnosticExplainer:
-            (any AudioDiagnosticExplanationRequesting)? = nil
+            (any AudioDiagnosticExplanationRequesting)? = nil,
+        applicationUpdateDriver: ApplicationUpdateDriving? = nil,
+        updateAbout: ApplicationUpdateAbout = .current()
     ) {
         self.repository = repository
         self.fileStore = fileStore
+        let pendingMeetingEditFlusher = MeetingDetailPendingEditFlusher()
+        self.pendingMeetingEditFlusher = pendingMeetingEditFlusher
+        let applicationUpdateDriver = applicationUpdateDriver
+            ?? InertApplicationUpdateDriver()
+        let updateCoordinator = UpdateCoordinator(
+            driver: applicationUpdateDriver,
+            activityPolicy: UpdateActivityPolicy(repository: repository),
+            editFlusher: pendingMeetingEditFlusher
+        )
+        self.updateCoordinator = updateCoordinator
+        if let sparkleDriver = applicationUpdateDriver
+            as? SparkleUpdateDriver {
+            sparkleDriver.onUpdateFound = { [weak updateCoordinator] source in
+                updateCoordinator?.updateDidBecomeAvailable(source: source)
+            }
+            sparkleDriver.onNoUpdateFound = { [weak updateCoordinator] in
+                updateCoordinator?.updateDidNotFindNewVersion()
+            }
+            sparkleDriver.onUpdateCheckFailed = { [weak updateCoordinator] in
+                updateCoordinator?.updateCheckDidFail()
+            }
+            sparkleDriver.onRelaunchRequested = {
+                [weak updateCoordinator] in
+                guard let updateCoordinator else { return }
+                updateCoordinator.updateDidBecomeAvailable(
+                    source: .userInitiated
+                )
+                Task { [weak updateCoordinator] in
+                    await updateCoordinator?.requestInstallation()
+                }
+            }
+        }
         let settingsStore = settingsStore ?? AppSettingsStore()
         self.settingsStore = settingsStore
         let audioDeviceCatalog = audioDeviceCatalog ?? AudioDeviceCatalog()
@@ -298,7 +334,9 @@ final class AppContainer {
                 ?? LiveAudioDiagnosticExplanationRequester(
                     httpClient: httpClient
                 ),
-            microphoneRuntime: microphoneProvider
+            microphoneRuntime: microphoneProvider,
+            updateCoordinator: updateCoordinator,
+            updateAbout: updateAbout
         )
         controlRouter.connect(
             coordinator: coordinator,
@@ -321,7 +359,10 @@ final class AppContainer {
         return AppContainer(
             repository: repository,
             fileStore: fileStore,
-            recordingsURL: recordingsRoot
+            recordingsURL: recordingsRoot,
+            applicationUpdateDriver: SparkleUpdateDriver(
+                configuration: .current()
+            )
         )
     }
 
@@ -361,7 +402,33 @@ final class AppContainer {
             recordingPresentationStore: recordingPresentationStore
         )
         detailViewModels[meetingID] = viewModel
+        pendingMeetingEditFlusher.register(viewModel)
         return viewModel
+    }
+}
+
+private enum MeetingDetailPendingEditFlushError: Error {
+    case localSaveFailed(UUID)
+}
+
+@MainActor
+private final class MeetingDetailPendingEditFlusher:
+    PendingMeetingEditFlushing {
+    private var viewModels: [UUID: MeetingDetailViewModel] = [:]
+
+    func register(_ viewModel: MeetingDetailViewModel) {
+        viewModels[viewModel.meetingID] = viewModel
+    }
+
+    func flushAllEdits() async throws {
+        for viewModel in viewModels.values {
+            await viewModel.flushEdits()
+            if case .failed = viewModel.localSaveState {
+                throw MeetingDetailPendingEditFlushError.localSaveFailed(
+                    viewModel.meetingID
+                )
+            }
+        }
     }
 }
 

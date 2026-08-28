@@ -30,5 +30,19 @@
 	<string>用于采集在线会议的系统音频，不保存屏幕画面。</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>MeetingNotesUpdateChannel</key>
+	<string>$(MEETINGNOTES_UPDATE_CHANNEL)</string>
+	<key>MeetingNotesUpdatesEnabled</key>
+	<string>$(MEETINGNOTES_UPDATES_ENABLED)</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUEnableInstallerLauncherService</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>$(SPARKLE_FEED_URL)</string>
+	<key>SUPublicEDKey</key>
+	<string>$(SPARKLE_PUBLIC_ED_KEY)</string>
 </dict>
 </plist>

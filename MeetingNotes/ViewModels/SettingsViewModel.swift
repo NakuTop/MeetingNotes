@@ -213,6 +213,8 @@ final class SettingsViewModel {
         any AudioDiagnosticEnvironmentInfoProviding
     private let diagnosticSanitizer = AudioDiagnosticSanitizer()
     private let microphoneRuntime: (any MicrophoneRuntimeReporting)?
+    private let updateCoordinator: UpdateCoordinator?
+    private let updateAbout: ApplicationUpdateAbout
 
     var deepSeekAPIKeyInput = ""
     var notionTokenInput = ""
@@ -254,6 +256,63 @@ final class SettingsViewModel {
 
     var areTranscriptionControlsDisabled: Bool {
         areAudioControlsDisabled
+    }
+
+    var updateVersionText: String {
+        "\(updateAbout.version) (\(updateAbout.build))"
+    }
+
+    var updateChannelText: String {
+        updateAbout.channel.displayName
+    }
+
+    var isUpdateServiceEnabled: Bool {
+        updateCoordinator?.isUpdateServiceEnabled ?? false
+    }
+
+    var canCheckForUpdates: Bool {
+        updateCoordinator?.canCheckForUpdates ?? false
+    }
+
+    var automaticallyChecksForUpdates: Bool {
+        get {
+            updateCoordinator?.automaticallyChecksForUpdates ?? false
+        }
+        set {
+            updateCoordinator?.automaticallyChecksForUpdates = newValue
+        }
+    }
+
+    var updateBlockerMessage: String? {
+        updateCoordinator?.blockerMessage
+    }
+
+    var showsUpdateInstallationAction: Bool {
+        updateCoordinator?.hasDeferredInstallation ?? false
+    }
+
+    var canInstallAvailableUpdate: Bool {
+        updateCoordinator?.canRequestInstallation ?? false
+    }
+
+    var updateStatusMessage: String? {
+        guard let state = updateCoordinator?.state else { return nil }
+        return switch state {
+        case .idle:
+            nil
+        case .updateAvailable:
+            "已发现可用更新，请在更新窗口中查看详情。"
+        case .checkFailed:
+            "检查更新失败，请稍后重试。"
+        case let .deferred(blocker):
+            blocker.message
+        case .awaitingUserConfirmation:
+            "更新已就绪，请再次确认后重启安装。"
+        case .preflightFailed:
+            "本地修改未能完成保存，已取消重启。"
+        case .installing:
+            "正在安装更新并准备重启…"
+        }
     }
 
     var isCoreAudioFallbackActive: Bool {
@@ -321,7 +380,9 @@ final class SettingsViewModel {
         diagnosticEnvironment:
             any AudioDiagnosticEnvironmentInfoProviding =
                 LiveAudioDiagnosticEnvironmentInfoProvider(),
-        microphoneRuntime: (any MicrophoneRuntimeReporting)? = nil
+        microphoneRuntime: (any MicrophoneRuntimeReporting)? = nil,
+        updateCoordinator: UpdateCoordinator? = nil,
+        updateAbout: ApplicationUpdateAbout = .current()
     ) {
         self.credentialStore = credentialStore
         self.settingsStore = settingsStore
@@ -336,6 +397,20 @@ final class SettingsViewModel {
         self.diagnosticExplainer = diagnosticExplainer
         self.diagnosticEnvironment = diagnosticEnvironment
         self.microphoneRuntime = microphoneRuntime
+        self.updateCoordinator = updateCoordinator
+        self.updateAbout = updateAbout
+    }
+
+    func checkForUpdates() {
+        updateCoordinator?.checkForUpdates()
+    }
+
+    func refreshUpdateInstallationState() {
+        updateCoordinator?.refreshDeferredInstallationState()
+    }
+
+    func installAvailableUpdate() async {
+        await updateCoordinator?.requestInstallation()
     }
 
     func load() {

@@ -331,6 +331,78 @@ struct SettingsView: View {
                     }
                 }
 
+                AdaptiveGlassCard {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("关于与更新")
+                            .font(.headline)
+
+                        HStack {
+                            Label(
+                                "版本 \(viewModel.updateVersionText)",
+                                systemImage: "app.badge"
+                            )
+                            Spacer()
+                            Text(viewModel.updateChannelText)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Toggle(
+                            "自动检查更新",
+                            isOn: $viewModel.automaticallyChecksForUpdates
+                        )
+                        .disabled(!viewModel.isUpdateServiceEnabled)
+                        .accessibilityIdentifier(
+                            "settings.updates.automatic"
+                        )
+
+                        HStack {
+                            if !viewModel.isUpdateServiceEnabled {
+                                Text("当前构建尚未配置签名更新。")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("检查更新") {
+                                viewModel.checkForUpdates()
+                            }
+                            .disabled(!viewModel.canCheckForUpdates)
+                            .accessibilityIdentifier(
+                                "settings.updates.check"
+                            )
+                        }
+
+                        if let message = viewModel.updateStatusMessage {
+                            Text(message)
+                                .font(.caption)
+                                .foregroundStyle(
+                                    viewModel.updateBlockerMessage == nil
+                                        ? Color.secondary
+                                        : Color.orange
+                                )
+                        }
+
+                        if viewModel.showsUpdateInstallationAction {
+                            HStack {
+                                Spacer()
+                                Button("更新并重启") {
+                                    Task {
+                                        await viewModel
+                                            .installAvailableUpdate()
+                                    }
+                                }
+                                .disabled(
+                                    !viewModel.canInstallAvailableUpdate
+                                )
+                                .adaptivePrimaryButtonStyle()
+                                .accessibilityIdentifier(
+                                    "settings.updates.install"
+                                )
+                            }
+                        }
+                    }
+                }
+
                 HStack(spacing: 12) {
                     ConnectionStateView(state: viewModel.saveState)
                     Spacer()
@@ -373,6 +445,7 @@ struct SettingsView: View {
                     return
                 }
                 await viewModel.refreshAudioControlAvailability()
+                viewModel.refreshUpdateInstallationState()
             }
         }
         .onDisappear {
