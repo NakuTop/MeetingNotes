@@ -157,6 +157,8 @@ final class UpdateReleasePolicyTests: XCTestCase {
             "Developer ID Application:",
             "Timestamp=",
             "flags=0x10000",
+            "TeamIdentifier=",
+            "@executable_path/../Frameworks",
             "codesign --verify --deep --strict",
             "spctl --assess",
             "xcrun stapler validate",
@@ -193,6 +195,68 @@ final class UpdateReleasePolicyTests: XCTestCase {
         )
     }
 
+    func testPublishableDecisionRunsAfterNotarizationAndStapling()
+        throws {
+        let packager = try repositoryText(
+            "Scripts/build_and_package.sh"
+        )
+        let notarizationAcceptedIndex = try XCTUnwrap(
+            packager.range(of: "NOTARIZATION_STATUS=\"accepted\"")
+        ).lowerBound
+        let staplerPassedIndex = try XCTUnwrap(
+            packager.range(of: "STAPLER=\"PASS\"")
+        ).lowerBound
+        let publishableIndex = try XCTUnwrap(
+            packager.range(of: "PUBLISHABLE=YES")
+        ).lowerBound
+
+        XCTAssertGreaterThan(publishableIndex, notarizationAcceptedIndex)
+        XCTAssertGreaterThan(publishableIndex, staplerPassedIndex)
+    }
+
+    func testPackagerRejectsAStandaloneAppWithoutSparkleRunpath()
+        throws {
+        let packager = try repositoryText(
+            "Scripts/build_and_package.sh"
+        )
+        let requiredChecks = [
+            "APP_EXECUTABLE=",
+            "otool -L \"$APP_EXECUTABLE\"",
+            "@rpath/Sparkle.framework/Versions/B/Sparkle",
+            "otool -l \"$APP_EXECUTABLE\"",
+            "@executable_path/../Frameworks"
+        ]
+
+        for check in requiredChecks {
+            XCTAssertTrue(
+                packager.contains(check),
+                "Missing standalone launch gate: \(check)"
+            )
+        }
+    }
+
+    func testAdHocPackageDoesNotEnableTeamBasedLibraryValidation()
+        throws {
+        let packager = try repositoryText(
+            "Scripts/build_and_package.sh"
+        )
+
+        XCTAssertTrue(packager.contains("RUNTIME_SIGN_FLAGS=()"))
+        XCTAssertTrue(
+            packager.contains("RUNTIME_SIGN_FLAGS=(-o runtime)")
+        )
+        XCTAssertTrue(
+            packager.contains(
+                "${RUNTIME_SIGN_FLAGS[@]+\"${RUNTIME_SIGN_FLAGS[@]}\"}"
+            )
+        )
+        XCTAssertTrue(
+            packager.contains(
+                "ad-hoc package unexpectedly enables hardened runtime"
+            )
+        )
+    }
+
     func testReleasePipelinePinsSparkle296Everywhere() throws {
         let projectYAML = try repositoryText("project.yml")
         let project = try repositoryText(
@@ -224,6 +288,68 @@ final class UpdateReleasePolicyTests: XCTestCase {
             distributionSHA,
             "52bf9e88cdd972fc0c81501377a880e90d47031bd8ca5462488f843e2609e192"
         )
+    }
+
+    func testStableReleaseIdentityIs120Build16() throws {
+        let projectYAML = try repositoryText("project.yml")
+        let project = try repositoryText(
+            "MeetingNotes.xcodeproj/project.pbxproj"
+        )
+        let packager = try repositoryText(
+            "Scripts/build_and_package.sh"
+        )
+        let baseSettings = try section(
+            in: projectYAML,
+            startingWith: "settings:\n  base:",
+            endingBefore: "packages:"
+        )
+
+        XCTAssertTrue(baseSettings.contains("CURRENT_PROJECT_VERSION: 16"))
+        XCTAssertTrue(baseSettings.contains("MARKETING_VERSION: 1.2.0"))
+        XCTAssertTrue(baseSettings.contains("MEETINGNOTES_DISPLAY_NAME: 会议记录"))
+        XCTAssertTrue(
+            projectYAML.contains(
+                "PRODUCT_BUNDLE_IDENTIFIER: com.shenminghao.MeetingNotes"
+            )
+        )
+        XCTAssertNotNil(
+            project.range(
+                of: #"/\* Release \*/ = \{isa = XCBuildConfiguration;[\s\S]*?CURRENT_PROJECT_VERSION = 16;[\s\S]*?MARKETING_VERSION = 1\.2\.0;[\s\S]*?MEETINGNOTES_DISPLAY_NAME = \"会议记录\";[\s\S]*?PRODUCT_BUNDLE_IDENTIFIER = com\.shenminghao\.MeetingNotes;"#,
+                options: .regularExpression
+            )
+        )
+        XCTAssertTrue(
+            packager.contains("EXPECTED_VERSION=\"1.2.0\"")
+        )
+        XCTAssertTrue(packager.contains("EXPECTED_BUILD=\"16\""))
+    }
+
+    func testPackagerExpandsAndVerifiesFinalSparkleEntitlements()
+        throws {
+        let packager = try repositoryText(
+            "Scripts/build_and_package.sh"
+        )
+        let requiredChecks = [
+            "EXPANDED_ENTITLEMENTS=",
+            "Configuration/MeetingNotes.entitlements",
+            ":com.apple.security.temporary-exception.mach-lookup.global-name:0",
+            "$EXPECTED_BUNDLE_ID-spks",
+            ":com.apple.security.temporary-exception.mach-lookup.global-name:1",
+            "$EXPECTED_BUNDLE_ID-spki",
+            ":com.apple.security.get-task-allow",
+            "--entitlements \"$EXPANDED_ENTITLEMENTS\"",
+            "get-task-allow entitlement must be absent",
+            "APPLE_DISTRIBUTABLE=NO",
+            "APPLE_DISTRIBUTABLE=YES",
+            "echo \"APPLE_DISTRIBUTABLE=$APPLE_DISTRIBUTABLE\""
+        ]
+
+        for check in requiredChecks {
+            XCTAssertTrue(
+                packager.contains(check),
+                "Missing processed-entitlement gate: \(check)"
+            )
+        }
     }
 
     private func repositoryText(_ path: String) throws -> String {

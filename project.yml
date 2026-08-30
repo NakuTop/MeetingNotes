@@ -9,10 +9,13 @@ options:
 settings:
   base:
     ARCHS: arm64
-    CURRENT_PROJECT_VERSION: 3
+    CURRENT_PROJECT_VERSION: 16
     EXCLUDED_ARCHS: x86_64
+    LD_RUNPATH_SEARCH_PATHS:
+      - "$(inherited)"
+      - "@executable_path/../Frameworks"
     MACOSX_DEPLOYMENT_TARGET: "15.0"
-    MARKETING_VERSION: 1.1.1
+    MARKETING_VERSION: 1.2.0
     MEETINGNOTES_DISPLAY_NAME: 会议记录
     SWIFT_STRICT_CONCURRENCY: complete
     SWIFT_VERSION: "6.0"
@@ -55,7 +58,7 @@ targets:
           PRODUCT_NAME: MeetingNotesBeta
           MEETINGNOTES_DISPLAY_NAME: 会议记录 Beta
           MARKETING_VERSION: 1.2.0
-          CURRENT_PROJECT_VERSION: 13
+          CURRENT_PROJECT_VERSION: 16
           MEETINGNOTES_UPDATE_CHANNEL: beta
           MEETINGNOTES_UPDATES_ENABLED: true
           SPARKLE_FEED_URL: https://nakutop.github.io/MeetingNotes/updates/beta/appcast.xml

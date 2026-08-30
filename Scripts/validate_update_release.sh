@@ -218,10 +218,24 @@ grep -Fq "Timestamp=" <<<"$SIGN_DETAILS" \
     || fail "secure Timestamp= missing"
 grep -Eq "flags=0x10000(\(runtime\))?" <<<"$SIGN_DETAILS" \
     || fail "hardened runtime flags=0x10000 missing"
+APP_TEAM_ID="$(sed -n 's/^TeamIdentifier=//p' <<<"$SIGN_DETAILS" \
+    | tail -1)"
+[[ -n "$APP_TEAM_ID" ]] && [[ "$APP_TEAM_ID" != "not set" ]] \
+    || fail "Developer ID TeamIdentifier= missing"
 
 EXECUTABLE="$APP/Contents/MacOS/$(plist_value CFBundleExecutable)"
 lipo -verify_arch arm64 "$EXECUTABLE" \
     || fail "main executable is not arm64"
+otool -L "$EXECUTABLE" \
+    | grep -Fq "@rpath/Sparkle.framework/Versions/B/Sparkle" \
+    || fail "Sparkle load command missing"
+otool -l "$EXECUTABLE" \
+    | awk '
+        $1 == "cmd" && $2 == "LC_RPATH" { inRPath = 1; next }
+        inRPath && $1 == "path" { print $2; inRPath = 0 }
+    ' \
+    | grep -Fxq "@executable_path/../Frameworks" \
+    || fail "embedded framework runpath missing"
 
 SPARKLE_ROOT="$APP/Contents/Frameworks/Sparkle.framework/Versions/Current"
 for helper in \
@@ -232,6 +246,11 @@ for helper in \
     "$SPARKLE_ROOT/XPCServices/Installer.xpc"; do
     [[ -e "$helper" ]] || fail "nested Sparkle helper missing"
     codesign --verify --strict --verbose=2 "$helper"
+    HELPER_SIGN_DETAILS="$(codesign -dvvv "$helper" 2>&1)"
+    HELPER_TEAM_ID="$(sed -n 's/^TeamIdentifier=//p' \
+        <<<"$HELPER_SIGN_DETAILS" | tail -1)"
+    assert_equal "nested Sparkle TeamIdentifier" \
+        "$HELPER_TEAM_ID" "$APP_TEAM_ID"
 done
 
 echo "=== Verify sandbox and Sparkle Mach lookup entitlements ==="

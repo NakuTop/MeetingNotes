@@ -173,6 +173,29 @@ final class SparkleUpdateConfigurationTests: XCTestCase {
         XCTAssertFalse(publicKey.contains("$("))
     }
 
+    func testEveryAppConfigurationEmbedsTheFrameworkRunpath() throws {
+        let root = repositoryRoot()
+        let project = try String(
+            contentsOf: root.appendingPathComponent(
+                "MeetingNotes.xcodeproj/project.pbxproj"
+            ),
+            encoding: .utf8
+        )
+        let projectYAML = try String(
+            contentsOf: root.appendingPathComponent("project.yml"),
+            encoding: .utf8
+        )
+        let setting =
+            "LD_RUNPATH_SEARCH_PATHS = \"$(inherited) "
+                + "@executable_path/../Frameworks\";"
+
+        XCTAssertEqual(project.components(separatedBy: setting).count - 1, 3)
+        XCTAssertTrue(projectYAML.contains("LD_RUNPATH_SEARCH_PATHS:"))
+        XCTAssertTrue(
+            projectYAML.contains("@executable_path/../Frameworks")
+        )
+    }
+
     private func updateInfo(
         channel: String,
         feed: String
