@@ -193,6 +193,39 @@ final class UpdateReleasePolicyTests: XCTestCase {
         )
     }
 
+    func testReleasePipelinePinsSparkle296Everywhere() throws {
+        let projectYAML = try repositoryText("project.yml")
+        let project = try repositoryText(
+            "MeetingNotes.xcodeproj/project.pbxproj"
+        )
+        let resolved = try repositoryText(
+            "MeetingNotes.xcodeproj/project.xcworkspace/xcshareddata/"
+                + "swiftpm/Package.resolved"
+        )
+        let workflow = try repositoryText(
+            ".github/workflows/publish-update.yml"
+        )
+
+        XCTAssertTrue(projectYAML.contains("exactVersion: 2.9.6"))
+        XCTAssertTrue(project.contains("version = 2.9.6;"))
+        XCTAssertNotNil(
+            resolved.range(
+                of: #"\"identity\" : \"sparkle\"[\s\S]*?\"version\" : \"2\.9\.6\""#,
+                options: .regularExpression
+            )
+        )
+        XCTAssertTrue(workflow.contains("SPARKLE_VERSION: 2.9.6"))
+
+        let distributionSHA = try firstCapture(
+            pattern: #"SPARKLE_DISTRIBUTION_SHA256: ([0-9a-f]{64})"#,
+            in: workflow
+        )
+        XCTAssertEqual(
+            distributionSHA,
+            "52bf9e88cdd972fc0c81501377a880e90d47031bd8ca5462488f843e2609e192"
+        )
+    }
+
     private func repositoryText(_ path: String) throws -> String {
         try String(
             contentsOf: repositoryRoot().appendingPathComponent(path),

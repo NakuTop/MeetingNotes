@@ -47,8 +47,8 @@ jobs:
       RELEASE_NOTES: ${{ inputs.release_notes }}
       RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
       SPARKLE_PUBLIC_ED_KEY: ASh1iXHfL1NE8h97OdgLsUzfy42OybuoywwCtRWXDRc=
-      SPARKLE_VERSION: 2.9.2
-      SPARKLE_DISTRIBUTION_SHA256: 1cb340cbbef04c6c0d162078610c25e2221031d794a3449d89f2f56f4df77c95
+      SPARKLE_VERSION: 2.9.6
+      SPARKLE_DISTRIBUTION_SHA256: 52bf9e88cdd972fc0c81501377a880e90d47031bd8ca5462488f843e2609e192
       GH_TOKEN: ${{ github.token }}
 
     steps:
