@@ -111,4 +111,3 @@ Validation includes:
 
 The public Release remains blocked if the existing private EdDSA key cannot be
 proved to match the public key embedded in build 16.
-
