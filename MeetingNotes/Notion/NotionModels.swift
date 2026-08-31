@@ -29,6 +29,11 @@ struct NotionChildBlockPage: Equatable, Sendable {
     let nextCursor: String?
 }
 
+struct NotionUploadedFile: Equatable, Sendable {
+    let id: String
+    let fileName: String
+}
+
 enum NotionPageSyncPhase: String, Codable, Equatable, Sendable {
     case appendingNew
     case rollingBackPartialNew
@@ -107,6 +112,11 @@ protocol NotionAPIClient: Sendable {
         to pageID: String
     ) async throws -> [String]
 
+    func uploadJPEG(
+        data: Data,
+        fileName: String
+    ) async throws -> NotionUploadedFile
+
     func archiveBlock(id: String) async throws
 
     func updatePageTitle(pageID: String, title: String) async throws
@@ -119,6 +129,15 @@ extension NotionAPIClient {
     ) async throws -> NotionChildBlockPage {
         _ = pageID
         _ = startCursor
+        throw NotionClientError.invalidResponse
+    }
+
+    func uploadJPEG(
+        data: Data,
+        fileName: String
+    ) async throws -> NotionUploadedFile {
+        _ = data
+        _ = fileName
         throw NotionClientError.invalidResponse
     }
 }

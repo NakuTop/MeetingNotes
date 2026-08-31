@@ -137,6 +137,156 @@ final class NotionClientTests: XCTestCase {
         )
     }
 
+    func testUploadsJPEGUsingSinglePartMultipartAndReturnsUploadID()
+        async throws {
+        let uploadID = "a3f9d3e2-1abc-42de-b904-badc0ffee000"
+        let jpeg = Data([0xFF, 0xD8, 0x01, 0x02, 0xFF, 0xD9])
+        let httpClient = QueuedNotionHTTPClient(responses: [
+            .json([
+                "object": "file_upload",
+                "id": uploadID,
+                "status": "pending"
+            ]),
+            .json([
+                "object": "file_upload",
+                "id": uploadID,
+                "status": "uploaded"
+            ])
+        ])
+        let client = NotionClient(token: "test-token", httpClient: httpClient)
+
+        let uploaded = try await client.uploadJPEG(
+            data: jpeg,
+            fileName: "meeting-screenshot.jpg"
+        )
+
+        XCTAssertEqual(uploaded.id, uploadID)
+        let requests = await httpClient.recordedRequests()
+        XCTAssertEqual(requests.count, 2)
+
+        let create = requests[0]
+        XCTAssertEqual(create.httpMethod, "POST")
+        XCTAssertEqual(
+            create.url?.absoluteString,
+            "https://api.notion.com/v1/file_uploads"
+        )
+        XCTAssertEqual(
+            create.value(forHTTPHeaderField: "Content-Type"),
+            "application/json"
+        )
+        let createBody = try Self.jsonBody(create)
+        XCTAssertEqual(createBody["mode"] as? String, "single_part")
+        XCTAssertEqual(
+            createBody["filename"] as? String,
+            "meeting-screenshot.jpg"
+        )
+        XCTAssertEqual(createBody["content_type"] as? String, "image/jpeg")
+
+        let send = requests[1]
+        XCTAssertEqual(send.httpMethod, "POST")
+        XCTAssertEqual(
+            send.url?.absoluteString,
+            "https://api.notion.com/v1/file_uploads/\(uploadID)/send"
+        )
+        let contentType = try XCTUnwrap(
+            send.value(forHTTPHeaderField: "Content-Type")
+        )
+        let prefix = "multipart/form-data; boundary="
+        XCTAssertTrue(contentType.hasPrefix(prefix))
+        let boundary = String(contentType.dropFirst(prefix.count))
+        XCTAssertFalse(boundary.isEmpty)
+        let body = try XCTUnwrap(send.httpBody)
+        let header = Data(
+            ("--\(boundary)\r\n"
+                + "Content-Disposition: form-data; name=\"file\"; "
+                + "filename=\"meeting-screenshot.jpg\"\r\n"
+                + "Content-Type: image/jpeg\r\n\r\n").utf8
+        )
+        let trailer = Data("\r\n--\(boundary)--\r\n".utf8)
+        XCTAssertTrue(body.starts(with: header))
+        XCTAssertEqual(body.suffix(trailer.count), trailer)
+        XCTAssertEqual(
+            body.dropFirst(header.count).dropLast(trailer.count),
+            jpeg[...]
+        )
+        for request in requests {
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer test-token"
+            )
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Notion-Version"),
+                NotionClient.apiVersion
+            )
+        }
+    }
+
+    func testUploadJPEGRejectsMalformedLifecycleResponses() async throws {
+        let invalidCreateClient = QueuedNotionHTTPClient(responses: [
+            .json([
+                "object": "file_upload",
+                "id": " \n ",
+                "status": "pending"
+            ])
+        ])
+        do {
+            _ = try await NotionClient(
+                token: "test-token",
+                httpClient: invalidCreateClient
+            ).uploadJPEG(data: Data([1]), fileName: "image.jpg")
+            XCTFail("Expected blank upload ID to be rejected")
+        } catch {
+            XCTAssertEqual(error as? NotionClientError, .invalidResponse)
+        }
+
+        let uploadID = "upload-id"
+        let invalidSendClient = QueuedNotionHTTPClient(responses: [
+            .json([
+                "object": "file_upload",
+                "id": uploadID,
+                "status": "pending"
+            ]),
+            .json([
+                "object": "file_upload",
+                "id": uploadID,
+                "status": "pending"
+            ])
+        ])
+        do {
+            _ = try await NotionClient(
+                token: "test-token",
+                httpClient: invalidSendClient
+            ).uploadJPEG(data: Data([1]), fileName: "image.jpg")
+            XCTFail("Expected a non-uploaded final status to be rejected")
+        } catch {
+            XCTAssertEqual(error as? NotionClientError, .invalidResponse)
+        }
+    }
+
+    func testUploadJPEGPropagatesCancellationDuringSend() async throws {
+        let httpClient = QueuedNotionHTTPClient(responses: [
+            .json([
+                "object": "file_upload",
+                "id": "upload-id",
+                "status": "pending"
+            ]),
+            .failure(CancellationError())
+        ])
+        let client = NotionClient(token: "test-token", httpClient: httpClient)
+
+        do {
+            _ = try await client.uploadJPEG(
+                data: Data([1, 2, 3]),
+                fileName: "image.jpg"
+            )
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected control-flow cancellation.
+        } catch {
+            XCTFail("Expected CancellationError, received \(error)")
+        }
+    }
+
     func testListsFirstChildBlockPageWithPageSize100() async throws {
         let httpClient = QueuedNotionHTTPClient(responses: [
             .json([

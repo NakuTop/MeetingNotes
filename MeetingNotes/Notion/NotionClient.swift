@@ -199,6 +199,84 @@ struct NotionClient: NotionAPIClient, Sendable {
         return blockIDs
     }
 
+    func uploadJPEG(
+        data: Data,
+        fileName: String
+    ) async throws -> NotionUploadedFile {
+        let canonicalFileName = fileName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !data.isEmpty,
+              Self.isSafeJPEGFileName(canonicalFileName) else {
+            throw NotionClientError.invalidRequest
+        }
+
+        var createRequest = request(
+            method: "POST",
+            path: ["file_uploads"],
+            timeout: 30
+        )
+        createRequest.setValue(
+            "application/json",
+            forHTTPHeaderField: "Content-Type"
+        )
+        do {
+            createRequest.httpBody = try encoder.encode(
+                CreateFileUploadRequest(
+                    mode: "single_part",
+                    filename: canonicalFileName,
+                    contentType: "image/jpeg"
+                )
+            )
+        } catch {
+            throw NotionClientError.invalidRequest
+        }
+
+        let created = try decodeFileUpload(
+            try await perform(createRequest)
+        )
+        let uploadID = created.id.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard created.object == "file_upload",
+              !uploadID.isEmpty,
+              created.status == "pending" else {
+            throw NotionClientError.invalidResponse
+        }
+
+        try Task.checkCancellation()
+        let boundary = "MeetingNotesBoundary-\(UUID().uuidString)"
+        var sendRequest = request(
+            method: "POST",
+            path: ["file_uploads", uploadID, "send"],
+            timeout: 60
+        )
+        sendRequest.setValue(
+            "multipart/form-data; boundary=\(boundary)",
+            forHTTPHeaderField: "Content-Type"
+        )
+        sendRequest.httpBody = Self.multipartJPEGBody(
+            data: data,
+            fileName: canonicalFileName,
+            boundary: boundary
+        )
+
+        let uploaded = try decodeFileUpload(
+            try await perform(sendRequest)
+        )
+        guard uploaded.object == "file_upload",
+              uploaded.id.trimmingCharacters(
+                  in: .whitespacesAndNewlines
+              ) == uploadID,
+              uploaded.status == "uploaded" else {
+            throw NotionClientError.invalidResponse
+        }
+        return NotionUploadedFile(
+            id: uploadID,
+            fileName: canonicalFileName
+        )
+    }
+
     func archiveBlock(id: String) async throws {
         let canonicalID = id.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !canonicalID.isEmpty else {
@@ -246,6 +324,39 @@ struct NotionClient: NotionAPIClient, Sendable {
 
     private static func serializedID(_ id: UUID) -> String {
         id.uuidString.lowercased()
+    }
+
+    private static func isSafeJPEGFileName(_ fileName: String) -> Bool {
+        guard !fileName.isEmpty,
+              fileName == URL(fileURLWithPath: fileName).lastPathComponent,
+              !fileName.contains("/"),
+              !fileName.contains("\\"),
+              !fileName.contains("\""),
+              !fileName.unicodeScalars.contains(where: {
+                  CharacterSet.controlCharacters.contains($0)
+              }) else {
+            return false
+        }
+        let extensionName = URL(fileURLWithPath: fileName)
+            .pathExtension.lowercased()
+        return extensionName == "jpg" || extensionName == "jpeg"
+    }
+
+    private static func multipartJPEGBody(
+        data: Data,
+        fileName: String,
+        boundary: String
+    ) -> Data {
+        var body = Data()
+        body.append(Data(
+            ("--\(boundary)\r\n"
+                + "Content-Disposition: form-data; name=\"file\"; "
+                + "filename=\"\(fileName)\"\r\n"
+                + "Content-Type: image/jpeg\r\n\r\n").utf8
+        ))
+        body.append(data)
+        body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+        return body
     }
 
     private func request(
@@ -301,6 +412,14 @@ struct NotionClient: NotionAPIClient, Sendable {
     private func decodePageResponse(_ data: Data) throws -> PageResponse {
         do {
             return try decoder.decode(PageResponse.self, from: data)
+        } catch {
+            throw NotionClientError.invalidResponse
+        }
+    }
+
+    private func decodeFileUpload(_ data: Data) throws -> FileUploadResponse {
+        do {
+            return try decoder.decode(FileUploadResponse.self, from: data)
         } catch {
             throw NotionClientError.invalidResponse
         }
@@ -387,6 +506,24 @@ private struct PlainRichText: Encodable {
 
 private struct AppendBlocksRequest: Encodable {
     let children: [NotionBlockDraft]
+}
+
+private struct CreateFileUploadRequest: Encodable {
+    let mode: String
+    let filename: String
+    let contentType: String
+
+    enum CodingKeys: String, CodingKey {
+        case mode
+        case filename
+        case contentType = "content_type"
+    }
+}
+
+private struct FileUploadResponse: Decodable {
+    let object: String
+    let id: String
+    let status: String
 }
 
 private struct AppendBlocksResponse: Decodable {

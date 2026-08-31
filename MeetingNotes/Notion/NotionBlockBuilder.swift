@@ -133,11 +133,52 @@ enum NotionBlockKind: String, Codable, Equatable, Sendable {
     case heading2 = "heading_2"
     case paragraph
     case bulletedListItem = "bulleted_list_item"
+    case image
 }
 
 struct NotionBlockDraft: Encodable, Equatable, Sendable {
-    let kind: NotionBlockKind
-    let text: String
+    private let content: Content
+
+    var kind: NotionBlockKind {
+        switch content {
+        case .text(let kind, _): kind
+        case .image: .image
+        }
+    }
+
+    var text: String {
+        switch content {
+        case .text(_, let text): text
+        case .image: ""
+        }
+    }
+
+    init(kind: NotionBlockKind, text: String) {
+        if kind == .image {
+            content = .image(fileUploadID: text)
+        } else {
+            content = .text(kind: kind, text: text)
+        }
+    }
+
+    static func image(fileUploadID: String) -> NotionBlockDraft {
+        NotionBlockDraft(
+            content: .image(
+                fileUploadID: fileUploadID.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+            )
+        )
+    }
+
+    private init(content: Content) {
+        self.content = content
+    }
+
+    private enum Content: Equatable, Sendable {
+        case text(kind: NotionBlockKind, text: String)
+        case image(fileUploadID: String)
+    }
 
     private enum CodingKeys: String, CodingKey {
         case object
@@ -145,21 +186,52 @@ struct NotionBlockDraft: Encodable, Equatable, Sendable {
         case heading2 = "heading_2"
         case paragraph
         case bulletedListItem = "bulleted_list_item"
+        case image
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode("block", forKey: .object)
         try container.encode(kind.rawValue, forKey: .type)
-        let payload = RichTextPayload(richText: [.plain(text)])
-        switch kind {
-        case .heading2:
-            try container.encode(payload, forKey: .heading2)
-        case .paragraph:
-            try container.encode(payload, forKey: .paragraph)
-        case .bulletedListItem:
-            try container.encode(payload, forKey: .bulletedListItem)
+        switch content {
+        case .text(let kind, let text):
+            let payload = RichTextPayload(richText: [.plain(text)])
+            switch kind {
+            case .heading2:
+                try container.encode(payload, forKey: .heading2)
+            case .paragraph:
+                try container.encode(payload, forKey: .paragraph)
+            case .bulletedListItem:
+                try container.encode(payload, forKey: .bulletedListItem)
+            case .image:
+                break
+            }
+        case .image(let fileUploadID):
+            try container.encode(
+                ImagePayload(
+                    caption: [],
+                    type: "file_upload",
+                    fileUpload: .init(id: fileUploadID)
+                ),
+                forKey: .image
+            )
         }
+    }
+}
+
+private struct ImagePayload: Encodable {
+    let caption: [NotionRichText]
+    let type: String
+    let fileUpload: FileUpload
+
+    private enum CodingKeys: String, CodingKey {
+        case caption
+        case type
+        case fileUpload = "file_upload"
+    }
+
+    struct FileUpload: Encodable {
+        let id: String
     }
 }
 

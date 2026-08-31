@@ -332,6 +332,33 @@ final class NotionBlockBuilderTests: XCTestCase {
         XCTAssertEqual(text["content"], "行动项")
     }
 
+    func testImageBlockEncodingReferencesOnlyNotionFileUploadID() throws {
+        let uploadID = "43833259-72ae-404e-8441-b6577f3159b4"
+        let block = NotionBlockDraft.image(fileUploadID: uploadID)
+
+        let data = try JSONEncoder().encode(block)
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+
+        XCTAssertEqual(block.kind, .image)
+        XCTAssertEqual(block.text, "")
+        XCTAssertEqual(json["object"] as? String, "block")
+        XCTAssertEqual(json["type"] as? String, "image")
+        let image = try XCTUnwrap(json["image"] as? [String: Any])
+        XCTAssertEqual(image["type"] as? String, "file_upload")
+        XCTAssertEqual((image["caption"] as? [Any])?.count, 0)
+        let fileUpload = try XCTUnwrap(
+            image["file_upload"] as? [String: String]
+        )
+        XCTAssertEqual(fileUpload, ["id": uploadID])
+        let encoded = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertFalse(encoded.contains("file://"))
+        XCTAssertFalse(encoded.contains("/Users/"))
+        XCTAssertFalse(encoded.contains("external"))
+        XCTAssertFalse(encoded.contains("url"))
+    }
+
     private func makeSummaryContent(
         overview: String = "确认了下一阶段路线图。",
         transcripts: [MeetingTranscriptInput] = [
