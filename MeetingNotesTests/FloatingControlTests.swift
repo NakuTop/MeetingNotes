@@ -226,6 +226,62 @@ final class FloatingControlTests: XCTestCase {
         XCTAssertEqual(controller.panel.frame.size, compactFrame.size)
     }
 
+    func testPanelSizePolicyAccountsForScreenshotFeedbackAndNoteEditor() {
+        XCTAssertEqual(
+            FloatingPanelSizePolicy.size(
+                noteEditorPresented: false,
+                screenshotFeedbackPresented: false
+            ),
+            FloatingPanelSizePolicy.compact
+        )
+        XCTAssertEqual(
+            FloatingPanelSizePolicy.size(
+                noteEditorPresented: true,
+                screenshotFeedbackPresented: false
+            ),
+            FloatingPanelSizePolicy.noteEditor
+        )
+        XCTAssertGreaterThan(
+            FloatingPanelSizePolicy.size(
+                noteEditorPresented: false,
+                screenshotFeedbackPresented: true
+            ).height,
+            FloatingPanelSizePolicy.compact.height
+        )
+        XCTAssertGreaterThan(
+            FloatingPanelSizePolicy.size(
+                noteEditorPresented: true,
+                screenshotFeedbackPresented: true
+            ).height,
+            FloatingPanelSizePolicy.noteEditor.height
+        )
+    }
+
+    @MainActor
+    func testPermissionFailureIsExposedAsNonblockingFloatingFeedback() async {
+        let meetingID = UUID()
+        let presentation = RecordingSessionPresentationStore()
+        await presentation.start(meetingID: meetingID, monotonicTime: 100)
+        let context = makeAnnotationContext(
+            presentation: presentation,
+            meetingID: meetingID,
+            screenshotCapture: FloatingFailingScreenshotCapture()
+        )
+        defer { context.remove() }
+
+        await context.viewModel.captureScreenshot()
+        let view = FloatingRecorderView(
+            isPaused: false,
+            recordingPresentationStore: presentation,
+            annotationViewModel: context.viewModel,
+            action: { _ in }
+        )
+
+        XCTAssertTrue(view.isScreenshotFeedbackPresented)
+        XCTAssertEqual(context.viewModel.screenshotState, .permissionRequired)
+        XCTAssertEqual(presentation.phase, .recording)
+    }
+
     func testPositionStoreRoundTripsPanelOrigin() {
         let suiteName = "FloatingPanelPositionTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -241,7 +297,9 @@ final class FloatingControlTests: XCTestCase {
     @MainActor
     private func makeAnnotationContext(
         presentation: RecordingSessionPresentationStore,
-        meetingID: UUID? = nil
+        meetingID: UUID? = nil,
+        screenshotCapture: any MeetingScreenshotCapturing =
+            FloatingScreenshotCaptureStub()
     ) -> FloatingAnnotationTestContext {
         let repository = try! MeetingRepository.inMemory()
         if let meetingID {
@@ -258,7 +316,7 @@ final class FloatingControlTests: XCTestCase {
         let viewModel = RecordingAnnotationViewModel(
             repository: repository,
             fileStore: MeetingFileStore(rootURL: root),
-            screenshotCapture: FloatingScreenshotCaptureStub(),
+            screenshotCapture: screenshotCapture,
             presentationStore: presentation,
             monotonicTime: { 104 }
         )
@@ -288,5 +346,12 @@ private struct FloatingScreenshotCaptureStub: MeetingScreenshotCapturing {
             pixelWidth: 100,
             pixelHeight: 100
         )
+    }
+}
+
+private struct FloatingFailingScreenshotCapture: MeetingScreenshotCapturing {
+    func captureDisplayUnderMouse() async throws
+        -> MeetingScreenshotCaptureResult {
+        throw MeetingScreenshotCaptureError.screenRecordingDenied
     }
 }

@@ -88,6 +88,74 @@ final class RecordingAnnotationViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.screenshotState, .saved)
     }
 
+    func testScreenshotSavedFeedbackReturnsToIdleAfterDelay() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 1)
+        )
+        let presentation = RecordingSessionPresentationStore()
+        await presentation.start(meetingID: meetingID, monotonicTime: 10)
+        let feedbackDelay = RecordingAnnotationScreenshotFeedbackDelay()
+        let context = makeFileStoreContext()
+        defer { context.remove() }
+        let viewModel = RecordingAnnotationViewModel(
+            repository: repository,
+            fileStore: context.store,
+            screenshotCapture: ImmediateMeetingScreenshotCapture(),
+            presentationStore: presentation,
+            screenshotFeedbackDelay: { duration in
+                try await feedbackDelay.suspend(for: duration)
+            },
+            monotonicTime: { 12 }
+        )
+
+        await viewModel.captureScreenshot()
+        await feedbackDelay.waitUntilEntered()
+
+        XCTAssertEqual(viewModel.screenshotState, .saved)
+
+        feedbackDelay.release()
+        await feedbackDelay.waitUntilCompleted()
+
+        XCTAssertEqual(viewModel.screenshotState, .idle)
+    }
+
+    func testOldSavedFeedbackCannotClearNewPermissionFailure() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 1)
+        )
+        let presentation = RecordingSessionPresentationStore()
+        await presentation.start(meetingID: meetingID, monotonicTime: 10)
+        let feedbackDelay = RecordingAnnotationScreenshotFeedbackDelay()
+        let capture = SequencedMeetingScreenshotCapture()
+        let context = makeFileStoreContext()
+        defer { context.remove() }
+        let viewModel = RecordingAnnotationViewModel(
+            repository: repository,
+            fileStore: context.store,
+            screenshotCapture: capture,
+            presentationStore: presentation,
+            screenshotFeedbackDelay: { duration in
+                try await feedbackDelay.suspend(for: duration)
+            },
+            monotonicTime: { 12 }
+        )
+
+        await viewModel.captureScreenshot()
+        await feedbackDelay.waitUntilEntered()
+        await viewModel.captureScreenshot()
+
+        XCTAssertEqual(viewModel.screenshotState, .permissionRequired)
+
+        feedbackDelay.release()
+        await feedbackDelay.waitUntilCompleted()
+
+        XCTAssertEqual(viewModel.screenshotState, .permissionRequired)
+    }
+
     func testLateScreenshotFromOldMeetingCannotAttachToNewMeeting() async throws {
         let repository = try MeetingRepository.inMemory()
         let oldMeetingID = try repository.createMeeting(
@@ -214,6 +282,38 @@ final class RecordingAnnotationViewModelTests: XCTestCase {
         XCTAssertTrue(try repository.screenshots(meetingID: meetingID).isEmpty)
     }
 
+    func testScreenshotFailureCanBeDismissedWithoutStoppingMeeting() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 1)
+        )
+        let presentation = RecordingSessionPresentationStore()
+        await presentation.start(meetingID: meetingID, monotonicTime: 10)
+        let context = makeFileStoreContext()
+        defer { context.remove() }
+        let viewModel = RecordingAnnotationViewModel(
+            repository: repository,
+            fileStore: context.store,
+            screenshotCapture: FailingMeetingScreenshotCapture(
+                error: .captureFailed
+            ),
+            presentationStore: presentation,
+            monotonicTime: { 15 }
+        )
+
+        await viewModel.captureScreenshot()
+        guard case .failed = viewModel.screenshotState else {
+            return XCTFail("Expected screenshot failure feedback")
+        }
+
+        viewModel.dismissScreenshotFeedback()
+
+        XCTAssertEqual(viewModel.screenshotState, .idle)
+        XCTAssertEqual(presentation.meetingID, meetingID)
+        XCTAssertEqual(presentation.phase, .recording)
+    }
+
     private func makeFileStoreContext() -> RecordingAnnotationFileStoreContext {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(
             "RecordingAnnotationViewModelTests-\(UUID().uuidString)",
@@ -297,6 +397,23 @@ private struct FailingMeetingScreenshotCapture: MeetingScreenshotCapturing {
     }
 }
 
+private actor SequencedMeetingScreenshotCapture: MeetingScreenshotCapturing {
+    private var callCount = 0
+
+    func captureDisplayUnderMouse() async throws
+        -> MeetingScreenshotCaptureResult {
+        defer { callCount += 1 }
+        if callCount == 0 {
+            return MeetingScreenshotCaptureResult(
+                pngData: Data([0x89, 0x50, 0x4E, 0x47]),
+                pixelWidth: 1280,
+                pixelHeight: 720
+            )
+        }
+        throw MeetingScreenshotCaptureError.screenRecordingDenied
+    }
+}
+
 @MainActor
 private final class RecordingAnnotationPersistenceFailure {
     var shouldFail = false
@@ -375,6 +492,48 @@ private final class RecordingAnnotationCompletionCounter {
         guard count < target else { return }
         await withCheckedContinuation { continuation in
             waiters.append((target, continuation))
+        }
+    }
+}
+
+@MainActor
+private final class RecordingAnnotationScreenshotFeedbackDelay {
+    private var continuation: CheckedContinuation<Void, any Error>?
+    private var entered = false
+    private var completed = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var completionWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func suspend(for _: Duration) async throws {
+        entered = true
+        enteredWaiters.forEach { $0.resume() }
+        enteredWaiters.removeAll()
+        defer {
+            completed = true
+            completionWaiters.forEach { $0.resume() }
+            completionWaiters.removeAll()
+        }
+        try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { continuation in
+            enteredWaiters.append(continuation)
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func waitUntilCompleted() async {
+        guard !completed else { return }
+        await withCheckedContinuation { continuation in
+            completionWaiters.append(continuation)
         }
     }
 }

@@ -9,6 +9,7 @@ struct FloatingRecorderView: View {
     let annotationViewModel: RecordingAnnotationViewModel
     let action: (FloatingControl) -> Void
     let noteEditorPresentationChanged: (Bool) -> Void
+    let screenshotFeedbackPresentationChanged: (Bool) -> Void
     let controls = FloatingControl.allCases
 
     init(
@@ -16,13 +17,17 @@ struct FloatingRecorderView: View {
         recordingPresentationStore: RecordingSessionPresentationStore,
         annotationViewModel: RecordingAnnotationViewModel,
         action: @escaping (FloatingControl) -> Void,
-        noteEditorPresentationChanged: @escaping (Bool) -> Void = { _ in }
+        noteEditorPresentationChanged: @escaping (Bool) -> Void = { _ in },
+        screenshotFeedbackPresentationChanged:
+            @escaping (Bool) -> Void = { _ in }
     ) {
         self.isPaused = isPaused
         self.recordingPresentationStore = recordingPresentationStore
         self.annotationViewModel = annotationViewModel
         self.action = action
         self.noteEditorPresentationChanged = noteEditorPresentationChanged
+        self.screenshotFeedbackPresentationChanged =
+            screenshotFeedbackPresentationChanged
     }
 
     var body: some View {
@@ -38,6 +43,16 @@ struct FloatingRecorderView: View {
                             noteEditor
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 8)
+                                .glassEffect(
+                                    .regular,
+                                    in: RoundedRectangle(cornerRadius: 15)
+                                )
+                        }
+
+                        if isScreenshotFeedbackPresented {
+                            screenshotFeedback
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
                                 .glassEffect(
                                     .regular,
                                     in: RoundedRectangle(cornerRadius: 15)
@@ -71,6 +86,23 @@ struct FloatingRecorderView: View {
                                     )
                             }
                     }
+
+                    if isScreenshotFeedbackPresented {
+                        screenshotFeedback
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(
+                                .ultraThinMaterial,
+                                in: RoundedRectangle(cornerRadius: 15)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 15)
+                                    .stroke(
+                                        .white.opacity(0.16),
+                                        lineWidth: 0.5
+                                    )
+                            }
+                    }
                 }
             }
         }
@@ -84,8 +116,16 @@ struct FloatingRecorderView: View {
             noteEditorPresentationChanged(isPresented)
             isNoteFieldFocused = isPresented
         }
+        .onChange(of: annotationViewModel.screenshotState) { _, _ in
+            screenshotFeedbackPresentationChanged(
+                isScreenshotFeedbackPresented
+            )
+        }
         .onAppear {
             isNoteFieldFocused = annotationViewModel.isNoteEditorPresented
+            screenshotFeedbackPresentationChanged(
+                isScreenshotFeedbackPresented
+            )
         }
     }
 
@@ -150,6 +190,56 @@ struct FloatingRecorderView: View {
             noteSaveIndicator
         }
         .frame(height: 24)
+    }
+
+    var isScreenshotFeedbackPresented: Bool {
+        switch annotationViewModel.screenshotState {
+        case .permissionRequired, .failed:
+            true
+        case .idle, .capturing, .saved:
+            false
+        }
+    }
+
+    @ViewBuilder
+    private var screenshotFeedback: some View {
+        HStack(spacing: 8) {
+            switch annotationViewModel.screenshotState {
+            case .permissionRequired:
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("需要屏幕录制权限才能保存截图")
+                    .font(.caption)
+                    .lineLimit(2)
+                Spacer(minLength: 4)
+                Button("打开设置") {
+                    try? PrivacySettingsOpener().open(.screenRecording)
+                }
+                .controlSize(.small)
+                .accessibilityIdentifier("floating.screenshot.openSettings")
+            case let .failed(message):
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundStyle(.orange)
+                Text(message)
+                    .font(.caption)
+                    .lineLimit(2)
+                Spacer(minLength: 4)
+            case .idle, .capturing, .saved:
+                EmptyView()
+            }
+
+            Button {
+                annotationViewModel.dismissScreenshotFeedback()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("关闭截图提示")
+            .accessibilityIdentifier("floating.screenshot.dismissFeedback")
+        }
+        .frame(minHeight: 24)
+        .accessibilityIdentifier("floating.screenshot.feedback")
     }
 
     @ViewBuilder

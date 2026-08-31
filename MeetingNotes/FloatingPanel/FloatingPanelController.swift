@@ -4,16 +4,33 @@ import SwiftUI
 struct FloatingPanelSizePolicy: Equatable, Sendable {
     static let compact = NSSize(width: 374, height: 54)
     static let noteEditor = NSSize(width: 374, height: 100)
+    static let screenshotFeedback = NSSize(width: 374, height: 98)
+    static let noteEditorAndScreenshotFeedback = NSSize(
+        width: 374,
+        height: 144
+    )
 
-    static func size(noteEditorPresented: Bool) -> NSSize {
-        noteEditorPresented ? noteEditor : compact
+    static func size(
+        noteEditorPresented: Bool,
+        screenshotFeedbackPresented: Bool
+    ) -> NSSize {
+        switch (noteEditorPresented, screenshotFeedbackPresented) {
+        case (false, false): compact
+        case (true, false): noteEditor
+        case (false, true): screenshotFeedback
+        case (true, true): noteEditorAndScreenshotFeedback
+        }
     }
 
     static func frame(
         from currentFrame: NSRect,
-        noteEditorPresented: Bool
+        noteEditorPresented: Bool,
+        screenshotFeedbackPresented: Bool
     ) -> NSRect {
-        let nextSize = size(noteEditorPresented: noteEditorPresented)
+        let nextSize = size(
+            noteEditorPresented: noteEditorPresented,
+            screenshotFeedbackPresented: screenshotFeedbackPresented
+        )
         return NSRect(
             x: currentFrame.midX - nextSize.width / 2,
             y: currentFrame.minY,
@@ -67,6 +84,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private let annotationViewModel: RecordingAnnotationViewModel
     private var hostingView: NSHostingView<FloatingRecorderView>!
     private var isPaused = false
+    private var isNoteEditorPresented = false
+    private var isScreenshotFeedbackPresented = false
     private var visibilityGeneration = 0
 
     init(
@@ -109,6 +128,11 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         setNoteEditorPresented(
             annotationViewModel.isNoteEditorPresented
         )
+        setScreenshotFeedbackPresented(
+            Self.showsScreenshotFeedback(
+                for: annotationViewModel.screenshotState
+            )
+        )
         visibilityGeneration += 1
         let generation = visibilityGeneration
         let shouldAnimate = shouldAnimateVisibility
@@ -145,9 +169,20 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     func setNoteEditorPresented(_ isPresented: Bool) {
+        isNoteEditorPresented = isPresented
+        updatePanelSize()
+    }
+
+    func setScreenshotFeedbackPresented(_ isPresented: Bool) {
+        isScreenshotFeedbackPresented = isPresented
+        updatePanelSize()
+    }
+
+    private func updatePanelSize() {
         let nextFrame = FloatingPanelSizePolicy.frame(
             from: panel.frame,
-            noteEditorPresented: isPresented
+            noteEditorPresented: isNoteEditorPresented,
+            screenshotFeedbackPresented: isScreenshotFeedbackPresented
         )
         guard panel.frame != nextFrame else { return }
         panel.setFrame(nextFrame, display: panel.isVisible)
@@ -177,8 +212,23 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             action: action,
             noteEditorPresentationChanged: { [weak self] isPresented in
                 self?.setNoteEditorPresented(isPresented)
+            },
+            screenshotFeedbackPresentationChanged: {
+                [weak self] isPresented in
+                self?.setScreenshotFeedbackPresented(isPresented)
             }
         )
+    }
+
+    private static func showsScreenshotFeedback(
+        for state: ScreenshotCaptureState
+    ) -> Bool {
+        switch state {
+        case .permissionRequired, .failed:
+            true
+        case .idle, .capturing, .saved:
+            false
+        }
     }
 
     private func restorePosition() {

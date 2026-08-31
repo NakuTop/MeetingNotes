@@ -15,6 +15,8 @@ final class RecordingAnnotationViewModel {
     typealias MonotonicTime = @MainActor @Sendable () -> TimeInterval
     typealias IDGenerator = @MainActor @Sendable () -> UUID
     typealias Now = @MainActor @Sendable () -> Date
+    typealias ScreenshotFeedbackDelay =
+        @MainActor @Sendable (Duration) async throws -> Void
 
     private struct SessionSnapshot: Equatable {
         let meetingID: UUID
@@ -41,10 +43,13 @@ final class RecordingAnnotationViewModel {
     private let monotonicTime: MonotonicTime
     private let idGenerator: IDGenerator
     private let now: Now
+    private let screenshotFeedbackDelay: ScreenshotFeedbackDelay
 
     private var observedActiveMeetingID: UUID?
     private var sessionGeneration = UUID()
     private var noteContext: NoteContext?
+    private var screenshotFeedbackToken = UUID()
+    private var screenshotFeedbackTask: Task<Void, Never>?
 
     private(set) var isNoteEditorPresented = false
     private(set) var noteDraft = ""
@@ -65,6 +70,10 @@ final class RecordingAnnotationViewModel {
         },
         onNoteDelayedTaskCompletion:
             @escaping MeetingNoteAutosaver.DelayedTaskCompletion = {},
+        screenshotFeedbackDelay:
+            @escaping ScreenshotFeedbackDelay = { duration in
+                try await Task.sleep(for: duration)
+            },
         monotonicTime: @escaping MonotonicTime = {
             ProcessInfo.processInfo.systemUptime
         },
@@ -79,6 +88,7 @@ final class RecordingAnnotationViewModel {
             delay: noteDelay,
             onDelayedTaskCompletion: onNoteDelayedTaskCompletion
         )
+        self.screenshotFeedbackDelay = screenshotFeedbackDelay
         self.monotonicTime = monotonicTime
         self.idGenerator = idGenerator
         self.now = now
@@ -167,6 +177,7 @@ final class RecordingAnnotationViewModel {
               let snapshot = currentSessionSnapshot() else {
             return
         }
+        cancelScreenshotFeedbackReset()
         let screenshotID = idGenerator()
         let createdAt = now()
         screenshotState = .capturing
@@ -216,12 +227,23 @@ final class RecordingAnnotationViewModel {
             )
             guard isCurrent(snapshot) else { return }
             screenshotState = .saved
+            scheduleScreenshotFeedbackReset(for: snapshot)
         } catch {
             await removeScreenshotFile(
                 meetingID: snapshot.meetingID,
                 relativePath: relativePath
             )
             updateScreenshotFailure(error, for: snapshot)
+        }
+    }
+
+    func dismissScreenshotFeedback() {
+        switch screenshotState {
+        case .permissionRequired, .failed, .saved:
+            cancelScreenshotFeedbackReset()
+            screenshotState = .idle
+        case .idle, .capturing:
+            break
         }
     }
 
@@ -262,6 +284,7 @@ final class RecordingAnnotationViewModel {
         noteContext = nil
         noteDraft = ""
         isNoteEditorPresented = false
+        cancelScreenshotFeedbackReset()
         screenshotState = .idle
     }
 
@@ -281,6 +304,7 @@ final class RecordingAnnotationViewModel {
         for snapshot: SessionSnapshot
     ) {
         guard isCurrent(snapshot) else { return }
+        cancelScreenshotFeedbackReset()
         if error is CancellationError {
             screenshotState = .idle
         } else if error as? MeetingScreenshotCaptureError
@@ -291,6 +315,36 @@ final class RecordingAnnotationViewModel {
                 message: Self.screenshotFailureMessage
             )
         }
+    }
+
+    private func scheduleScreenshotFeedbackReset(
+        for snapshot: SessionSnapshot
+    ) {
+        cancelScreenshotFeedbackReset()
+        let token = UUID()
+        screenshotFeedbackToken = token
+        let delay = screenshotFeedbackDelay
+        screenshotFeedbackTask = Task { @MainActor [weak self] in
+            do {
+                try await delay(.seconds(2))
+            } catch {
+                return
+            }
+            guard let self,
+                  self.screenshotFeedbackToken == token,
+                  self.isCurrent(snapshot),
+                  self.screenshotState == .saved else {
+                return
+            }
+            self.screenshotState = .idle
+            self.screenshotFeedbackTask = nil
+        }
+    }
+
+    private func cancelScreenshotFeedbackReset() {
+        screenshotFeedbackToken = UUID()
+        screenshotFeedbackTask?.cancel()
+        screenshotFeedbackTask = nil
     }
 
     private func removeScreenshotFile(
