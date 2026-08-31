@@ -438,6 +438,52 @@ final class UpdateReleasePolicyTests: XCTestCase {
         XCTAssertTrue(packager.contains("EXPECTED_BUILD=\"16\""))
     }
 
+    func testBetaReleaseIdentityIs130Build17() throws {
+        let projectYAML = try repositoryText("project.yml")
+        let project = try repositoryText(
+            "MeetingNotes.xcodeproj/project.pbxproj"
+        )
+        let packager = try repositoryText(
+            "Scripts/build_and_package.sh"
+        )
+        let betaYAML = try section(
+            in: projectYAML,
+            startingWith: "        Beta:\n",
+            endingBefore: "    entitlements:"
+        )
+        let betaPackager = try section(
+            in: packager,
+            startingWith: "if [[ \"$CONFIGURATION\" == \"Beta\" ]]; then",
+            endingBefore: "else\n    EXPECTED_BUNDLE_ID="
+        )
+        let stablePackager = try section(
+            in: packager,
+            startingWith: "else\n    EXPECTED_BUNDLE_ID=",
+            endingBefore: "fi\n\nfail_metadata"
+        )
+
+        XCTAssertTrue(betaYAML.contains("MARKETING_VERSION: 1.3.0"))
+        XCTAssertTrue(betaYAML.contains("CURRENT_PROJECT_VERSION: 17"))
+        XCTAssertTrue(
+            betaYAML.contains(
+                "PRODUCT_BUNDLE_IDENTIFIER: com.shenminghao.MeetingNotes.beta"
+            )
+        )
+        XCTAssertTrue(
+            betaYAML.contains("MEETINGNOTES_DISPLAY_NAME: 会议记录 Beta")
+        )
+        XCTAssertNotNil(
+            project.range(
+                of: #"/\* Beta \*/ = \{isa = XCBuildConfiguration;[\s\S]*?CURRENT_PROJECT_VERSION = 17;[\s\S]*?MARKETING_VERSION = 1\.3\.0;[\s\S]*?MEETINGNOTES_DISPLAY_NAME = "会议记录 Beta";[\s\S]*?PRODUCT_BUNDLE_IDENTIFIER = com\.shenminghao\.MeetingNotes\.beta;"#,
+                options: .regularExpression
+            )
+        )
+        XCTAssertTrue(betaPackager.contains("EXPECTED_VERSION=\"1.3.0\""))
+        XCTAssertTrue(betaPackager.contains("EXPECTED_BUILD=\"17\""))
+        XCTAssertTrue(stablePackager.contains("EXPECTED_VERSION=\"1.2.0\""))
+        XCTAssertTrue(stablePackager.contains("EXPECTED_BUILD=\"16\""))
+    }
+
     func testPackagerExpandsAndVerifiesFinalSparkleEntitlements()
         throws {
         let packager = try repositoryText(

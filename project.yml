@@ -57,8 +57,8 @@ targets:
           PRODUCT_BUNDLE_IDENTIFIER: com.shenminghao.MeetingNotes.beta
           PRODUCT_NAME: MeetingNotesBeta
           MEETINGNOTES_DISPLAY_NAME: 会议记录 Beta
-          MARKETING_VERSION: 1.2.0
-          CURRENT_PROJECT_VERSION: 16
+          MARKETING_VERSION: 1.3.0
+          CURRENT_PROJECT_VERSION: 17
           MEETINGNOTES_UPDATE_CHANNEL: beta
           MEETINGNOTES_UPDATES_ENABLED: true
           SPARKLE_FEED_URL: https://nakutop.github.io/MeetingNotes/updates/beta/appcast.xml
