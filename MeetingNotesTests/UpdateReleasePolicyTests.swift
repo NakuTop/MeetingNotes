@@ -106,6 +106,120 @@ final class UpdateReleasePolicyTests: XCTestCase {
         }
     }
 
+    func testPublishingWorkflowOffersAnIsolatedCommunityUnsignedMode()
+        throws {
+        let workflow = try repositoryText(
+            ".github/workflows/publish-update.yml"
+        )
+        let inputs = try section(
+            in: workflow,
+            startingWith: "on:",
+            endingBefore: "permissions:"
+        )
+
+        XCTAssertTrue(inputs.contains("distribution_mode:"))
+        XCTAssertTrue(inputs.contains("- developer-id"))
+        XCTAssertTrue(inputs.contains("- community-unsigned"))
+        XCTAssertTrue(
+            workflow.contains(
+                "REQUESTED_DISTRIBUTION_MODE: ${{ inputs.distribution_mode }}"
+            )
+        )
+        XCTAssertTrue(
+            workflow.contains(
+                "PUBLISH UNSIGNED stable $REQUESTED_VERSION ($REQUESTED_BUILD)"
+            )
+        )
+        XCTAssertTrue(
+            workflow.contains(
+                "community-unsigned only supports the stable channel"
+            )
+        )
+    }
+
+    func testDeveloperIDSecretsAndCredentialsAreConditionallyIsolated()
+        throws {
+        let workflow = try repositoryText(
+            ".github/workflows/publish-update.yml"
+        )
+        let sparkleSecrets = try section(
+            in: workflow,
+            startingWith: "      - name: Require Sparkle signing secret",
+            endingBefore: "      - name: Require Developer ID release secrets"
+        )
+        let developerSecrets = try section(
+            in: workflow,
+            startingWith: "      - name: Require Developer ID release secrets",
+            endingBefore: "      - name: Refuse an existing release"
+        )
+        let developerCredentials = try section(
+            in: workflow,
+            startingWith: "      - name: Prepare temporary Developer ID and notary credentials",
+            endingBefore: "      - name: Build selected distribution"
+        )
+        let developerCondition =
+            "if: inputs.distribution_mode == 'developer-id'"
+
+        XCTAssertTrue(
+            sparkleSecrets.contains("require_secret SPARKLE_ED_PRIVATE_KEY")
+        )
+        XCTAssertFalse(sparkleSecrets.contains("DEVELOPER_ID_P12_BASE64"))
+        XCTAssertTrue(developerSecrets.contains(developerCondition))
+        XCTAssertTrue(developerCredentials.contains(developerCondition))
+    }
+
+    func testCommunityUnsignedReleaseIsUniqueWarnedAndAlwaysPrerelease()
+        throws {
+        let workflow = try repositoryText(
+            ".github/workflows/publish-update.yml"
+        )
+
+        XCTAssertTrue(
+            workflow.contains(
+                "RELEASE_TAG=v${REQUESTED_VERSION}-unsigned-build${REQUESTED_BUILD}"
+            )
+        )
+        XCTAssertTrue(
+            workflow.contains(
+                "ARTIFACT_NAME=MeetingNotes-${REQUESTED_VERSION}-build${REQUESTED_BUILD}-unsigned.dmg"
+            )
+        )
+        XCTAssertTrue(workflow.contains("PRERELEASE=true"))
+        XCTAssertTrue(
+            workflow.contains(
+                "社区免费分发版本，使用临时签名，未经 Apple Developer ID 签名或公证"
+            )
+        )
+    }
+
+    func testSelectedDistributionUsesOnlyItsDedicatedValidator() throws {
+        let workflow = try repositoryText(
+            ".github/workflows/publish-update.yml"
+        )
+        let validation = try section(
+            in: workflow,
+            startingWith: "      - name: Validate release artifact",
+            endingBefore: "      - name: Retain validated artifact for audit"
+        )
+
+        XCTAssertTrue(
+            validation.contains(
+                "if [[ \"$REQUESTED_DISTRIBUTION_MODE\" == \"developer-id\" ]]"
+            )
+        )
+        XCTAssertTrue(
+            validation.contains("./Scripts/validate_update_release.sh")
+        )
+        XCTAssertTrue(
+            validation.contains(
+                "./Scripts/validate_unsigned_update_release.sh"
+            )
+        )
+        XCTAssertTrue(
+            validation.contains("SPARKLE_UPDATE_PUBLISHABLE=YES")
+        )
+    }
+
     func testValidationFinishesBeforeReleaseOrFeedMutation() throws {
         let workflow = try repositoryText(
             ".github/workflows/publish-update.yml"

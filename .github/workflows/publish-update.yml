@@ -1,8 +1,15 @@
-name: Publish signed in-app update
+name: Publish in-app update
 
 on:
   workflow_dispatch:
     inputs:
+      distribution_mode:
+        description: Apple distribution mode
+        required: true
+        type: choice
+        options:
+          - developer-id
+          - community-unsigned
       channel:
         description: Update channel to publish
         required: true
@@ -23,7 +30,7 @@ on:
         required: true
         type: string
       confirmation:
-        description: Type PUBLISH beta|stable VERSION (BUILD)
+        description: Type the exact confirmation required for the selected mode
         required: true
         type: string
 
@@ -41,6 +48,7 @@ jobs:
     timeout-minutes: 90
     environment: release
     env:
+      REQUESTED_DISTRIBUTION_MODE: ${{ inputs.distribution_mode }}
       REQUESTED_CHANNEL: ${{ inputs.channel }}
       REQUESTED_VERSION: ${{ inputs.version }}
       REQUESTED_BUILD: ${{ inputs.build }}
@@ -60,7 +68,24 @@ jobs:
           set -euo pipefail
           [[ "$REQUESTED_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]
           [[ "$REQUESTED_BUILD" =~ ^[0-9]+$ ]]
-          expected_confirmation="PUBLISH $REQUESTED_CHANNEL $REQUESTED_VERSION ($REQUESTED_BUILD)"
+
+          case "$REQUESTED_DISTRIBUTION_MODE" in
+            developer-id)
+              expected_confirmation="PUBLISH $REQUESTED_CHANNEL $REQUESTED_VERSION ($REQUESTED_BUILD)"
+              ;;
+            community-unsigned)
+              [[ "$REQUESTED_CHANNEL" == "stable" ]] || {
+                echo "community-unsigned only supports the stable channel." >&2
+                exit 1
+              }
+              expected_confirmation="PUBLISH UNSIGNED stable $REQUESTED_VERSION ($REQUESTED_BUILD)"
+              ;;
+            *)
+              echo "Unsupported distribution mode." >&2
+              exit 1
+              ;;
+          esac
+
           [[ "$RELEASE_CONFIRMATION" == "$expected_confirmation" ]] || {
             echo "Release confirmation text does not match." >&2
             exit 1
@@ -81,9 +106,15 @@ jobs:
               echo "EXPECTED_BUNDLE_ID=com.shenminghao.MeetingNotes" >> "$GITHUB_ENV"
               echo "EXPECTED_FEED_URL=https://nakutop.github.io/MeetingNotes/updates/stable/appcast.xml" >> "$GITHUB_ENV"
               echo "FEED_PATH=updates/stable/appcast.xml" >> "$GITHUB_ENV"
-              echo "PRERELEASE=false" >> "$GITHUB_ENV"
-              echo "RELEASE_TAG=v${REQUESTED_VERSION}" >> "$GITHUB_ENV"
-              echo "ARTIFACT_NAME=MeetingNotes.dmg" >> "$GITHUB_ENV"
+              if [[ "$REQUESTED_DISTRIBUTION_MODE" == "community-unsigned" ]]; then
+                echo "PRERELEASE=true" >> "$GITHUB_ENV"
+                echo "RELEASE_TAG=v${REQUESTED_VERSION}-unsigned-build${REQUESTED_BUILD}" >> "$GITHUB_ENV"
+                echo "ARTIFACT_NAME=MeetingNotes-${REQUESTED_VERSION}-build${REQUESTED_BUILD}-unsigned.dmg" >> "$GITHUB_ENV"
+              else
+                echo "PRERELEASE=false" >> "$GITHUB_ENV"
+                echo "RELEASE_TAG=v${REQUESTED_VERSION}" >> "$GITHUB_ENV"
+                echo "ARTIFACT_NAME=MeetingNotes.dmg" >> "$GITHUB_ENV"
+              fi
               ;;
             *)
               echo "Unsupported release channel." >&2
@@ -91,7 +122,22 @@ jobs:
               ;;
           esac
 
-      - name: Require protected release secrets
+      - name: Require Sparkle signing secret
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          require_secret() {
+            local name="$1"
+            [[ -n "${!name:-}" ]] || {
+              echo "Missing protected release secret: $name" >&2
+              exit 1
+            }
+          }
+          require_secret SPARKLE_ED_PRIVATE_KEY
+
+      - name: Require Developer ID release secrets
+        if: inputs.distribution_mode == 'developer-id'
         env:
           DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
           DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
@@ -99,7 +145,6 @@ jobs:
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
           APPLE_NOTARY_PRIVATE_KEY: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY }}
-          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           require_secret() {
@@ -115,7 +160,6 @@ jobs:
           require_secret APPLE_NOTARY_KEY_ID
           require_secret APPLE_NOTARY_ISSUER_ID
           require_secret APPLE_NOTARY_PRIVATE_KEY
-          require_secret SPARKLE_ED_PRIVATE_KEY
 
       - name: Refuse an existing release or missing Pages branch
         run: |
@@ -130,6 +174,7 @@ jobs:
           }
 
       - name: Prepare temporary Developer ID and notary credentials
+        if: inputs.distribution_mode == 'developer-id'
         env:
           DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
           DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
@@ -185,13 +230,24 @@ jobs:
           echo "DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM_SECRET" >> "$GITHUB_ENV"
           echo "NOTARY_KEYCHAIN_PROFILE=$notary_profile" >> "$GITHUB_ENV"
 
-      - name: Build, sign, notarize, and staple
+      - name: Build selected distribution
         run: |
           set -euo pipefail
           package_log="$RUNNER_TEMP/meetingnotes-package.log"
           ./Scripts/build_and_package.sh "$CONFIGURATION" | tee "$package_log"
           grep -Fxq "PACKAGE_VALIDATION=PASS" "$package_log"
-          grep -Fxq "PUBLISHABLE=YES" "$package_log"
+
+          if [[ "$REQUESTED_DISTRIBUTION_MODE" == "developer-id" ]]; then
+            grep -Fxq "PUBLISHABLE=YES" "$package_log"
+            grep -Fxq "APPLE_DISTRIBUTABLE=YES" "$package_log"
+          else
+            grep -Fxq "PUBLISHABLE=NO" "$package_log"
+            grep -Fxq "APPLE_DISTRIBUTABLE=NO" "$package_log"
+            [[ -f "$GITHUB_WORKSPACE/MeetingNotes.dmg" ]]
+            mv "$GITHUB_WORKSPACE/MeetingNotes.dmg" \
+              "$GITHUB_WORKSPACE/$ARTIFACT_NAME"
+          fi
+
           [[ -f "$GITHUB_WORKSPACE/$ARTIFACT_NAME" ]]
           echo "ARTIFACT=$GITHUB_WORKSPACE/$ARTIFACT_NAME" >> "$GITHUB_ENV"
 
@@ -274,21 +330,34 @@ jobs:
       - name: Validate release artifact
         run: |
           set -euo pipefail
-          ./Scripts/validate_update_release.sh \
-            --configuration "$CONFIGURATION" \
-            --artifact "$ARTIFACT" \
-            --appcast "$APPCAST_PATH" \
-            --expected-version "$REQUESTED_VERSION" \
-            --expected-build "$REQUESTED_BUILD" \
-            --expected-bundle-id "$EXPECTED_BUNDLE_ID" \
-            --expected-feed-url "$EXPECTED_FEED_URL" \
-            --expected-public-key "$SPARKLE_PUBLIC_ED_KEY" \
+          validation_log="$RUNNER_TEMP/meetingnotes-release-validation.log"
+          validator_args=(
+            --configuration "$CONFIGURATION"
+            --artifact "$ARTIFACT"
+            --appcast "$APPCAST_PATH"
+            --expected-version "$REQUESTED_VERSION"
+            --expected-build "$REQUESTED_BUILD"
+            --expected-bundle-id "$EXPECTED_BUNDLE_ID"
+            --expected-feed-url "$EXPECTED_FEED_URL"
+            --expected-public-key "$SPARKLE_PUBLIC_ED_KEY"
             --expected-download-url "$EXPECTED_DOWNLOAD_URL"
+          )
+
+          if [[ "$REQUESTED_DISTRIBUTION_MODE" == "developer-id" ]]; then
+            ./Scripts/validate_update_release.sh \
+              "${validator_args[@]}" | tee "$validation_log"
+            grep -Fxq "PUBLISHABLE=YES" "$validation_log"
+          else
+            ./Scripts/validate_unsigned_update_release.sh \
+              "${validator_args[@]}" | tee "$validation_log"
+            grep -Fxq "APPLE_DISTRIBUTABLE=NO" "$validation_log"
+            grep -Fxq "SPARKLE_UPDATE_PUBLISHABLE=YES" "$validation_log"
+          fi
 
       - name: Retain validated artifact for audit
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: meetingnotes-${{ inputs.channel }}-${{ inputs.version }}-${{ inputs.build }}
+          name: meetingnotes-${{ inputs.distribution_mode }}-${{ inputs.channel }}-${{ inputs.version }}-${{ inputs.build }}
           path: |
             ${{ env.ARTIFACT }}
             ${{ env.APPCAST_PATH }}
@@ -299,7 +368,15 @@ jobs:
         run: |
           set -euo pipefail
           notes_file="$RUNNER_TEMP/release-notes.md"
-          printf '%s\n' "$RELEASE_NOTES" > "$notes_file"
+          if [[ "$REQUESTED_DISTRIBUTION_MODE" == "community-unsigned" ]]; then
+            printf '%s\n\n' \
+              '> [!WARNING]' \
+              '> 社区免费分发版本，使用临时签名，未经 Apple Developer ID 签名或公证。首次安装需在 macOS 中手动允许；请仅从 NakuTop/MeetingNotes 官方 GitHub 页面下载。' \
+              > "$notes_file"
+          else
+            : > "$notes_file"
+          fi
+          printf '%s\n' "$RELEASE_NOTES" >> "$notes_file"
           release_args=(
             --target "$GITHUB_SHA"
             --title "MeetingNotes $REQUESTED_VERSION ($REQUESTED_BUILD)"
