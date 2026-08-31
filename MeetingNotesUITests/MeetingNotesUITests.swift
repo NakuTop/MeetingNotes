@@ -40,13 +40,18 @@ final class MeetingDocumentsUITests: XCTestCase {
         XCTAssertTrue(detailed.exists)
         XCTAssertTrue(generate.exists)
         XCTAssertEqual(generate.label, "重新生成重点总结")
-        XCTAssertTrue(app.staticTexts["UI 双模式重点总结"].exists)
+        let summaryOverview = app.descendants(matching: .any)[
+            "meeting.summary.overview"
+        ].firstMatch
+        let detailedOverview = app.descendants(matching: .any)[
+            "meeting.minutes.overview"
+        ].firstMatch
+        XCTAssertTrue(summaryOverview.waitForExistence(timeout: 2))
+        XCTAssertEqual(accessibleText(of: summaryOverview), "UI 双模式重点总结")
 
         detailed.click()
-        XCTAssertTrue(
-            app.staticTexts["UI 双模式完整纪要"]
-                .waitForExistence(timeout: 2)
-        )
+        XCTAssertTrue(detailedOverview.waitForExistence(timeout: 2))
+        XCTAssertEqual(accessibleText(of: detailedOverview), "UI 双模式完整纪要")
         XCTAssertEqual(generate.label, "重新生成完整纪要")
 
         mode.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5))
@@ -56,10 +61,8 @@ final class MeetingDocumentsUITests: XCTestCase {
                     withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)
                 )
             )
-        XCTAssertTrue(
-            app.staticTexts["UI 双模式重点总结"]
-                .waitForExistence(timeout: 2)
-        )
+        XCTAssertTrue(summaryOverview.waitForExistence(timeout: 2))
+        XCTAssertEqual(accessibleText(of: summaryOverview), "UI 双模式重点总结")
         XCTAssertEqual(generate.label, "重新生成重点总结")
 
         mode.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5))
@@ -69,14 +72,19 @@ final class MeetingDocumentsUITests: XCTestCase {
                     withNormalizedOffset: CGVector(dx: 0.8, dy: 0.5)
                 )
             )
-        XCTAssertTrue(
-            app.staticTexts["UI 双模式完整纪要"]
-                .waitForExistence(timeout: 2)
-        )
+        XCTAssertTrue(detailedOverview.waitForExistence(timeout: 2))
+        XCTAssertEqual(accessibleText(of: detailedOverview), "UI 双模式完整纪要")
         XCTAssertEqual(generate.label, "重新生成完整纪要")
 
         XCTAssertFalse(app.staticTexts["两者"].exists)
         XCTAssertFalse(app.buttons["meeting.summarizeArchive"].exists)
         XCTAssertFalse(app.buttons["选择归档内容"].exists)
+    }
+
+    private func accessibleText(of element: XCUIElement) -> String {
+        if let value = element.value as? String, !value.isEmpty {
+            return value
+        }
+        return element.label
     }
 }

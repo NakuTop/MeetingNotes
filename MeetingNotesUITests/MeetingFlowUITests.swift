@@ -149,7 +149,7 @@ final class MeetingFlowUITests: XCTestCase {
         XCTAssertTrue(partialHistoryRow.waitForExistence(timeout: 5))
         XCTAssertTrue(
             waitForLabelContaining(
-                "部分内容已归档到 Notion",
+                "尚未同步到 Notion",
                 on: partialHistoryRow
             )
         )
