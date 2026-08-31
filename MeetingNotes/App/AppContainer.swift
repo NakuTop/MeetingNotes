@@ -42,6 +42,7 @@ final class AppContainer {
     let onboardingState: OnboardingState
     let transcriptionModelViewModel: TranscriptionModelViewModel
     let recordingPresentationStore: RecordingSessionPresentationStore
+    let recordingAnnotationViewModel: RecordingAnnotationViewModel
     let updateCoordinator: UpdateCoordinator
 
     private let controlRouter: MeetingControlRouter
@@ -153,9 +154,16 @@ final class AppContainer {
         let recordingPresentationStore =
             RecordingSessionPresentationStore()
         self.recordingPresentationStore = recordingPresentationStore
+        let recordingAnnotationViewModel = RecordingAnnotationViewModel(
+            repository: repository,
+            fileStore: fileStore,
+            presentationStore: recordingPresentationStore
+        )
+        self.recordingAnnotationViewModel = recordingAnnotationViewModel
 
         let panelController = FloatingPanelController(
-            recordingPresentationStore: recordingPresentationStore
+            recordingPresentationStore: recordingPresentationStore,
+            annotationViewModel: recordingAnnotationViewModel
         ) { [weak controlRouter] control in
             controlRouter?.handle(control)
         }
@@ -341,7 +349,8 @@ final class AppContainer {
         controlRouter.connect(
             coordinator: coordinator,
             panelController: panelController,
-            libraryViewModel: libraryViewModel
+            libraryViewModel: libraryViewModel,
+            annotationViewModel: recordingAnnotationViewModel
         )
     }
 
@@ -438,19 +447,27 @@ private final class MeetingControlRouter:
     private var coordinator: MeetingCoordinator?
     private weak var panelController: FloatingPanelController?
     private weak var libraryViewModel: MeetingLibraryViewModel?
+    private weak var annotationViewModel: RecordingAnnotationViewModel?
 
     func connect(
         coordinator: MeetingCoordinator,
         panelController: FloatingPanelController,
-        libraryViewModel: MeetingLibraryViewModel
+        libraryViewModel: MeetingLibraryViewModel,
+        annotationViewModel: RecordingAnnotationViewModel
     ) {
         self.coordinator = coordinator
         self.panelController = panelController
         self.libraryViewModel = libraryViewModel
+        self.annotationViewModel = annotationViewModel
     }
 
     func handle(_ control: FloatingControl) {
         guard let coordinator else { return }
+
+        if control == .note {
+            annotationViewModel?.beginNote()
+            return
+        }
 
         Task { [weak self] in
             do {
@@ -464,6 +481,7 @@ private final class MeetingControlRouter:
                         snapshot.state == .paused
                     )
                 case .stop:
+                    await self?.annotationViewModel?.submitNote()
                     let meetingID = await coordinator.snapshot().meetingID
                     try await coordinator.stop()
                     self?.libraryViewModel?.load()
@@ -471,6 +489,10 @@ private final class MeetingControlRouter:
                 case .bookmark:
                     try await coordinator.bookmark()
                     self?.libraryViewModel?.load()
+                case .note:
+                    return
+                case .screenshot:
+                    await self?.annotationViewModel?.captureScreenshot()
                 }
             } catch {
                 self?.libraryViewModel?.reportControlFailure(error)

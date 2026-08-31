@@ -2,28 +2,76 @@ import SwiftUI
 
 struct FloatingRecorderView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @FocusState private var isNoteFieldFocused: Bool
 
     let isPaused: Bool
     let recordingPresentationStore: RecordingSessionPresentationStore
+    let annotationViewModel: RecordingAnnotationViewModel
     let action: (FloatingControl) -> Void
+    let noteEditorPresentationChanged: (Bool) -> Void
     let controls = FloatingControl.allCases
+
+    init(
+        isPaused: Bool,
+        recordingPresentationStore: RecordingSessionPresentationStore,
+        annotationViewModel: RecordingAnnotationViewModel,
+        action: @escaping (FloatingControl) -> Void,
+        noteEditorPresentationChanged: @escaping (Bool) -> Void = { _ in }
+    ) {
+        self.isPaused = isPaused
+        self.recordingPresentationStore = recordingPresentationStore
+        self.annotationViewModel = annotationViewModel
+        self.action = action
+        self.noteEditorPresentationChanged = noteEditorPresentationChanged
+    }
 
     var body: some View {
         Group {
             if #available(macOS 26.0, *) {
                 GlassEffectContainer(spacing: 8) {
-                    controlsRow(liquidGlass: true)
-                        .padding(8)
-                        .glassEffect(.regular, in: Capsule())
+                    VStack(spacing: 6) {
+                        controlsRow(liquidGlass: true)
+                            .padding(8)
+                            .glassEffect(.regular, in: Capsule())
+
+                        if annotationViewModel.isNoteEditorPresented {
+                            noteEditor
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
+                                .glassEffect(
+                                    .regular,
+                                    in: RoundedRectangle(cornerRadius: 15)
+                                )
+                        }
+                    }
                 }
             } else {
-                controlsRow(liquidGlass: false)
-                    .padding(8)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay {
-                        Capsule()
-                            .stroke(.white.opacity(0.16), lineWidth: 0.5)
+                VStack(spacing: 6) {
+                    controlsRow(liquidGlass: false)
+                        .padding(8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay {
+                            Capsule()
+                                .stroke(.white.opacity(0.16), lineWidth: 0.5)
+                        }
+
+                    if annotationViewModel.isNoteEditorPresented {
+                        noteEditor
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(
+                                .ultraThinMaterial,
+                                in: RoundedRectangle(cornerRadius: 15)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 15)
+                                    .stroke(
+                                        .white.opacity(0.16),
+                                        lineWidth: 0.5
+                                    )
+                            }
                     }
+                }
             }
         }
         .padding(1)
@@ -31,6 +79,14 @@ struct FloatingRecorderView: View {
             AppVisualPolicy.motion(reduceMotion: reduceMotion).animation,
             value: isPaused
         )
+        .onChange(of: annotationViewModel.isNoteEditorPresented) {
+            _, isPresented in
+            noteEditorPresentationChanged(isPresented)
+            isNoteFieldFocused = isPresented
+        }
+        .onAppear {
+            isNoteFieldFocused = annotationViewModel.isNoteEditorPresented
+        }
     }
 
     private func controlsRow(liquidGlass: Bool) -> some View {
@@ -69,6 +125,62 @@ struct FloatingRecorderView: View {
                 "\(statusAccessibilityLabel) \(elapsedText(at: ProcessInfo.processInfo.systemUptime))"
             )
             .accessibilityIdentifier("floating.elapsed")
+        }
+    }
+
+    private var noteEditor: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "square.and.pencil")
+                .foregroundStyle(.blue)
+
+            TextField(
+                "输入笔记，按 Return 完成",
+                text: Binding(
+                    get: { annotationViewModel.noteDraft },
+                    set: { annotationViewModel.updateNoteDraft($0) }
+                )
+            )
+            .textFieldStyle(.plain)
+            .focused($isNoteFieldFocused)
+            .onSubmit {
+                Task { await submitNote() }
+            }
+            .accessibilityIdentifier("floating.noteField")
+
+            noteSaveIndicator
+        }
+        .frame(height: 24)
+    }
+
+    @ViewBuilder
+    private var noteSaveIndicator: some View {
+        switch annotationViewModel.noteSaveState {
+        case .idle:
+            EmptyView()
+        case .saving:
+            ProgressView()
+                .controlSize(.mini)
+                .accessibilityLabel("正在保存笔记")
+        case .saved:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .accessibilityLabel("笔记已保存")
+        case .failed:
+            Button {
+                Task { await annotationViewModel.retryNoteSave() }
+            } label: {
+                Image(systemName: "arrow.clockwise.circle.fill")
+                    .foregroundStyle(.orange)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("重试保存笔记")
+        }
+    }
+
+    func submitNote() async {
+        await annotationViewModel.submitNote()
+        if !annotationViewModel.isNoteEditorPresented {
+            isNoteFieldFocused = false
         }
     }
 
@@ -115,6 +227,7 @@ struct FloatingRecorderView: View {
         liquidGlass: Bool
     ) -> some View {
         let presentation = control.presentation(isPaused: isPaused)
+        let isEnabled = isControlEnabled(control)
         let button = Button {
             action(control)
         } label: {
@@ -128,7 +241,7 @@ struct FloatingRecorderView: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(foregroundStyle(for: control))
-        .disabled(control == .record)
+        .disabled(!isEnabled)
         .opacity(control == .record && isPaused ? 0.45 : 1)
         .accessibilityLabel(Text(presentation.accessibilityLabel))
         .accessibilityIdentifier("floating.\(control.rawValue)")
@@ -137,7 +250,7 @@ struct FloatingRecorderView: View {
             button.glassEffect(
                 Glass.regular
                     .tint(foregroundStyle(for: control).opacity(0.18))
-                    .interactive(control != .record),
+                    .interactive(isEnabled),
                 in: Circle()
             )
         } else {
@@ -148,6 +261,13 @@ struct FloatingRecorderView: View {
         }
     }
 
+    func isControlEnabled(_ control: FloatingControl) -> Bool {
+        control.isEnabled(
+            isScreenshotCapturing:
+                annotationViewModel.screenshotState == .capturing
+        )
+    }
+
     private func foregroundStyle(for control: FloatingControl) -> Color {
         switch control {
         case .record, .stop:
@@ -156,6 +276,12 @@ struct FloatingRecorderView: View {
             isPaused ? .green : .orange
         case .bookmark:
             .blue
+        case .note:
+            .indigo
+        case .screenshot:
+            annotationViewModel.screenshotState == .saved
+                ? .green
+                : .cyan
         }
     }
 }

@@ -10,6 +10,8 @@ enum FloatingControl: String, CaseIterable, Identifiable, Sendable {
     case pause
     case stop
     case bookmark
+    case note
+    case screenshot
 
     var id: Self { self }
 
@@ -35,6 +37,27 @@ enum FloatingControl: String, CaseIterable, Identifiable, Sendable {
                 symbolName: "bookmark.fill",
                 accessibilityLabel: "书签"
             )
+        case .note:
+            FloatingControlPresentation(
+                symbolName: "square.and.pencil",
+                accessibilityLabel: "添加笔记"
+            )
+        case .screenshot:
+            FloatingControlPresentation(
+                symbolName: "camera.viewfinder",
+                accessibilityLabel: "截图"
+            )
+        }
+    }
+
+    func isEnabled(isScreenshotCapturing: Bool) -> Bool {
+        switch self {
+        case .record:
+            false
+        case .screenshot:
+            !isScreenshotCapturing
+        case .pause, .stop, .bookmark, .note:
+            true
         }
     }
 }

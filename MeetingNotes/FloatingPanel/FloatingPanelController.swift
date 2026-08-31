@@ -1,6 +1,28 @@
 import AppKit
 import SwiftUI
 
+struct FloatingPanelSizePolicy: Equatable, Sendable {
+    static let compact = NSSize(width: 374, height: 54)
+    static let noteEditor = NSSize(width: 374, height: 100)
+
+    static func size(noteEditorPresented: Bool) -> NSSize {
+        noteEditorPresented ? noteEditor : compact
+    }
+
+    static func frame(
+        from currentFrame: NSRect,
+        noteEditorPresented: Bool
+    ) -> NSRect {
+        let nextSize = size(noteEditorPresented: noteEditorPresented)
+        return NSRect(
+            x: currentFrame.midX - nextSize.width / 2,
+            y: currentFrame.minY,
+            width: nextSize.width,
+            height: nextSize.height
+        )
+    }
+}
+
 struct FloatingPanelPositionStore {
     private enum Key {
         static let hasPosition = "floatingPanel.hasPosition"
@@ -42,7 +64,8 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     private let reduceMotion: () -> Bool
     private let recordingPresentationStore:
         RecordingSessionPresentationStore
-    private let hostingView: NSHostingView<FloatingRecorderView>
+    private let annotationViewModel: RecordingAnnotationViewModel
+    private var hostingView: NSHostingView<FloatingRecorderView>!
     private var isPaused = false
     private var visibilityGeneration = 0
 
@@ -53,6 +76,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
             NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         },
         recordingPresentationStore: RecordingSessionPresentationStore,
+        annotationViewModel: RecordingAnnotationViewModel,
         action: @escaping (FloatingControl) -> Void
     ) {
         positionStore = FloatingPanelPositionStore(defaults: defaults)
@@ -60,15 +84,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         self.animationDuration = animationDuration
         self.reduceMotion = reduceMotion
         self.recordingPresentationStore = recordingPresentationStore
-        hostingView = NSHostingView(
-            rootView: FloatingRecorderView(
-                isPaused: false,
-                recordingPresentationStore: recordingPresentationStore,
-                action: action
-            )
-        )
+        self.annotationViewModel = annotationViewModel
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 282, height: 54),
+            contentRect: NSRect(
+                origin: .zero,
+                size: FloatingPanelSizePolicy.compact
+            ),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -76,6 +97,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
 
         super.init()
 
+        hostingView = NSHostingView(rootView: makeRootView())
         configurePanel()
         restorePosition()
         panel.delegate = self
@@ -83,6 +105,10 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     }
 
     func show() {
+        annotationViewModel.refreshForCurrentSession()
+        setNoteEditorPresented(
+            annotationViewModel.isNoteEditorPresented
+        )
         visibilityGeneration += 1
         let generation = visibilityGeneration
         let shouldAnimate = shouldAnimateVisibility
@@ -115,11 +141,16 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     func setPaused(_ isPaused: Bool) {
         guard self.isPaused != isPaused else { return }
         self.isPaused = isPaused
-        hostingView.rootView = FloatingRecorderView(
-            isPaused: isPaused,
-            recordingPresentationStore: recordingPresentationStore,
-            action: action
+        hostingView.rootView = makeRootView()
+    }
+
+    func setNoteEditorPresented(_ isPresented: Bool) {
+        let nextFrame = FloatingPanelSizePolicy.frame(
+            from: panel.frame,
+            noteEditorPresented: isPresented
         )
+        guard panel.frame != nextFrame else { return }
+        panel.setFrame(nextFrame, display: panel.isVisible)
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -136,6 +167,18 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.becomesKeyOnlyIfNeeded = true
         panel.animationBehavior = .none
+    }
+
+    private func makeRootView() -> FloatingRecorderView {
+        FloatingRecorderView(
+            isPaused: isPaused,
+            recordingPresentationStore: recordingPresentationStore,
+            annotationViewModel: annotationViewModel,
+            action: action,
+            noteEditorPresentationChanged: { [weak self] isPresented in
+                self?.setNoteEditorPresented(isPresented)
+            }
+        )
     }
 
     private func restorePosition() {
