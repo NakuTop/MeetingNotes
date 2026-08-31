@@ -248,6 +248,227 @@ final class MeetingFileStoreTests: XCTestCase {
         )
     }
 
+    func testSaveScreenshotWritesAtomicallyUnderMeetingDirectory() async throws {
+        let root = try makeTemporaryRoot()
+        let store = MeetingFileStore(rootURL: root)
+        let meetingID = UUID()
+        let screenshotID = UUID()
+        let pngData = Data([0x89, 0x50, 0x4E, 0x47, 0x01, 0x02])
+
+        let relativePath = try await store.saveScreenshotPNG(
+            pngData,
+            meetingID: meetingID,
+            screenshotID: screenshotID
+        )
+
+        XCTAssertEqual(
+            relativePath,
+            "\(meetingID.uuidString)/screenshots/\(screenshotID.uuidString).png"
+        )
+        let destination = root.appendingPathComponent(relativePath)
+        XCTAssertEqual(try Data(contentsOf: destination), pngData)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(
+                atPath: destination.deletingLastPathComponent().path
+            ),
+            ["\(screenshotID.uuidString).png"]
+        )
+    }
+
+    func testResolveScreenshotRejectsTraversalAndSymlinks() async throws {
+        let root = try makeTemporaryRoot()
+        let outside = try makeTemporaryRoot()
+        let store = MeetingFileStore(rootURL: root)
+        let meetingID = UUID()
+        let screenshotID = UUID()
+        let relativePath = try await store.saveScreenshotPNG(
+            Data([1, 2, 3]),
+            meetingID: meetingID,
+            screenshotID: screenshotID
+        )
+
+        let resolved = try await store.resolveScreenshotURL(
+            meetingID: meetingID,
+            relativePath: relativePath
+        )
+        XCTAssertEqual(resolved, root.appendingPathComponent(relativePath))
+
+        let traversal = "\(meetingID.uuidString)/screenshots/../outside.png"
+        await XCTAssertThrowsErrorAsync(
+            try await store.resolveScreenshotURL(
+                meetingID: meetingID,
+                relativePath: traversal
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? MeetingFileStoreError,
+                .invalidRelativePath(traversal)
+            )
+        }
+
+        let outsideFile = outside.appendingPathComponent("outside.png")
+        try Data([9, 9, 9]).write(to: outsideFile)
+        let symlinkName = "\(UUID().uuidString).png"
+        let symlinkRelativePath =
+            "\(meetingID.uuidString)/screenshots/\(symlinkName)"
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent(symlinkRelativePath),
+            withDestinationURL: outsideFile
+        )
+
+        await XCTAssertThrowsErrorAsync(
+            try await store.resolveScreenshotURL(
+                meetingID: meetingID,
+                relativePath: symlinkRelativePath
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? MeetingFileStoreError,
+                .invalidRelativePath(symlinkRelativePath)
+            )
+        }
+
+        let linkedMeetingID = UUID()
+        let linkedMeetingDirectory = root.appendingPathComponent(
+            linkedMeetingID.uuidString,
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: linkedMeetingDirectory,
+            withIntermediateDirectories: false
+        )
+        let linkedScreenshotsDirectory = linkedMeetingDirectory
+            .appendingPathComponent("screenshots")
+        try FileManager.default.createSymbolicLink(
+            at: linkedScreenshotsDirectory,
+            withDestinationURL: outside
+        )
+        let linkedFileName = "\(UUID().uuidString).png"
+        try Data([8, 8, 8]).write(
+            to: outside.appendingPathComponent(linkedFileName)
+        )
+        let linkedRelativePath =
+            "\(linkedMeetingID.uuidString)/screenshots/\(linkedFileName)"
+
+        await XCTAssertThrowsErrorAsync(
+            try await store.resolveScreenshotURL(
+                meetingID: linkedMeetingID,
+                relativePath: linkedRelativePath
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? MeetingFileStoreError,
+                .invalidRelativePath(
+                    "\(linkedMeetingID.uuidString)/screenshots"
+                )
+            )
+        }
+    }
+
+    func testFailedScreenshotWriteLeavesNoDestination() async throws {
+        let root = try makeTemporaryRoot()
+        let store = MeetingFileStore(rootURL: root)
+        let meetingID = UUID()
+        let screenshotID = UUID()
+        let meetingDirectory = try await store.prepareMeetingDirectory(
+            for: meetingID
+        )
+        let screenshotsBlocker = meetingDirectory.appendingPathComponent(
+            "screenshots"
+        )
+        try Data("not-a-directory".utf8).write(to: screenshotsBlocker)
+
+        await XCTAssertThrowsErrorAsync(
+            try await store.saveScreenshotPNG(
+                Data([1, 2, 3]),
+                meetingID: meetingID,
+                screenshotID: screenshotID
+            )
+        )
+
+        let destination = screenshotsBlocker.appendingPathComponent(
+            "\(screenshotID.uuidString).png"
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(
+                atPath: meetingDirectory.path
+            ),
+            ["screenshots"]
+        )
+    }
+
+    func testStagedScreenshotDeletionCanRollbackOrCommit() async throws {
+        let root = try makeTemporaryRoot()
+        let store = MeetingFileStore(rootURL: root)
+        let meetingID = UUID()
+        let screenshotID = UUID()
+        let data = Data([4, 5, 6])
+        let relativePath = try await store.saveScreenshotPNG(
+            data,
+            meetingID: meetingID,
+            screenshotID: screenshotID
+        )
+        let originalURL = root.appendingPathComponent(relativePath)
+
+        let stagedForRollback = try await store.stageScreenshotDeletion(
+            meetingID: meetingID,
+            relativePath: relativePath
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: originalURL.path))
+
+        try await store.rollbackScreenshotDeletion(stagedForRollback)
+        XCTAssertEqual(try Data(contentsOf: originalURL), data)
+
+        let stagedForCommit = try await store.stageScreenshotDeletion(
+            meetingID: meetingID,
+            relativePath: relativePath
+        )
+        try await store.commitScreenshotDeletion(stagedForCommit)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: originalURL.path))
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(
+                atPath: originalURL.deletingLastPathComponent().path
+            ),
+            []
+        )
+    }
+
+    func testStagedScreenshotDeletionRejectsReplacedFile() async throws {
+        let root = try makeTemporaryRoot()
+        let store = MeetingFileStore(rootURL: root)
+        let meetingID = UUID()
+        let relativePath = try await store.saveScreenshotPNG(
+            Data([1, 2, 3]),
+            meetingID: meetingID,
+            screenshotID: UUID()
+        )
+        let staged = try await store.stageScreenshotDeletion(
+            meetingID: meetingID,
+            relativePath: relativePath
+        )
+        let stagedURL = root.appendingPathComponent(staged.stagedRelativePath)
+        try FileManager.default.removeItem(at: stagedURL)
+        try Data([9, 9, 9]).write(to: stagedURL)
+
+        await XCTAssertThrowsErrorAsync(
+            try await store.commitScreenshotDeletion(staged)
+        ) { error in
+            XCTAssertEqual(
+                error as? MeetingFileStoreError,
+                .screenshotIdentityChanged
+            )
+        }
+
+        XCTAssertEqual(try Data(contentsOf: stagedURL), Data([9, 9, 9]))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: root.appendingPathComponent(relativePath).path
+            )
+        )
+    }
+
     private func makeTemporaryRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("MeetingFileStoreTests-\(UUID().uuidString)")
