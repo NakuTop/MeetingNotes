@@ -53,6 +53,15 @@ final class MeetingRecord {
     @Relationship(deleteRule: .cascade, inverse: \BookmarkRecord.meeting)
     var bookmarks: [BookmarkRecord] = []
 
+    @Relationship(deleteRule: .cascade, inverse: \MeetingNoteRecord.meeting)
+    var notes: [MeetingNoteRecord] = []
+
+    @Relationship(
+        deleteRule: .cascade,
+        inverse: \MeetingScreenshotRecord.meeting
+    )
+    var screenshots: [MeetingScreenshotRecord] = []
+
     @Relationship(deleteRule: .cascade, inverse: \SummaryRecord.meeting)
     var summary: SummaryRecord?
 

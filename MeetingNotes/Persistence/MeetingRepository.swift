@@ -31,6 +31,12 @@ enum TranscriptCorrectionRepositoryError: Error, Equatable, Sendable {
     case correctionNotFound(UUID)
 }
 
+enum MeetingTimelineRepositoryError: Error, Equatable, Sendable {
+    case noteNotFound(UUID)
+    case screenshotNotFound(UUID)
+    case invalidScreenshotPath
+}
+
 @MainActor
 final class MeetingRepository {
     private let container: ModelContainer
@@ -46,6 +52,8 @@ final class MeetingRepository {
             TranscriptCorrectionRecord.self,
             SpeakerNameRecord.self,
             BookmarkRecord.self,
+            MeetingNoteRecord.self,
+            MeetingScreenshotRecord.self,
             SummaryRecord.self,
             DetailedMinutesRecord.self,
             ArchiveCheckpointRecord.self
@@ -1268,6 +1276,175 @@ final class MeetingRepository {
             meeting.bookmarks.removeAll { $0 === bookmark }
             context.delete(bookmark)
             meeting.updatedAt = previousUpdatedAt
+            contentSnapshot.restore(meeting)
+            throw error
+        }
+    }
+
+    func notes(meetingID: UUID) throws -> [MeetingNoteRecord] {
+        try meeting(id: meetingID).notes.sorted(by: Self.noteComesBefore)
+    }
+
+    func upsertNote(
+        meetingID: UUID,
+        id: UUID,
+        timestamp: TimeInterval,
+        text: String,
+        sequenceIndex: Int,
+        now: Date = .now
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+
+        if let note = meeting.notes.first(where: { $0.id == id }) {
+            guard note.text != text else { return }
+            let previousText = note.text
+            let previousUpdatedAt = note.updatedAt
+            let previousMeetingUpdatedAt = meeting.updatedAt
+            let contentSnapshot = try beginContentMutation(for: meeting)
+            note.text = text
+            note.updatedAt = now
+            meeting.updatedAt = now
+            do {
+                try saveContext()
+            } catch {
+                note.text = previousText
+                note.updatedAt = previousUpdatedAt
+                meeting.updatedAt = previousMeetingUpdatedAt
+                contentSnapshot.restore(meeting)
+                throw error
+            }
+            return
+        }
+
+        let previousMeetingUpdatedAt = meeting.updatedAt
+        let contentSnapshot = try beginContentMutation(for: meeting)
+        let note = MeetingNoteRecord(
+            id: id,
+            timestamp: Self.sanitizedTimelineTimestamp(timestamp),
+            text: text,
+            createdAt: now,
+            updatedAt: now,
+            sequenceIndex: max(0, sequenceIndex),
+            meeting: meeting
+        )
+        context.insert(note)
+        meeting.notes.append(note)
+        meeting.updatedAt = now
+        do {
+            try saveContext()
+        } catch {
+            meeting.notes.removeAll { $0 === note }
+            context.delete(note)
+            meeting.updatedAt = previousMeetingUpdatedAt
+            contentSnapshot.restore(meeting)
+            throw error
+        }
+    }
+
+    func deleteNote(
+        meetingID: UUID,
+        id: UUID,
+        now: Date = .now
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+        guard let note = meeting.notes.first(where: { $0.id == id }) else {
+            throw MeetingTimelineRepositoryError.noteNotFound(id)
+        }
+
+        let previousMeetingUpdatedAt = meeting.updatedAt
+        let contentSnapshot = try beginContentMutation(for: meeting)
+        let noteSnapshot = MeetingNoteSnapshot(note)
+        meeting.notes.removeAll { $0.id == id }
+        context.delete(note)
+        meeting.updatedAt = now
+        do {
+            try saveContext()
+        } catch {
+            context.insert(note)
+            noteSnapshot.restore(note)
+            note.meeting = meeting
+            meeting.notes.append(note)
+            meeting.updatedAt = previousMeetingUpdatedAt
+            contentSnapshot.restore(meeting)
+            throw error
+        }
+    }
+
+    func screenshots(meetingID: UUID) throws -> [MeetingScreenshotRecord] {
+        try meeting(id: meetingID).screenshots.sorted(
+            by: Self.screenshotComesBefore
+        )
+    }
+
+    func appendScreenshot(
+        meetingID: UUID,
+        id: UUID,
+        timestamp: TimeInterval,
+        relativePath: String,
+        pixelWidth: Int,
+        pixelHeight: Int,
+        byteCount: Int,
+        sequenceIndex: Int,
+        createdAt: Date = .now
+    ) throws {
+        guard Self.isValidScreenshotRelativePath(relativePath) else {
+            throw MeetingTimelineRepositoryError.invalidScreenshotPath
+        }
+
+        let meeting = try meeting(id: meetingID)
+        let previousMeetingUpdatedAt = meeting.updatedAt
+        let contentSnapshot = try beginContentMutation(for: meeting)
+        let screenshot = MeetingScreenshotRecord(
+            id: id,
+            timestamp: Self.sanitizedTimelineTimestamp(timestamp),
+            relativePath: relativePath,
+            pixelWidth: max(0, pixelWidth),
+            pixelHeight: max(0, pixelHeight),
+            byteCount: max(0, byteCount),
+            createdAt: createdAt,
+            sequenceIndex: max(0, sequenceIndex),
+            meeting: meeting
+        )
+        context.insert(screenshot)
+        meeting.screenshots.append(screenshot)
+        meeting.updatedAt = createdAt
+        do {
+            try saveContext()
+        } catch {
+            meeting.screenshots.removeAll { $0 === screenshot }
+            context.delete(screenshot)
+            meeting.updatedAt = previousMeetingUpdatedAt
+            contentSnapshot.restore(meeting)
+            throw error
+        }
+    }
+
+    func deleteScreenshot(
+        meetingID: UUID,
+        id: UUID,
+        now: Date = .now
+    ) throws {
+        let meeting = try meeting(id: meetingID)
+        guard let screenshot = meeting.screenshots.first(where: {
+            $0.id == id
+        }) else {
+            throw MeetingTimelineRepositoryError.screenshotNotFound(id)
+        }
+
+        let previousMeetingUpdatedAt = meeting.updatedAt
+        let contentSnapshot = try beginContentMutation(for: meeting)
+        let screenshotSnapshot = MeetingScreenshotSnapshot(screenshot)
+        meeting.screenshots.removeAll { $0.id == id }
+        context.delete(screenshot)
+        meeting.updatedAt = now
+        do {
+            try saveContext()
+        } catch {
+            context.insert(screenshot)
+            screenshotSnapshot.restore(screenshot)
+            screenshot.meeting = meeting
+            meeting.screenshots.append(screenshot)
+            meeting.updatedAt = previousMeetingUpdatedAt
             contentSnapshot.restore(meeting)
             throw error
         }
@@ -3036,6 +3213,51 @@ final class MeetingRepository {
         }
         return lhs.id.uuidString < rhs.id.uuidString
     }
+
+    private static func noteComesBefore(
+        _ lhs: MeetingNoteRecord,
+        _ rhs: MeetingNoteRecord
+    ) -> Bool {
+        if lhs.timestamp != rhs.timestamp {
+            return lhs.timestamp < rhs.timestamp
+        }
+        if lhs.sequenceIndex != rhs.sequenceIndex {
+            return lhs.sequenceIndex < rhs.sequenceIndex
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private static func screenshotComesBefore(
+        _ lhs: MeetingScreenshotRecord,
+        _ rhs: MeetingScreenshotRecord
+    ) -> Bool {
+        if lhs.timestamp != rhs.timestamp {
+            return lhs.timestamp < rhs.timestamp
+        }
+        if lhs.sequenceIndex != rhs.sequenceIndex {
+            return lhs.sequenceIndex < rhs.sequenceIndex
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private static func isValidScreenshotRelativePath(_ path: String) -> Bool {
+        let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              normalized == path,
+              !NSString(string: normalized).isAbsolutePath else {
+            return false
+        }
+        return !NSString(string: normalized).pathComponents.contains {
+            $0 == "." || $0 == ".."
+        }
+    }
+
+    private static func sanitizedTimelineTimestamp(
+        _ timestamp: TimeInterval
+    ) -> TimeInterval {
+        guard timestamp.isFinite else { return 0 }
+        return max(0, timestamp)
+    }
 }
 
 private struct TranscriptCorrectionRebind {
@@ -3296,6 +3518,60 @@ private struct MeetingContentMutationSnapshot {
         meeting.contentRevisionBacking = contentRevisionBacking
         meeting.notionSyncStateRawValue = notionSyncStateRawValue
         meeting.notionSyncErrorCode = notionSyncErrorCode
+    }
+}
+
+private struct MeetingNoteSnapshot {
+    let timestamp: TimeInterval
+    let text: String
+    let createdAt: Date
+    let updatedAt: Date
+    let sequenceIndex: Int
+
+    init(_ note: MeetingNoteRecord) {
+        timestamp = note.timestamp
+        text = note.text
+        createdAt = note.createdAt
+        updatedAt = note.updatedAt
+        sequenceIndex = note.sequenceIndex
+    }
+
+    func restore(_ note: MeetingNoteRecord) {
+        note.timestamp = timestamp
+        note.text = text
+        note.createdAt = createdAt
+        note.updatedAt = updatedAt
+        note.sequenceIndex = sequenceIndex
+    }
+}
+
+private struct MeetingScreenshotSnapshot {
+    let timestamp: TimeInterval
+    let relativePath: String
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let byteCount: Int
+    let createdAt: Date
+    let sequenceIndex: Int
+
+    init(_ screenshot: MeetingScreenshotRecord) {
+        timestamp = screenshot.timestamp
+        relativePath = screenshot.relativePath
+        pixelWidth = screenshot.pixelWidth
+        pixelHeight = screenshot.pixelHeight
+        byteCount = screenshot.byteCount
+        createdAt = screenshot.createdAt
+        sequenceIndex = screenshot.sequenceIndex
+    }
+
+    func restore(_ screenshot: MeetingScreenshotRecord) {
+        screenshot.timestamp = timestamp
+        screenshot.relativePath = relativePath
+        screenshot.pixelWidth = pixelWidth
+        screenshot.pixelHeight = pixelHeight
+        screenshot.byteCount = byteCount
+        screenshot.createdAt = createdAt
+        screenshot.sequenceIndex = sequenceIndex
     }
 }
 

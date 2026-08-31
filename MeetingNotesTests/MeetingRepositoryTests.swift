@@ -3896,6 +3896,8 @@ final class MeetingRepositoryTests: XCTestCase {
             TranscriptCorrectionRecord.self,
             SpeakerNameRecord.self,
             BookmarkRecord.self,
+            MeetingNoteRecord.self,
+            MeetingScreenshotRecord.self,
             SummaryRecord.self,
             DetailedMinutesRecord.self,
             ArchiveCheckpointRecord.self
@@ -3917,6 +3919,8 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(meeting.mode, .offline)
         XCTAssertEqual(meeting.state, .ready)
         XCTAssertTrue(meeting.transcriptCorrections.isEmpty)
+        XCTAssertTrue(meeting.notes.isEmpty)
+        XCTAssertTrue(meeting.screenshots.isEmpty)
         let transcript = try XCTUnwrap(
             repository.transcripts(meetingID: meetingID).first
         )
@@ -4535,6 +4539,269 @@ final class MeetingRepositoryTests: XCTestCase {
             try repository.transcripts(meetingID: meetingID).map(\.text),
             ["旧名未修正", "旧名已修正底稿"]
         )
+    }
+
+    func testAppendUpdateAndDeleteNoteAdvancesMeetingContentRevision()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 6_000)
+        )
+        let noteID = UUID()
+        let meeting = try repository.meeting(id: meetingID)
+
+        try repository.upsertNote(
+            meetingID: meetingID,
+            id: noteID,
+            timestamp: 12.5,
+            text: "第一版笔记",
+            sequenceIndex: 2,
+            now: Date(timeIntervalSince1970: 6_010)
+        )
+
+        let inserted = try XCTUnwrap(
+            repository.notes(meetingID: meetingID).first
+        )
+        XCTAssertEqual(inserted.id, noteID)
+        XCTAssertEqual(inserted.timestamp, 12.5, accuracy: 0.001)
+        XCTAssertEqual(inserted.text, "第一版笔记")
+        XCTAssertEqual(inserted.sequenceIndex, 2)
+        XCTAssertEqual(meeting.contentRevision, 1)
+
+        meeting.notionSyncState = .failed
+        meeting.notionSyncErrorCode = "old-error"
+        try repository.updateMeetingState(id: meetingID, state: meeting.state)
+
+        try repository.upsertNote(
+            meetingID: meetingID,
+            id: noteID,
+            timestamp: 99,
+            text: "第二版笔记",
+            sequenceIndex: 8,
+            now: Date(timeIntervalSince1970: 6_020)
+        )
+
+        XCTAssertEqual(inserted.timestamp, 12.5, accuracy: 0.001)
+        XCTAssertEqual(inserted.sequenceIndex, 2)
+        XCTAssertEqual(inserted.text, "第二版笔记")
+        XCTAssertEqual(inserted.updatedAt, Date(timeIntervalSince1970: 6_020))
+        XCTAssertEqual(meeting.contentRevision, 2)
+        XCTAssertEqual(meeting.notionSyncState, .localOnly)
+        XCTAssertNil(meeting.notionSyncErrorCode)
+
+        try repository.deleteNote(
+            meetingID: meetingID,
+            id: noteID,
+            now: Date(timeIntervalSince1970: 6_030)
+        )
+
+        XCTAssertTrue(try repository.notes(meetingID: meetingID).isEmpty)
+        XCTAssertEqual(meeting.contentRevision, 3)
+    }
+
+    func testAppendAndDeleteScreenshotKeepsStableTimestampOrder() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 7_000)
+        )
+        let firstID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let secondID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let thirdID = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
+
+        try repository.appendScreenshot(
+            meetingID: meetingID,
+            id: thirdID,
+            timestamp: 20,
+            relativePath: "\(meetingID.uuidString)/screenshots/third.png",
+            pixelWidth: 1_920,
+            pixelHeight: 1_080,
+            byteCount: 500,
+            sequenceIndex: 2,
+            createdAt: Date(timeIntervalSince1970: 7_030)
+        )
+        try repository.appendScreenshot(
+            meetingID: meetingID,
+            id: firstID,
+            timestamp: -.infinity,
+            relativePath: "\(meetingID.uuidString)/screenshots/first.png",
+            pixelWidth: 1_280,
+            pixelHeight: 720,
+            byteCount: 300,
+            sequenceIndex: 3,
+            createdAt: Date(timeIntervalSince1970: 7_010)
+        )
+        try repository.appendScreenshot(
+            meetingID: meetingID,
+            id: secondID,
+            timestamp: 20,
+            relativePath: "\(meetingID.uuidString)/screenshots/second.png",
+            pixelWidth: 1_440,
+            pixelHeight: 900,
+            byteCount: 400,
+            sequenceIndex: 1,
+            createdAt: Date(timeIntervalSince1970: 7_020)
+        )
+
+        let screenshots = try repository.screenshots(meetingID: meetingID)
+        XCTAssertEqual(screenshots.map(\.id), [firstID, secondID, thirdID])
+        XCTAssertEqual(screenshots.first?.timestamp, 0)
+        XCTAssertEqual(try repository.meeting(id: meetingID).contentRevision, 3)
+
+        XCTAssertThrowsError(
+            try repository.appendScreenshot(
+                meetingID: meetingID,
+                id: UUID(),
+                timestamp: 1,
+                relativePath: "/tmp/outside.png",
+                pixelWidth: 10,
+                pixelHeight: 10,
+                byteCount: 10,
+                sequenceIndex: 0
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? MeetingTimelineRepositoryError,
+                .invalidScreenshotPath
+            )
+        }
+
+        try repository.deleteScreenshot(
+            meetingID: meetingID,
+            id: secondID,
+            now: Date(timeIntervalSince1970: 7_040)
+        )
+
+        XCTAssertEqual(
+            try repository.screenshots(meetingID: meetingID).map(\.id),
+            [firstID, thirdID]
+        )
+        XCTAssertEqual(try repository.meeting(id: meetingID).contentRevision, 4)
+    }
+
+    func testDeletingMeetingCascadesTimelineRecords() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .online,
+            startedAt: Date(timeIntervalSince1970: 8_000)
+        )
+        try repository.upsertNote(
+            meetingID: meetingID,
+            id: UUID(),
+            timestamp: 2,
+            text: "需要级联删除",
+            sequenceIndex: 0
+        )
+        try repository.appendScreenshot(
+            meetingID: meetingID,
+            id: UUID(),
+            timestamp: 3,
+            relativePath: "\(meetingID.uuidString)/screenshots/cascade.png",
+            pixelWidth: 100,
+            pixelHeight: 80,
+            byteCount: 256,
+            sequenceIndex: 1
+        )
+
+        XCTAssertEqual(try repository.count(MeetingNoteRecord.self), 1)
+        XCTAssertEqual(try repository.count(MeetingScreenshotRecord.self), 1)
+
+        try repository.deleteMeeting(id: meetingID)
+
+        XCTAssertEqual(try repository.count(MeetingNoteRecord.self), 0)
+        XCTAssertEqual(try repository.count(MeetingScreenshotRecord.self), 0)
+    }
+
+    func testTimelineMutationFailureRestoresRecordAndNotionState() throws {
+        let failure = RepositorySaveFailureSwitch()
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                if failure.shouldFail {
+                    throw InjectedRepositorySaveError.forced
+                }
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 9_000)
+        )
+        let noteID = UUID()
+        let screenshotID = UUID()
+        try repository.upsertNote(
+            meetingID: meetingID,
+            id: noteID,
+            timestamp: 4,
+            text: "原笔记",
+            sequenceIndex: 0,
+            now: Date(timeIntervalSince1970: 9_010)
+        )
+        try repository.appendScreenshot(
+            meetingID: meetingID,
+            id: screenshotID,
+            timestamp: 5,
+            relativePath: "\(meetingID.uuidString)/screenshots/original.png",
+            pixelWidth: 800,
+            pixelHeight: 600,
+            byteCount: 1_024,
+            sequenceIndex: 1,
+            createdAt: Date(timeIntervalSince1970: 9_020)
+        )
+        let meeting = try repository.meeting(id: meetingID)
+        meeting.notionSyncState = .failed
+        meeting.notionSyncErrorCode = "preserve-me"
+        try repository.updateMeetingState(id: meetingID, state: meeting.state)
+        let originalRevision = meeting.contentRevision
+        let originalUpdatedAt = meeting.updatedAt
+        let originalNote = try XCTUnwrap(
+            repository.notes(meetingID: meetingID).first
+        )
+        let originalNoteUpdatedAt = originalNote.updatedAt
+
+        failure.shouldFail = true
+        XCTAssertThrowsError(
+            try repository.upsertNote(
+                meetingID: meetingID,
+                id: noteID,
+                timestamp: 99,
+                text: "不应保留",
+                sequenceIndex: 9,
+                now: Date(timeIntervalSince1970: 9_030)
+            )
+        ) { error in
+            XCTAssertEqual(error as? InjectedRepositorySaveError, .forced)
+        }
+
+        XCTAssertEqual(originalNote.text, "原笔记")
+        XCTAssertEqual(originalNote.updatedAt, originalNoteUpdatedAt)
+        XCTAssertEqual(meeting.contentRevision, originalRevision)
+        XCTAssertEqual(meeting.updatedAt, originalUpdatedAt)
+        XCTAssertEqual(meeting.notionSyncState, .failed)
+        XCTAssertEqual(meeting.notionSyncErrorCode, "preserve-me")
+
+        XCTAssertThrowsError(
+            try repository.deleteScreenshot(
+                meetingID: meetingID,
+                id: screenshotID,
+                now: Date(timeIntervalSince1970: 9_040)
+            )
+        ) { error in
+            XCTAssertEqual(error as? InjectedRepositorySaveError, .forced)
+        }
+
+        let restoredScreenshot = try XCTUnwrap(
+            repository.screenshots(meetingID: meetingID).first
+        )
+        XCTAssertEqual(restoredScreenshot.id, screenshotID)
+        XCTAssertEqual(
+            restoredScreenshot.relativePath,
+            "\(meetingID.uuidString)/screenshots/original.png"
+        )
+        XCTAssertEqual(meeting.contentRevision, originalRevision)
+        XCTAssertEqual(meeting.updatedAt, originalUpdatedAt)
+        XCTAssertEqual(meeting.notionSyncState, .failed)
+        XCTAssertEqual(meeting.notionSyncErrorCode, "preserve-me")
     }
 }
 
