@@ -2,6 +2,8 @@ import Foundation
 
 enum NotionArchiveServiceError: Error, Equatable, Sendable {
     case archiveInProgress(UUID)
+    case screenshotSnapshotMismatch
+    case screenshotUnavailable(UUID)
 }
 
 @MainActor
@@ -14,16 +16,25 @@ final class NotionArchiveService {
     private let repository: MeetingRepository
     private let client: any NotionAPIClient
     private let blockBuilder: NotionBlockBuilder
+    private let fileStore: MeetingFileStore?
+    private let screenshotDerivativeBuilder:
+        NotionScreenshotDerivativeBuilder
     private static var activeMeetingIDs: Set<UUID> = []
 
     init(
         repository: MeetingRepository,
         client: any NotionAPIClient,
-        blockBuilder: NotionBlockBuilder = NotionBlockBuilder()
+        blockBuilder: NotionBlockBuilder = NotionBlockBuilder(),
+        fileStore: MeetingFileStore? = nil,
+        screenshotDerivativeBuilder:
+            NotionScreenshotDerivativeBuilder =
+                NotionScreenshotDerivativeBuilder()
     ) {
         self.repository = repository
         self.client = client
         self.blockBuilder = blockBuilder
+        self.fileStore = fileStore
+        self.screenshotDerivativeBuilder = screenshotDerivativeBuilder
     }
 
     func archive(
@@ -36,27 +47,31 @@ final class NotionArchiveService {
         }
         defer { Self.activeMeetingIDs.remove(meetingID) }
         do {
+            let preparedContent = try await preparedContent(
+                meetingID: meetingID,
+                content: content
+            )
             let page = try await page(
                 meetingID: meetingID,
                 parentPageID: parentPageID,
-                content: content
+                content: preparedContent
             )
-            if content.contentRevision > 0 {
+            if preparedContent.contentRevision > 0 {
                 try await replaceWholePage(
                     meetingID: meetingID,
                     pageID: page.id,
-                    content: content
+                    content: preparedContent
                 )
             } else {
                 try await appendMetadataIfNeeded(
                     meetingID: meetingID,
                     pageID: page.id,
-                    content: content
+                    content: preparedContent
                 )
                 try await replaceManagedSection(
                     meetingID: meetingID,
                     pageID: page.id,
-                    content: content
+                    content: preparedContent
                 )
             }
             return page
@@ -75,6 +90,96 @@ final class NotionArchiveService {
             }
             throw error
         }
+    }
+
+    private func preparedContent(
+        meetingID: UUID,
+        content: NotionMeetingPageContent
+    ) async throws -> NotionMeetingPageContent {
+        if content.contentRevision > 0,
+           let checkpoint = try repository.meeting(id: meetingID)
+            .archiveCheckpoint,
+           let run = try checkpoint.pageSyncRun(),
+           run.contentRevision == content.contentRevision {
+            let snapshot = try decodePageSnapshot(run.snapshotData)
+            guard snapshot.contentRevision == run.contentRevision,
+                  snapshot.screenshots.allSatisfy({ screenshot in
+                      guard let fileUploadID = screenshot.fileUploadID else {
+                          return false
+                      }
+                      return !fileUploadID.trimmingCharacters(
+                          in: .whitespacesAndNewlines
+                      ).isEmpty
+                  }) else {
+                throw ArchiveCheckpointCodingError.invalidData(
+                    "pageSyncSnapshotData"
+                )
+            }
+            return snapshot
+        }
+
+        let records = try repository.screenshots(meetingID: meetingID)
+        let requestedIDs = content.screenshots.map(\.id)
+        guard Set(requestedIDs).count == requestedIDs.count,
+              Set(requestedIDs) == Set(records.map(\.id)) else {
+            throw NotionArchiveServiceError.screenshotSnapshotMismatch
+        }
+        guard !records.isEmpty else { return content }
+        guard let fileStore else {
+            throw NotionArchiveServiceError.screenshotSnapshotMismatch
+        }
+
+        var preparedScreenshots: [NotionTimelineScreenshot] = []
+        preparedScreenshots.reserveCapacity(records.count)
+        for record in records {
+            try Task.checkCancellation()
+            let sourceURL: URL
+            do {
+                sourceURL = try await fileStore.resolveScreenshotURL(
+                    meetingID: meetingID,
+                    relativePath: record.relativePath
+                )
+            } catch {
+                throw NotionArchiveServiceError.screenshotUnavailable(
+                    record.id
+                )
+            }
+
+            let derivative = try await screenshotDerivativeBuilder.build(
+                from: sourceURL
+            )
+            defer { derivative.cleanup() }
+
+            let jpeg: Data
+            do {
+                jpeg = try Data(contentsOf: derivative.fileURL)
+            } catch {
+                throw NotionArchiveServiceError.screenshotUnavailable(
+                    record.id
+                )
+            }
+            try Task.checkCancellation()
+            let uploaded = try await client.uploadJPEG(
+                data: jpeg,
+                fileName: "meeting-screenshot-\(record.id.uuidString).jpg"
+            )
+            let uploadID = uploaded.id.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+            guard !uploadID.isEmpty else {
+                throw NotionClientError.invalidResponse
+            }
+            preparedScreenshots.append(
+                NotionTimelineScreenshot(
+                    id: record.id,
+                    timestamp: record.timestamp,
+                    sequenceIndex: record.sequenceIndex,
+                    fileUploadID: uploadID
+                )
+            )
+        }
+        try Task.checkCancellation()
+        return try content.replacingScreenshots(with: preparedScreenshots)
     }
 
     private func page(

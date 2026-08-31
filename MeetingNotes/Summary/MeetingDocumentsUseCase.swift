@@ -139,6 +139,7 @@ final class LegacyMeetingDocumentNotionArchiver: MeetingDocumentArchiving {
     ) async throws {
         let meeting = try repository.meeting(id: meetingID)
         let inputs = MeetingDocumentInputBuilder.inputs(for: meeting)
+        let timeline = MeetingNotionTimelineInputBuilder.inputs(for: meeting)
         let payload = try generatedDocument(for: meeting, kind: kind)
         _ = try await archiver.archive(
             token: token,
@@ -153,7 +154,9 @@ final class LegacyMeetingDocumentNotionArchiver: MeetingDocumentArchiving {
                 summary: payload.summary,
                 detailedMinutes: payload.detailedMinutes,
                 bookmarks: inputs.bookmarks,
-                transcripts: inputs.transcripts
+                transcripts: inputs.transcripts,
+                userNotes: timeline.notes,
+                screenshots: timeline.screenshots
             )
         )
     }
@@ -568,6 +571,7 @@ final class MeetingDocumentsUseCase: MeetingDocumentManaging {
             throw MeetingDocumentsError.missingLocalDocument(.summary)
         }
         let inputs = MeetingDocumentInputBuilder.inputs(for: meeting)
+        let timeline = MeetingNotionTimelineInputBuilder.inputs(for: meeting)
         return try NotionMeetingPageContent(
             title: meeting.title,
             startedAt: meeting.startedAt,
@@ -577,7 +581,9 @@ final class MeetingDocumentsUseCase: MeetingDocumentManaging {
             summary: summary,
             detailedMinutes: detailedMinutes,
             bookmarks: inputs.bookmarks,
-            transcripts: inputs.transcripts
+            transcripts: inputs.transcripts,
+            userNotes: timeline.notes,
+            screenshots: timeline.screenshots
         )
     }
 
@@ -889,5 +895,67 @@ enum MeetingDocumentInputBuilder {
                 )
             }
         return (transcripts, bookmarks, userNotes)
+    }
+}
+
+@MainActor
+enum MeetingNotionTimelineInputBuilder {
+    static func inputs(
+        for meeting: MeetingRecord
+    ) -> (
+        notes: [NotionTimelineNote],
+        screenshots: [NotionTimelineScreenshot]
+    ) {
+        let notes = meeting.notes
+            .sorted(by: noteComesBefore)
+            .compactMap { note -> NotionTimelineNote? in
+                guard let text = TranscriptTextSanitizer.nonEmpty(
+                    note.text
+                ) else {
+                    return nil
+                }
+                return NotionTimelineNote(
+                    id: note.id,
+                    timestamp: note.timestamp,
+                    text: text,
+                    sequenceIndex: note.sequenceIndex
+                )
+            }
+        let screenshots = meeting.screenshots
+            .sorted(by: screenshotComesBefore)
+            .map {
+                NotionTimelineScreenshot(
+                    id: $0.id,
+                    timestamp: $0.timestamp,
+                    sequenceIndex: $0.sequenceIndex
+                )
+            }
+        return (notes, screenshots)
+    }
+
+    private static func noteComesBefore(
+        _ lhs: MeetingNoteRecord,
+        _ rhs: MeetingNoteRecord
+    ) -> Bool {
+        if lhs.timestamp != rhs.timestamp {
+            return lhs.timestamp < rhs.timestamp
+        }
+        if lhs.sequenceIndex != rhs.sequenceIndex {
+            return lhs.sequenceIndex < rhs.sequenceIndex
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private static func screenshotComesBefore(
+        _ lhs: MeetingScreenshotRecord,
+        _ rhs: MeetingScreenshotRecord
+    ) -> Bool {
+        if lhs.timestamp != rhs.timestamp {
+            return lhs.timestamp < rhs.timestamp
+        }
+        if lhs.sequenceIndex != rhs.sequenceIndex {
+            return lhs.sequenceIndex < rhs.sequenceIndex
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
     }
 }

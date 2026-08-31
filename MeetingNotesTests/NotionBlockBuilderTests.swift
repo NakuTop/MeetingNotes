@@ -359,6 +359,97 @@ final class NotionBlockBuilderTests: XCTestCase {
         XCTAssertFalse(encoded.contains("url"))
     }
 
+    func testTimelineOrdersNotesAndUploadedScreenshotsByTimestamp()
+        throws {
+        let earlyNoteID = UUID(
+            uuidString: "00000000-0000-0000-0000-000000000001"
+        )!
+        let screenshotID = UUID(
+            uuidString: "00000000-0000-0000-0000-000000000002"
+        )!
+        let lateNoteID = UUID(
+            uuidString: "00000000-0000-0000-0000-000000000003"
+        )!
+        let content = try makeContent(
+            summary: conciseSummary,
+            detailedMinutes: nil,
+            userNotes: [
+                .init(
+                    id: lateNoteID,
+                    timestamp: 15,
+                    text: "后一条笔记",
+                    sequenceIndex: 1
+                ),
+                .init(
+                    id: earlyNoteID,
+                    timestamp: 5,
+                    text: "先一条笔记",
+                    sequenceIndex: 0
+                )
+            ],
+            screenshots: [
+                .init(
+                    id: screenshotID,
+                    timestamp: 10,
+                    sequenceIndex: 0,
+                    fileUploadID: "notion-upload-id"
+                )
+            ]
+        )
+
+        let blocks = NotionBlockBuilder().documentBlocks(for: content)
+        let timelineStart = try XCTUnwrap(
+            blocks.firstIndex {
+                $0.kind == .heading2 && $0.text == "会议时间轴"
+            }
+        )
+        let timeline = [blocks[timelineStart]] + blocks
+            .dropFirst(timelineStart + 1)
+            .prefix { $0.kind != .heading2 }
+
+        XCTAssertEqual(timeline.first?.text, "会议时间轴")
+        XCTAssertEqual(
+            timeline.dropFirst().map(\.kind),
+            [.bulletedListItem, .paragraph, .image, .bulletedListItem]
+        )
+        XCTAssertEqual(
+            timeline.dropFirst().map(\.text),
+            [
+                "[00:05] 笔记：先一条笔记",
+                "[00:10] 截图",
+                "",
+                "[00:15] 笔记：后一条笔记"
+            ]
+        )
+        let imageBlock = try XCTUnwrap(
+            timeline.first { $0.kind == .image }
+        )
+        let imageData = try JSONEncoder().encode(imageBlock)
+        XCTAssertTrue(
+            String(data: imageData, encoding: .utf8)?
+                .contains("notion-upload-id") == true
+        )
+    }
+
+    func testOldPageSnapshotDecodesMissingTimelineFieldsAsEmpty() throws {
+        let current = try makeSummaryContent()
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(current)
+            ) as? [String: Any]
+        )
+        object.removeValue(forKey: "userNotes")
+        object.removeValue(forKey: "screenshots")
+
+        let decoded = try JSONDecoder().decode(
+            NotionMeetingPageContent.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        XCTAssertEqual(decoded.userNotes, [])
+        XCTAssertEqual(decoded.screenshots, [])
+    }
+
     private func makeSummaryContent(
         overview: String = "确认了下一阶段路线图。",
         transcripts: [MeetingTranscriptInput] = [
@@ -391,7 +482,9 @@ final class NotionBlockBuilderTests: XCTestCase {
     private func makeContent(
         summary: GeneratedMeetingSummary?,
         detailedMinutes: GeneratedDetailedMinutes?,
-        transcripts: [MeetingTranscriptInput] = []
+        transcripts: [MeetingTranscriptInput] = [],
+        userNotes: [NotionTimelineNote] = [],
+        screenshots: [NotionTimelineScreenshot] = []
     ) throws -> NotionMeetingPageContent {
         try NotionMeetingPageContent(
             title: "产品周会",
@@ -402,7 +495,9 @@ final class NotionBlockBuilderTests: XCTestCase {
             summary: summary,
             detailedMinutes: detailedMinutes,
             bookmarks: [.init(timestamp: 65, excerpt: "发布决定")],
-            transcripts: transcripts
+            transcripts: transcripts,
+            userNotes: userNotes,
+            screenshots: screenshots
         )
     }
 

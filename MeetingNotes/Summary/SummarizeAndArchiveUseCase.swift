@@ -50,10 +50,16 @@ protocol MeetingNotionArchiving: AnyObject {
 final class LiveMeetingNotionArchiver: MeetingNotionArchiving {
     private let repository: MeetingRepository
     private let httpClient: any HTTPClient
+    private let fileStore: MeetingFileStore?
 
-    init(repository: MeetingRepository, httpClient: any HTTPClient) {
+    init(
+        repository: MeetingRepository,
+        httpClient: any HTTPClient,
+        fileStore: MeetingFileStore? = nil
+    ) {
         self.repository = repository
         self.httpClient = httpClient
+        self.fileStore = fileStore
     }
 
     func archive(
@@ -64,7 +70,8 @@ final class LiveMeetingNotionArchiver: MeetingNotionArchiving {
     ) async throws -> NotionPageReference {
         try await NotionArchiveService(
             repository: repository,
-            client: NotionClient(token: token, httpClient: httpClient)
+            client: NotionClient(token: token, httpClient: httpClient),
+            fileStore: fileStore
         ).archive(
             meetingID: meetingID,
             parentPageID: parentPageID,

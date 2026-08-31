@@ -1,3 +1,6 @@
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 import XCTest
 import SwiftData
 @testable import MeetingNotes
@@ -1185,6 +1188,295 @@ final class NotionArchiveServiceTests: XCTestCase {
         )
     }
 
+    func testScreenshotUploadFailureLeavesPageUntouchedAndCleansDerivatives()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeMeeting(in: repository)
+        try saveSummary(in: repository, meetingID: meetingID, overview: "摘要")
+        try repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "existing-page",
+            pageURL: "https://www.notion.so/existing-page"
+        )
+        try repository.saveArchiveCheckpoint(
+            meetingID: meetingID,
+            notionPageID: "existing-page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        let files = try await makeScreenshotFiles(
+            repository: repository,
+            meetingID: meetingID,
+            timestamps: [4, 8]
+        )
+        let client = RecordingNotionAPIClient(failOnUploadAttempts: [1])
+        let service = NotionArchiveService(
+            repository: repository,
+            client: client,
+            fileStore: files.fileStore,
+            screenshotDerivativeBuilder: NotionScreenshotDerivativeBuilder(
+                temporaryRoot: files.derivativeRoot
+            )
+        )
+        let content = try makeCanonicalSummaryContent(
+            in: repository,
+            meetingID: meetingID,
+            overview: "摘要",
+            screenshots: files.items
+        )
+
+        do {
+            _ = try await service.archive(
+                meetingID: meetingID,
+                parentPageID: UUID(),
+                content: content
+            )
+            XCTFail("Expected the second screenshot upload to fail")
+        } catch {
+            XCTAssertEqual(error as? NotionClientError, .rateLimited)
+        }
+
+        let uploadAttempts = await client.uploadAttemptCount()
+        let appendAttempts = await client.appendAttemptCount()
+        let archiveAttempts = await client.archiveAttempts()
+        XCTAssertEqual(uploadAttempts, 2)
+        XCTAssertEqual(appendAttempts, 0)
+        XCTAssertEqual(archiveAttempts, [])
+        XCTAssertNil(
+            try repository.meeting(id: meetingID)
+                .archiveCheckpoint?.pageSyncRun()
+        )
+        XCTAssertEqual(try derivativeDirectories(in: files.derivativeRoot), [])
+    }
+
+    func testAllScreenshotUploadsFinishBeforePageMutation() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeMeeting(in: repository)
+        try saveSummary(in: repository, meetingID: meetingID, overview: "摘要")
+        try repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "existing-page",
+            pageURL: "https://www.notion.so/existing-page"
+        )
+        try repository.saveArchiveCheckpoint(
+            meetingID: meetingID,
+            notionPageID: "existing-page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        let files = try await makeScreenshotFiles(
+            repository: repository,
+            meetingID: meetingID,
+            timestamps: [4, 8]
+        )
+        let client = RecordingNotionAPIClient(initialChildBlockIDs: ["old"])
+        let service = NotionArchiveService(
+            repository: repository,
+            client: client,
+            fileStore: files.fileStore,
+            screenshotDerivativeBuilder: NotionScreenshotDerivativeBuilder(
+                temporaryRoot: files.derivativeRoot
+            )
+        )
+
+        _ = try await service.archive(
+            meetingID: meetingID,
+            parentPageID: UUID(),
+            content: try makeCanonicalSummaryContent(
+                in: repository,
+                meetingID: meetingID,
+                overview: "摘要",
+                screenshots: files.items
+            )
+        )
+
+        let events = await client.recordedEvents()
+        let lastUpload = try XCTUnwrap(events.lastIndex(of: "upload"))
+        let firstMutation = try XCTUnwrap(
+            events.firstIndex { $0 == "append" || $0 == "archive" }
+        )
+        XCTAssertLessThan(lastUpload, firstMutation)
+        let uploadAttempts = await client.uploadAttemptCount()
+        XCTAssertEqual(uploadAttempts, 2)
+        XCTAssertEqual(try derivativeDirectories(in: files.derivativeRoot), [])
+        XCTAssertTrue(events.contains("archive"))
+    }
+
+    func testCancellationRetryUsesPreparedScreenshotSnapshotWithoutReupload()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeMeeting(in: repository)
+        try saveSummary(in: repository, meetingID: meetingID, overview: "摘要")
+        try repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "existing-page",
+            pageURL: "https://www.notion.so/existing-page"
+        )
+        try repository.saveArchiveCheckpoint(
+            meetingID: meetingID,
+            notionPageID: "existing-page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        let files = try await makeScreenshotFiles(
+            repository: repository,
+            meetingID: meetingID,
+            timestamps: [6]
+        )
+        let client = RecordingNotionAPIClient(cancelOnAppendAttempts: [1])
+        let service = NotionArchiveService(
+            repository: repository,
+            client: client,
+            blockBuilder: NotionBlockBuilder(maximumBlocksPerBatch: 2),
+            fileStore: files.fileStore,
+            screenshotDerivativeBuilder: NotionScreenshotDerivativeBuilder(
+                temporaryRoot: files.derivativeRoot
+            )
+        )
+        let content = try makeCanonicalSummaryContent(
+            in: repository,
+            meetingID: meetingID,
+            overview: "摘要",
+            screenshots: files.items
+        )
+
+        do {
+            _ = try await service.archive(
+                meetingID: meetingID,
+                parentPageID: UUID(),
+                content: content
+            )
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        }
+        let firstUploadAttempts = await client.uploadAttemptCount()
+        XCTAssertEqual(firstUploadAttempts, 1)
+        let run = try XCTUnwrap(
+            try repository.meeting(id: meetingID)
+                .archiveCheckpoint?.pageSyncRun()
+        )
+        let prepared = try JSONDecoder().decode(
+            NotionMeetingPageContent.self,
+            from: run.snapshotData
+        )
+        XCTAssertEqual(prepared.screenshots.first?.fileUploadID, "upload-0")
+
+        _ = try await service.archive(
+            meetingID: meetingID,
+            parentPageID: UUID(),
+            content: content
+        )
+
+        let finalUploadAttempts = await client.uploadAttemptCount()
+        XCTAssertEqual(finalUploadAttempts, 1)
+        XCTAssertEqual(try derivativeDirectories(in: files.derivativeRoot), [])
+    }
+
+    func testSecondSyncReplacesTimelineInsteadOfDuplicatingIt() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try makeMeeting(in: repository)
+        try saveSummary(in: repository, meetingID: meetingID, overview: "摘要")
+        try repository.setNotionPage(
+            meetingID: meetingID,
+            pageID: "existing-page",
+            pageURL: "https://www.notion.so/existing-page"
+        )
+        try repository.saveArchiveCheckpoint(
+            meetingID: meetingID,
+            notionPageID: "existing-page",
+            nextSection: "managed",
+            nextBatchIndex: 0
+        )
+        let noteID = UUID()
+        try repository.upsertNote(
+            meetingID: meetingID,
+            id: noteID,
+            timestamp: 3,
+            text: "第一版笔记",
+            sequenceIndex: 0
+        )
+        let files = try await makeScreenshotFiles(
+            repository: repository,
+            meetingID: meetingID,
+            timestamps: [6]
+        )
+        let client = RecordingNotionAPIClient(initialChildBlockIDs: ["old"])
+        let service = NotionArchiveService(
+            repository: repository,
+            client: client,
+            fileStore: files.fileStore,
+            screenshotDerivativeBuilder: NotionScreenshotDerivativeBuilder(
+                temporaryRoot: files.derivativeRoot
+            )
+        )
+
+        _ = try await service.archive(
+            meetingID: meetingID,
+            parentPageID: UUID(),
+            content: try makeCanonicalSummaryContent(
+                in: repository,
+                meetingID: meetingID,
+                overview: "摘要",
+                notes: [
+                    .init(
+                        id: noteID,
+                        timestamp: 3,
+                        text: "第一版笔记",
+                        sequenceIndex: 0
+                    )
+                ],
+                screenshots: files.items
+            )
+        )
+        let firstGenerationBlockIDs = await client.liveChildBlockIDs()
+        let firstGenerationIDs = Set(firstGenerationBlockIDs)
+        let attemptsBeforeSecondSync = await client.appendAttemptCount()
+
+        try repository.upsertNote(
+            meetingID: meetingID,
+            id: noteID,
+            timestamp: 3,
+            text: "第二版笔记",
+            sequenceIndex: 0
+        )
+        _ = try await service.archive(
+            meetingID: meetingID,
+            parentPageID: UUID(),
+            content: try makeCanonicalSummaryContent(
+                in: repository,
+                meetingID: meetingID,
+                overview: "摘要",
+                notes: [
+                    .init(
+                        id: noteID,
+                        timestamp: 3,
+                        text: "第二版笔记",
+                        sequenceIndex: 0
+                    )
+                ],
+                screenshots: files.items
+            )
+        )
+
+        let liveBlockIDs = await client.liveChildBlockIDs()
+        let liveIDs = Set(liveBlockIDs)
+        XCTAssertTrue(liveIDs.isDisjoint(with: firstGenerationIDs))
+        let appendCalls = await client.successfulAppendCalls()
+        let secondBlocks = appendCalls.dropFirst(attemptsBeforeSecondSync)
+            .flatMap { $0 }
+        XCTAssertEqual(
+            secondBlocks.filter {
+                $0.kind == .heading2 && $0.text == "会议时间轴"
+            }.count,
+            1
+        )
+        XCTAssertTrue(secondBlocks.contains { $0.text.contains("第二版笔记") })
+        XCTAssertFalse(secondBlocks.contains { $0.text.contains("第一版笔记") })
+        let secondUploadAttempts = await client.uploadAttemptCount()
+        XCTAssertEqual(secondUploadAttempts, 2)
+    }
+
     func testCanonicalPageFailureDoesNotMutateLegacyDocumentArchiveState()
         async throws {
         let repository = try MeetingRepository.inMemory()
@@ -1342,7 +1634,9 @@ final class NotionArchiveServiceTests: XCTestCase {
     private func makeCanonicalSummaryContent(
         in repository: MeetingRepository,
         meetingID: UUID,
-        overview: String
+        overview: String,
+        notes: [NotionTimelineNote] = [],
+        screenshots: [NotionTimelineScreenshot] = []
     ) throws -> NotionMeetingPageContent {
         try NotionMeetingPageContent(
             title: "产品周会",
@@ -1364,8 +1658,107 @@ final class NotionArchiveServiceTests: XCTestCase {
             bookmarks: [.init(timestamp: 60, excerpt: "发布决定")],
             transcripts: [
                 .init(startTime: 0, endTime: 5, text: "讨论路线图")
-            ]
+            ],
+            userNotes: notes,
+            screenshots: screenshots
         )
+    }
+
+    private func makeScreenshotFiles(
+        repository: MeetingRepository,
+        meetingID: UUID,
+        timestamps: [TimeInterval]
+    ) async throws -> (
+        fileStore: MeetingFileStore,
+        derivativeRoot: URL,
+        items: [NotionTimelineScreenshot]
+    ) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "NotionArchiveScreenshots-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let derivativeRoot = root.appendingPathComponent(
+            "derivatives",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: derivativeRoot,
+            withIntermediateDirectories: true
+        )
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: root)
+        }
+        let fileStore = MeetingFileStore(
+            rootURL: root.appendingPathComponent("recordings", isDirectory: true)
+        )
+        let png = try makePNG(width: 64, height: 36)
+        var items: [NotionTimelineScreenshot] = []
+        for (sequenceIndex, timestamp) in timestamps.enumerated() {
+            let id = UUID()
+            let path = try await fileStore.saveScreenshotPNG(
+                png,
+                meetingID: meetingID,
+                screenshotID: id
+            )
+            try repository.appendScreenshot(
+                meetingID: meetingID,
+                id: id,
+                timestamp: timestamp,
+                relativePath: path,
+                pixelWidth: 64,
+                pixelHeight: 36,
+                byteCount: png.count,
+                sequenceIndex: sequenceIndex
+            )
+            items.append(.init(
+                id: id,
+                timestamp: timestamp,
+                sequenceIndex: sequenceIndex
+            ))
+        }
+        return (fileStore, derivativeRoot, items)
+    }
+
+    private func derivativeDirectories(in root: URL) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: nil
+        ).filter {
+            $0.lastPathComponent.hasPrefix("MeetingNotes-NotionScreenshot-")
+        }
+    }
+
+    private func makePNG(width: Int, height: Int) throws -> Data {
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            throw NotionClientError.invalidRequest
+        }
+        context.setFillColor(
+            CGColor(red: 0.2, green: 0.4, blue: 0.7, alpha: 1)
+        )
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        guard let image = context.makeImage(),
+              let data = CFDataCreateMutable(nil, 0),
+              let destination = CGImageDestinationCreateWithData(
+                  data,
+                  UTType.png.identifier as CFString,
+                  1,
+                  nil
+              ) else {
+            throw NotionClientError.invalidRequest
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else {
+            throw NotionClientError.invalidRequest
+        }
+        return data as Data
     }
 }
 
@@ -1376,11 +1769,14 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
     )
     private let failOnAppendAttempts: Set<Int>
     private let cancelOnAppendAttempts: Set<Int>
+    private let failOnUploadAttempts: Set<Int>
     private let explicitChildBlockPages: [NotionChildBlockPage]?
     private let suspendAppendAttempts: Set<Int>
     private let suspendArchiveAttempts: Set<Int>
     private var createCalls = 0
     private var appendAttempts = 0
+    private var uploadAttempts = 0
+    private var events: [String] = []
     private var childBlockPageIndex = 0
     private var completedAppendCalls: [[NotionBlockDraft]] = []
     private var completedArchiveIDs: [String] = []
@@ -1398,6 +1794,7 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
     init(
         failOnAppendAttempts: Set<Int> = [],
         cancelOnAppendAttempts: Set<Int> = [],
+        failOnUploadAttempts: Set<Int> = [],
         initialChildBlockIDs: [String] = [],
         childBlockPages: [NotionChildBlockPage]? = nil,
         suspendAppendAttempts: Set<Int> = [],
@@ -1405,6 +1802,7 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
     ) {
         self.failOnAppendAttempts = failOnAppendAttempts
         self.cancelOnAppendAttempts = cancelOnAppendAttempts
+        self.failOnUploadAttempts = failOnUploadAttempts
         childBlockIDs = initialChildBlockIDs
         explicitChildBlockPages = childBlockPages
         self.suspendAppendAttempts = suspendAppendAttempts
@@ -1429,6 +1827,7 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
         _ = parentPageID
         _ = title
         createCalls += 1
+        events.append("create")
         return page
     }
 
@@ -1438,6 +1837,7 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
     ) async throws -> NotionChildBlockPage {
         _ = pageID
         _ = startCursor
+        events.append("read")
         if let explicitChildBlockPages {
             guard childBlockPageIndex < explicitChildBlockPages.count else {
                 throw NotionClientError.invalidResponse
@@ -1454,6 +1854,7 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
         to pageID: String
     ) async throws -> [String] {
         _ = pageID
+        events.append("append")
         let attempt = appendAttempts
         appendAttempts += 1
         resumeAppendWaiters()
@@ -1479,7 +1880,26 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
         return blockIDs
     }
 
+    func uploadJPEG(
+        data: Data,
+        fileName: String
+    ) async throws -> NotionUploadedFile {
+        _ = data
+        _ = fileName
+        let attempt = uploadAttempts
+        uploadAttempts += 1
+        events.append("upload")
+        if failOnUploadAttempts.contains(attempt) {
+            throw NotionClientError.rateLimited
+        }
+        return NotionUploadedFile(
+            id: "upload-\(attempt)",
+            fileName: "screenshot.jpg"
+        )
+    }
+
     func archiveBlock(id: String) async throws {
+        events.append("archive")
         attemptedArchiveIDs.append(id)
         let attempt = attemptedArchiveIDs.count - 1
         resumeArchiveWaiters()
@@ -1511,6 +1931,8 @@ private actor RecordingNotionAPIClient: NotionAPIClient {
 
     func createCallCount() -> Int { createCalls }
     func appendAttemptCount() -> Int { appendAttempts }
+    func uploadAttemptCount() -> Int { uploadAttempts }
+    func recordedEvents() -> [String] { events }
     func successfulAppendCalls() -> [[NotionBlockDraft]] {
         completedAppendCalls
     }

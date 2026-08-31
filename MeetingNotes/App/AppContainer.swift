@@ -274,7 +274,8 @@ final class AppContainer {
         let notionArchiver = notionArchiver
             ?? LiveMeetingNotionArchiver(
                 repository: repository,
-                httpClient: httpClient
+                httpClient: httpClient,
+                fileStore: fileStore
             )
         let meetingDocumentsUseCase = MeetingDocumentsUseCase(
             repository: repository,

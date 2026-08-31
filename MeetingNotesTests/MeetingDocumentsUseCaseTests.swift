@@ -352,6 +352,26 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
             speakerID: "room-1",
             displayName: "张三"
         )
+        let noteID = UUID()
+        let screenshotID = UUID()
+        try fixture.repository.upsertNote(
+            meetingID: meetingID,
+            id: noteID,
+            timestamp: 7,
+            text: "  记录风险项  ",
+            sequenceIndex: 0
+        )
+        try fixture.repository.appendScreenshot(
+            meetingID: meetingID,
+            id: screenshotID,
+            timestamp: 9,
+            relativePath:
+                "\(meetingID.uuidString)/screenshots/private-source.png",
+            pixelWidth: 1_200,
+            pixelHeight: 800,
+            byteCount: 200,
+            sequenceIndex: 0
+        )
         let snapshotRevision = try fixture.repository
             .meeting(id: meetingID).contentRevision
 
@@ -365,6 +385,14 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         XCTAssertEqual(content.bookmarks.count, 1)
         XCTAssertEqual(content.transcripts.map(\.text), ["确认下周启动"])
         XCTAssertEqual(content.transcripts.map(\.speakerLabel), ["张三"])
+        XCTAssertEqual(content.userNotes.map(\.id), [noteID])
+        XCTAssertEqual(content.userNotes.map(\.text), ["记录风险项"])
+        XCTAssertEqual(content.screenshots.map(\.id), [screenshotID])
+        XCTAssertEqual(content.screenshots.map(\.timestamp), [9])
+        XCTAssertNil(content.screenshots.only?.fileUploadID)
+        XCTAssertFalse(
+            String(describing: content).contains("private-source.png")
+        )
         let meeting = try fixture.repository.meeting(id: meetingID)
         XCTAssertEqual(meeting.notionSyncState, .synced)
         XCTAssertEqual(meeting.notionSyncedContentRevision, snapshotRevision)

@@ -10,6 +10,8 @@ struct NotionMeetingPageContent: Codable, Equatable, Sendable {
     let detailedMinutes: GeneratedDetailedMinutes?
     let bookmarks: [MeetingBookmarkInput]
     let transcripts: [MeetingTranscriptInput]
+    let userNotes: [NotionTimelineNote]
+    let screenshots: [NotionTimelineScreenshot]
 
     private enum CodingKeys: String, CodingKey {
         case title
@@ -21,6 +23,8 @@ struct NotionMeetingPageContent: Codable, Equatable, Sendable {
         case detailedMinutes
         case bookmarks
         case transcripts
+        case userNotes
+        case screenshots
     }
 
     var documentKinds: [MeetingDocumentKind] {
@@ -43,7 +47,9 @@ struct NotionMeetingPageContent: Codable, Equatable, Sendable {
         summary: GeneratedMeetingSummary?,
         detailedMinutes: GeneratedDetailedMinutes?,
         bookmarks: [MeetingBookmarkInput],
-        transcripts: [MeetingTranscriptInput]
+        transcripts: [MeetingTranscriptInput],
+        userNotes: [NotionTimelineNote] = [],
+        screenshots: [NotionTimelineScreenshot] = []
     ) throws {
         guard summary != nil || detailedMinutes != nil else {
             throw NotionMeetingPageContentError.missingLocalDocument
@@ -57,6 +63,8 @@ struct NotionMeetingPageContent: Codable, Equatable, Sendable {
         self.detailedMinutes = detailedMinutes
         self.bookmarks = bookmarks
         self.transcripts = transcripts
+        self.userNotes = userNotes
+        self.screenshots = screenshots
     }
 
     init(from decoder: Decoder) throws {
@@ -85,7 +93,15 @@ struct NotionMeetingPageContent: Codable, Equatable, Sendable {
             transcripts: container.decode(
                 [MeetingTranscriptInput].self,
                 forKey: .transcripts
-            )
+            ),
+            userNotes: container.decodeIfPresent(
+                [NotionTimelineNote].self,
+                forKey: .userNotes
+            ) ?? [],
+            screenshots: container.decodeIfPresent(
+                [NotionTimelineScreenshot].self,
+                forKey: .screenshots
+            ) ?? []
         )
     }
 
@@ -98,7 +114,9 @@ struct NotionMeetingPageContent: Codable, Equatable, Sendable {
         summary: GeneratedMeetingSummary?,
         detailedMinutes: GeneratedDetailedMinutes?,
         bookmarks: [MeetingBookmarkInput],
-        transcripts: [MeetingTranscriptInput]
+        transcripts: [MeetingTranscriptInput],
+        userNotes: [NotionTimelineNote] = [],
+        screenshots: [NotionTimelineScreenshot] = []
     ) throws {
         if summary != nil, detailedMinutes != nil {
             throw NotionMeetingPageContentError.multipleDocuments
@@ -124,7 +142,74 @@ struct NotionMeetingPageContent: Codable, Equatable, Sendable {
             summary: summary,
             detailedMinutes: detailedMinutes,
             bookmarks: bookmarks,
-            transcripts: transcripts
+            transcripts: transcripts,
+            userNotes: userNotes,
+            screenshots: screenshots
+        )
+    }
+
+    func replacingScreenshots(
+        with screenshots: [NotionTimelineScreenshot]
+    ) throws -> NotionMeetingPageContent {
+        try NotionMeetingPageContent(
+            title: title,
+            startedAt: startedAt,
+            duration: duration,
+            mode: mode,
+            contentRevision: contentRevision,
+            summary: summary,
+            detailedMinutes: detailedMinutes,
+            bookmarks: bookmarks,
+            transcripts: transcripts,
+            userNotes: userNotes,
+            screenshots: screenshots
+        )
+    }
+}
+
+struct NotionTimelineNote: Codable, Equatable, Sendable {
+    let id: UUID
+    let timestamp: TimeInterval
+    let text: String
+    let sequenceIndex: Int
+
+    init(
+        id: UUID,
+        timestamp: TimeInterval,
+        text: String,
+        sequenceIndex: Int
+    ) {
+        self.id = id
+        self.timestamp = timestamp.isFinite ? max(0, timestamp) : 0
+        self.text = text
+        self.sequenceIndex = max(0, sequenceIndex)
+    }
+}
+
+struct NotionTimelineScreenshot: Codable, Equatable, Sendable {
+    let id: UUID
+    let timestamp: TimeInterval
+    let sequenceIndex: Int
+    let fileUploadID: String?
+
+    init(
+        id: UUID,
+        timestamp: TimeInterval,
+        sequenceIndex: Int,
+        fileUploadID: String? = nil
+    ) {
+        self.id = id
+        self.timestamp = timestamp.isFinite ? max(0, timestamp) : 0
+        self.sequenceIndex = max(0, sequenceIndex)
+        self.fileUploadID = fileUploadID
+    }
+
+    func uploaded(fileID: String) -> NotionTimelineScreenshot {
+        NotionTimelineScreenshot(
+            id: id,
+            timestamp: timestamp,
+            sequenceIndex: sequenceIndex,
+            fileUploadID: fileID
         )
     }
 }
@@ -337,6 +422,8 @@ struct NotionBlockBuilder: Sendable {
     ) -> [NotionBlockDraft] {
         var result: [NotionBlockDraft] = []
 
+        result.append(contentsOf: timelineBlocks(for: content))
+
         appendHeading("书签", to: &result)
         let bookmarkLines = content.bookmarks
             .sorted { $0.timestamp < $1.timestamp }
@@ -364,6 +451,49 @@ struct NotionBlockBuilder: Sendable {
                 return "[\(formatTime(transcript.startTime))-\(formatTime(transcript.endTime))] \(speaker)\(transcript.text)"
             }
         appendList(transcriptLines, emptyKind: .paragraph, to: &result)
+        return result
+    }
+
+    private func timelineBlocks(
+        for content: NotionMeetingPageContent
+    ) -> [NotionBlockDraft] {
+        var events = content.userNotes.compactMap {
+            TimelineEvent.note($0)
+        }
+        events.append(contentsOf: content.screenshots.compactMap {
+            guard let fileUploadID = $0.fileUploadID?.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ), !fileUploadID.isEmpty else {
+                return nil
+            }
+            return TimelineEvent.screenshot(
+                $0.uploaded(fileID: fileUploadID)
+            )
+        })
+        events.sort(by: TimelineEvent.comesBefore)
+        guard !events.isEmpty else { return [] }
+
+        var result: [NotionBlockDraft] = []
+        appendHeading("会议时间轴", to: &result)
+        for event in events {
+            switch event {
+            case .note(let note):
+                append(
+                    kind: .bulletedListItem,
+                    text: "[\(formatTime(note.timestamp))] 笔记：\(note.text)",
+                    to: &result
+                )
+            case .screenshot(let screenshot):
+                append(
+                    kind: .paragraph,
+                    text: "[\(formatTime(screenshot.timestamp))] 截图",
+                    to: &result
+                )
+                if let fileUploadID = screenshot.fileUploadID {
+                    result.append(.image(fileUploadID: fileUploadID))
+                }
+            }
+        }
         return result
     }
 
@@ -566,6 +696,52 @@ struct NotionBlockBuilder: Sendable {
             return String(format: "%02d:%02d:%02d", hours, minutes, remainder)
         }
         return String(format: "%02d:%02d", minutes, remainder)
+    }
+}
+
+private enum TimelineEvent {
+    case note(NotionTimelineNote)
+    case screenshot(NotionTimelineScreenshot)
+
+    private var timestamp: TimeInterval {
+        switch self {
+        case .note(let note): note.timestamp
+        case .screenshot(let screenshot): screenshot.timestamp
+        }
+    }
+
+    private var sequenceIndex: Int {
+        switch self {
+        case .note(let note): note.sequenceIndex
+        case .screenshot(let screenshot): screenshot.sequenceIndex
+        }
+    }
+
+    private var kindRank: Int {
+        switch self {
+        case .note: 0
+        case .screenshot: 1
+        }
+    }
+
+    private var id: UUID {
+        switch self {
+        case .note(let note): note.id
+        case .screenshot(let screenshot): screenshot.id
+        }
+    }
+
+    static func comesBefore(_ lhs: TimelineEvent, _ rhs: TimelineEvent) -> Bool {
+        if lhs.timestamp != rhs.timestamp {
+            return lhs.timestamp < rhs.timestamp
+        }
+        if lhs.sequenceIndex != rhs.sequenceIndex {
+            return lhs.sequenceIndex < rhs.sequenceIndex
+        }
+        if lhs.kindRank != rhs.kindRank {
+            return lhs.kindRank < rhs.kindRank
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
     }
 }
 
