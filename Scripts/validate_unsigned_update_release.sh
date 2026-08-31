@@ -220,7 +220,7 @@ fi
 
 echo "=== Verify architecture, Sparkle embedding, and nested helpers ==="
 EXECUTABLE="$APP/Contents/MacOS/$(plist_value CFBundleExecutable)"
-lipo -verify_arch arm64 "$EXECUTABLE" \
+lipo "$EXECUTABLE" -verify_arch arm64 \
     || fail "main executable is not arm64"
 otool -L "$EXECUTABLE" \
     | grep -Fq "@rpath/Sparkle.framework/Versions/B/Sparkle" \

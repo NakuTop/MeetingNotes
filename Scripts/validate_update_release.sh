@@ -224,7 +224,7 @@ APP_TEAM_ID="$(sed -n 's/^TeamIdentifier=//p' <<<"$SIGN_DETAILS" \
     || fail "Developer ID TeamIdentifier= missing"
 
 EXECUTABLE="$APP/Contents/MacOS/$(plist_value CFBundleExecutable)"
-lipo -verify_arch arm64 "$EXECUTABLE" \
+lipo "$EXECUTABLE" -verify_arch arm64 \
     || fail "main executable is not arm64"
 otool -L "$EXECUTABLE" \
     | grep -Fq "@rpath/Sparkle.framework/Versions/B/Sparkle" \

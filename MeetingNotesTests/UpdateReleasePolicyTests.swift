@@ -527,6 +527,29 @@ final class UpdateReleasePolicyTests: XCTestCase {
         )
     }
 
+    func testReleaseValidatorsPassExecutableBeforeLipoArchitectureCheck()
+        throws {
+        for path in [
+            "Scripts/validate_update_release.sh",
+            "Scripts/validate_unsigned_update_release.sh"
+        ] {
+            let validator = try repositoryText(path)
+
+            XCTAssertTrue(
+                validator.contains(
+                    "lipo \"$EXECUTABLE\" -verify_arch arm64"
+                ),
+                "Invalid lipo argument order in \(path)"
+            )
+            XCTAssertFalse(
+                validator.contains(
+                    "lipo -verify_arch arm64 \"$EXECUTABLE\""
+                ),
+                "Executable would be parsed as an architecture in \(path)"
+            )
+        }
+    }
+
     private func repositoryText(_ path: String) throws -> String {
         try String(
             contentsOf: repositoryRoot().appendingPathComponent(path),
