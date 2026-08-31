@@ -524,6 +524,68 @@ final class MeetingDocumentsUseCaseTests: XCTestCase {
         XCTAssertEqual(input.bookmarks.map(\.excerpt), ["确认下周正式启动"])
     }
 
+    func testDocumentInputsIncludeSanitizedOrderedNotesButNoScreenshots()
+        async throws {
+        let fixture = try makeFixture(notionEnabled: false)
+        let meetingID = try fixture.makeMeeting()
+        try fixture.addFinalTranscript(to: meetingID)
+        try fixture.repository.upsertNote(
+            meetingID: meetingID,
+            id: UUID(),
+            timestamp: 8,
+            text: "  后一条用户笔记  ",
+            sequenceIndex: 1
+        )
+        try fixture.repository.upsertNote(
+            meetingID: meetingID,
+            id: UUID(),
+            timestamp: 2,
+            text: "先一条用户笔记",
+            sequenceIndex: 0
+        )
+        try fixture.repository.upsertNote(
+            meetingID: meetingID,
+            id: UUID(),
+            timestamp: 4,
+            text: "  \n  ",
+            sequenceIndex: 2
+        )
+        try fixture.repository.appendScreenshot(
+            meetingID: meetingID,
+            id: UUID(),
+            timestamp: 3,
+            relativePath:
+                "\(meetingID.uuidString)/screenshots/secret-shot.png",
+            pixelWidth: 999,
+            pixelHeight: 777,
+            byteCount: 123,
+            sequenceIndex: 0
+        )
+        let meeting = try fixture.repository.meeting(id: meetingID)
+
+        let built = MeetingDocumentInputBuilder.inputs(for: meeting)
+
+        XCTAssertEqual(built.userNotes.map(\.timestamp), [2, 8])
+        XCTAssertEqual(
+            built.userNotes.map(\.text),
+            ["先一条用户笔记", "后一条用户笔记"]
+        )
+        XCTAssertFalse(String(describing: built).contains("secret-shot.png"))
+
+        try await fixture.useCase.generate(
+            meetingID: meetingID,
+            kind: .summary
+        )
+        try await fixture.useCase.generate(
+            meetingID: meetingID,
+            kind: .detailedMinutes
+        )
+        let summaryInput = await fixture.summaryGenerator.lastInput()
+        let minutesInput = await fixture.minutesGenerator.lastInput()
+        XCTAssertEqual(summaryInput?.userNotes, built.userNotes)
+        XCTAssertEqual(minutesInput?.userNotes, built.userNotes)
+    }
+
     func testCustomSpeakerNamesReachBothGeneratedDocumentInputs() async throws {
         let fixture = try makeFixture(notionEnabled: false)
         let meetingID = try fixture.makeMeeting(mode: .online)

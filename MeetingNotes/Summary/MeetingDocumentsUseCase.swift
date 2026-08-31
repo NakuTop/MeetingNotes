@@ -337,7 +337,8 @@ final class MeetingDocumentsUseCase: MeetingDocumentManaging {
                     input: MeetingSummaryInput(
                         title: meeting.title,
                         transcripts: input.transcripts,
-                        bookmarks: input.bookmarks
+                        bookmarks: input.bookmarks,
+                        userNotes: input.userNotes
                     ),
                     model: generationModel
                 )
@@ -378,7 +379,8 @@ final class MeetingDocumentsUseCase: MeetingDocumentManaging {
                         input: MeetingSummaryInput(
                             title: meeting.title,
                             transcripts: input.transcripts,
-                            bookmarks: input.bookmarks
+                            bookmarks: input.bookmarks,
+                            userNotes: input.userNotes
                         ),
                         model: generationModel
                     )
@@ -812,7 +814,8 @@ enum MeetingDocumentInputBuilder {
         for meeting: MeetingRecord
     ) -> (
         transcripts: [MeetingTranscriptInput],
-        bookmarks: [MeetingBookmarkInput]
+        bookmarks: [MeetingBookmarkInput],
+        userNotes: [MeetingUserNoteInput]
     ) {
         let canonicalTranscripts = TranscriptCorrectionResolver.resolve(
             transcripts: meeting.transcripts.filter(\.isFinal),
@@ -855,6 +858,36 @@ enum MeetingDocumentInputBuilder {
                     excerpt: excerpt
                 )
             }
-        return (transcripts, bookmarks)
+        let userNotes = meeting.notes
+            .enumerated()
+            .sorted { lhs, rhs in
+                let left = lhs.element
+                let right = rhs.element
+                if left.timestamp != right.timestamp {
+                    return left.timestamp < right.timestamp
+                }
+                if left.sequenceIndex != right.sequenceIndex {
+                    return left.sequenceIndex < right.sequenceIndex
+                }
+                if left.id != right.id {
+                    return left.id.uuidString < right.id.uuidString
+                }
+                return lhs.offset < rhs.offset
+            }
+            .compactMap { _, note -> MeetingUserNoteInput? in
+                guard let text = TranscriptTextSanitizer.nonEmpty(
+                    note.text
+                ) else {
+                    return nil
+                }
+                let timestamp = note.timestamp.isFinite
+                    ? max(0, note.timestamp)
+                    : 0
+                return MeetingUserNoteInput(
+                    timestamp: timestamp,
+                    text: text
+                )
+            }
+        return (transcripts, bookmarks, userNotes)
     }
 }

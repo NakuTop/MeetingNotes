@@ -33,7 +33,8 @@ struct DetailedMinutesInputChunker: Equatable, Sendable {
 
         let emptyPartial = try partialMessage(
             title: input.title,
-            transcripts: []
+            transcripts: [],
+            userNotes: []
         )
         guard fits(emptyPartial) else {
             throw DeepSeekClientError.inputTooLarge
@@ -45,10 +46,18 @@ struct DetailedMinutesInputChunker: Equatable, Sendable {
         for transcript in input.transcripts {
             for fragment in try fragments(
                 of: transcript,
-                title: input.title
+                title: input.title,
+                userNotes: input.userNotes
             ) {
                 let candidate = current + [fragment]
-                if try fitsPartial(title: input.title, transcripts: candidate) {
+                if try fitsPartial(
+                    title: input.title,
+                    transcripts: candidate,
+                    userNotes: notes(
+                        from: input.userNotes,
+                        intersecting: candidate
+                    )
+                ) {
                     current = candidate
                 } else {
                     if !current.isEmpty {
@@ -56,7 +65,11 @@ struct DetailedMinutesInputChunker: Equatable, Sendable {
                     }
                     guard try fitsPartial(
                         title: input.title,
-                        transcripts: [fragment]
+                        transcripts: [fragment],
+                        userNotes: notes(
+                            from: input.userNotes,
+                            intersecting: [fragment]
+                        )
                     ) else {
                         throw DeepSeekClientError.inputTooLarge
                     }
@@ -69,22 +82,46 @@ struct DetailedMinutesInputChunker: Equatable, Sendable {
             chunks.append(current)
         }
 
-        let messages = try chunks.map {
-            try partialMessage(title: input.title, transcripts: $0)
+        let partitionedNotes = MeetingUserNoteInputPolicy.partition(
+            input.userNotes,
+            across: chunks
+        )
+        let messages = try chunks.enumerated().map { index, chunk in
+            try partialMessage(
+                title: input.title,
+                transcripts: chunk,
+                userNotes: partitionedNotes[index]
+            )
+        }
+        guard messages.allSatisfy(fits) else {
+            throw DeepSeekClientError.inputTooLarge
         }
         return .partials(messages)
     }
 
     private func fragments(
         of transcript: MeetingTranscriptInput,
-        title: String
+        title: String,
+        userNotes: [MeetingUserNoteInput]
     ) throws -> [MeetingTranscriptInput] {
-        if try fitsPartial(title: title, transcripts: [transcript]) {
+        let associatedNotes = notes(
+            from: userNotes,
+            intersecting: [transcript]
+        )
+        if try fitsPartial(
+            title: title,
+            transcripts: [transcript],
+            userNotes: associatedNotes
+        ) {
             return [transcript]
         }
 
         let emptyFragment = replacingText(in: transcript, with: "")
-        guard try fitsPartial(title: title, transcripts: [emptyFragment]) else {
+        guard try fitsPartial(
+            title: title,
+            transcripts: [emptyFragment],
+            userNotes: associatedNotes
+        ) else {
             throw DeepSeekClientError.inputTooLarge
         }
 
@@ -104,7 +141,11 @@ struct DetailedMinutesInputChunker: Equatable, Sendable {
                 let middle = lower + (upper - lower) / 2
                 let text = String(characters[start..<middle])
                 let candidate = replacingText(in: transcript, with: text)
-                if try fitsPartial(title: title, transcripts: [candidate]) {
+                if try fitsPartial(
+                    title: title,
+                    transcripts: [candidate],
+                    userNotes: associatedNotes
+                ) {
                     bestEnd = middle
                     lower = middle + 1
                 } else {
@@ -128,22 +169,41 @@ struct DetailedMinutesInputChunker: Equatable, Sendable {
 
     private func fitsPartial(
         title: String,
-        transcripts: [MeetingTranscriptInput]
+        transcripts: [MeetingTranscriptInput],
+        userNotes: [MeetingUserNoteInput]
     ) throws -> Bool {
-        fits(try partialMessage(title: title, transcripts: transcripts))
+        fits(
+            try partialMessage(
+                title: title,
+                transcripts: transcripts,
+                userNotes: userNotes
+            )
+        )
     }
 
     private func partialMessage(
         title: String,
-        transcripts: [MeetingTranscriptInput]
+        transcripts: [MeetingTranscriptInput],
+        userNotes: [MeetingUserNoteInput]
     ) throws -> String {
         try DetailedMinutesPrompt.partialUserMessage(
             for: MeetingSummaryInput(
                 title: title,
                 transcripts: transcripts,
-                bookmarks: []
+                bookmarks: [],
+                userNotes: userNotes
             )
         )
+    }
+
+    private func notes(
+        from userNotes: [MeetingUserNoteInput],
+        intersecting transcripts: [MeetingTranscriptInput]
+    ) -> [MeetingUserNoteInput] {
+        MeetingUserNoteInputPolicy.partition(
+            userNotes,
+            across: [transcripts]
+        ).first ?? []
     }
 
     private func fits(_ message: String) -> Bool {

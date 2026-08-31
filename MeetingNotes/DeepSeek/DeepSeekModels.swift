@@ -39,10 +39,67 @@ struct MeetingBookmarkInput: Codable, Equatable, Sendable {
     let excerpt: String
 }
 
+struct MeetingUserNoteInput: Codable, Equatable, Sendable {
+    let timestamp: TimeInterval
+    let text: String
+}
+
 struct MeetingSummaryInput: Equatable, Sendable {
     let title: String
     let transcripts: [MeetingTranscriptInput]
     let bookmarks: [MeetingBookmarkInput]
+    let userNotes: [MeetingUserNoteInput]
+
+    init(
+        title: String,
+        transcripts: [MeetingTranscriptInput],
+        bookmarks: [MeetingBookmarkInput],
+        userNotes: [MeetingUserNoteInput] = []
+    ) {
+        self.title = title
+        self.transcripts = transcripts
+        self.bookmarks = bookmarks
+        self.userNotes = userNotes
+    }
+}
+
+enum MeetingUserNoteInputPolicy {
+    static func ordered(
+        _ notes: [MeetingUserNoteInput]
+    ) -> [MeetingUserNoteInput] {
+        notes.enumerated().sorted { lhs, rhs in
+            if lhs.element.timestamp == rhs.element.timestamp {
+                return lhs.offset < rhs.offset
+            }
+            return lhs.element.timestamp < rhs.element.timestamp
+        }.map(\.element)
+    }
+
+    static func partition(
+        _ notes: [MeetingUserNoteInput],
+        across transcriptChunks: [[MeetingTranscriptInput]]
+    ) -> [[MeetingUserNoteInput]] {
+        var result = Array(
+            repeating: [MeetingUserNoteInput](),
+            count: transcriptChunks.count
+        )
+        let ranges = transcriptChunks.map { chunk -> ClosedRange<TimeInterval>? in
+            guard let lower = chunk.map(\.startTime).min(),
+                  let upper = chunk.map(\.endTime).max() else {
+                return nil
+            }
+            return min(lower, upper)...max(lower, upper)
+        }
+        for note in ordered(notes) {
+            guard let index = ranges.firstIndex(where: {
+                $0?.contains(note.timestamp) == true
+            }) else {
+                continue
+            }
+            result[index].append(note)
+        }
+        return result
+    }
 }
 
 enum DeepSeekClientError: Error, Equatable, Sendable {

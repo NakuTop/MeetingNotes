@@ -58,11 +58,16 @@ struct DeepSeekClient: Sendable {
         }
 
         var partialSummaries: [GeneratedMeetingSummary] = []
-        for chunk in chunks {
+        let partitionedNotes = MeetingUserNoteInputPolicy.partition(
+            input.userNotes,
+            across: chunks
+        )
+        for (index, chunk) in chunks.enumerated() {
             let partialInput = MeetingSummaryInput(
                 title: input.title,
                 transcripts: chunk,
-                bookmarks: []
+                bookmarks: [],
+                userNotes: partitionedNotes[index]
             )
             partialSummaries.append(
                 try await requestSummary(
@@ -78,7 +83,8 @@ struct DeepSeekClient: Sendable {
             userMessage: MeetingSummaryPrompt.aggregationMessage(
                 partialSummaries: partialSummaries,
                 title: input.title,
-                bookmarks: input.bookmarks
+                bookmarks: input.bookmarks,
+                userNotes: input.userNotes
             ),
             model: model
         )
@@ -107,7 +113,8 @@ struct DeepSeekClient: Sendable {
 
             let aggregateMessage = try DetailedMinutesPrompt.aggregationMessage(
                 partialMinutes: partialMinutes,
-                bookmarks: input.bookmarks
+                bookmarks: input.bookmarks,
+                userNotes: input.userNotes
             )
             let aggregateByteCount = aggregateMessage.utf8.count
             guard aggregateByteCount <= detailedMinutesLimits.aggregateByteLimit else {

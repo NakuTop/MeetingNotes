@@ -205,13 +205,30 @@ final class DeepSeekClientTests: XCTestCase {
                 .init(startTime: 1, endTime: 2, text: "22222"),
                 .init(startTime: 2, endTime: 3, text: "33333")
             ],
-            bookmarks: [.init(timestamp: 2, excerpt: "全局书签")]
+            bookmarks: [.init(timestamp: 2, excerpt: "全局书签")],
+            userNotes: [
+                .init(timestamp: 0.5, text: "分块笔记一"),
+                .init(timestamp: 1.5, text: "分块笔记二"),
+            ]
         )
 
         _ = try await client.summarize(input: input, model: "deepseek-v4-flash")
 
         let bodies = await httpClient.requestBodies()
         XCTAssertEqual(bodies.count, 4)
+        let partialNoteTexts = try bodies.dropLast().map { body in
+            let payload = try Self.promptPayload(
+                from: Self.userMessage(from: body)
+            )
+            let notes = try XCTUnwrap(
+                payload["userNotes"] as? [[String: Any]]
+            )
+            return notes.compactMap { $0["text"] as? String }
+        }
+        XCTAssertEqual(
+            partialNoteTexts,
+            [["分块笔记一"], ["分块笔记二"], []]
+        )
         let finalBody = try XCTUnwrap(bodies.last)
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: finalBody) as? [String: Any]
@@ -233,6 +250,23 @@ final class DeepSeekClientTests: XCTestCase {
             finalPayload["bookmarks"] as? [[String: Any]]
         )
         XCTAssertEqual(bookmarks.first?["excerpt"] as? String, "全局书签")
+        let notes = try XCTUnwrap(
+            finalPayload["userNotes"] as? [[String: Any]]
+        )
+        XCTAssertEqual(
+            notes.compactMap { $0["text"] as? String },
+            ["分块笔记一", "分块笔记二"]
+        )
+        for body in bodies {
+            let encoded = String(decoding: body, as: UTF8.self)
+            for forbidden in [
+                "screenshots", "relativePath", "fileName", "pixelWidth",
+                "pixelHeight", "attachmentID", "imageData",
+                "secret-shot.png",
+            ] {
+                XCTAssertFalse(encoded.contains(forbidden), forbidden)
+            }
+        }
     }
 
     func testDetailedMinutesUsesExplicitTokenBudgetAndParsesStructuredDocument() async throws {
@@ -305,9 +339,15 @@ final class DeepSeekClientTests: XCTestCase {
                 speakerLabel: "远端 2"
             )
         ]
+        let userNotes = [
+            MeetingUserNoteInput(timestamp: 0.5, text: "纪要笔记一"),
+            MeetingUserNoteInput(timestamp: 1.5, text: "纪要笔记二"),
+            MeetingUserNoteInput(timestamp: 2.5, text: "纪要笔记三"),
+        ]
         let requestByteLimit = try Self.limitThatFitsEachPartial(
             title: "长会议",
-            transcripts: transcripts
+            transcripts: transcripts,
+            userNotes: userNotes
         )
         let responses = [
             Self.detailedMinutes(overview: "已解码局部一"),
@@ -327,7 +367,8 @@ final class DeepSeekClientTests: XCTestCase {
         let input = MeetingSummaryInput(
             title: "长会议",
             transcripts: transcripts,
-            bookmarks: [.init(timestamp: 2, excerpt: "全局书签")]
+            bookmarks: [.init(timestamp: 2, excerpt: "全局书签")],
+            userNotes: userNotes
         )
 
         let result = try await client.detailedMinutes(
@@ -338,7 +379,7 @@ final class DeepSeekClientTests: XCTestCase {
         XCTAssertEqual(result.overview, "最终纪要")
         let bodies = await httpClient.requestBodies()
         XCTAssertEqual(bodies.count, 4)
-        for bodyData in bodies.prefix(3) {
+        for (index, bodyData) in bodies.prefix(3).enumerated() {
             let partialObject = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: bodyData) as? [String: Any]
             )
@@ -350,6 +391,13 @@ final class DeepSeekClientTests: XCTestCase {
             XCTAssertEqual(partialPayload["mode"] as? String, "partial")
             XCTAssertFalse(
                 partialMessages.last?["content"]?.contains("全局书签") == true
+            )
+            let notes = try XCTUnwrap(
+                partialPayload["userNotes"] as? [[String: Any]]
+            )
+            XCTAssertEqual(
+                notes.compactMap { $0["text"] as? String },
+                [userNotes[index].text]
             )
         }
         let finalBody = try XCTUnwrap(bodies.last)
@@ -363,6 +411,12 @@ final class DeepSeekClientTests: XCTestCase {
         XCTAssertTrue(finalUserMessage.contains("已解码局部二"))
         XCTAssertTrue(finalUserMessage.contains("已解码局部三"))
         XCTAssertTrue(finalUserMessage.contains("全局书签"))
+        for note in userNotes {
+            XCTAssertEqual(
+                finalUserMessage.components(separatedBy: note.text).count - 1,
+                1
+            )
+        }
         XCTAssertEqual(
             finalUserMessage.components(separatedBy: "全局书签").count - 1,
             1
@@ -776,14 +830,21 @@ final class DeepSeekClientTests: XCTestCase {
 
     private static func limitThatFitsEachPartial(
         title: String,
-        transcripts: [MeetingTranscriptInput]
+        transcripts: [MeetingTranscriptInput],
+        userNotes: [MeetingUserNoteInput] = []
     ) throws -> Int {
-        let individualSizes = try transcripts.map { transcript in
+        let partitionedNotes = MeetingUserNoteInputPolicy.partition(
+            userNotes,
+            across: transcripts.map { [$0] }
+        )
+        let individualSizes = try transcripts.enumerated().map {
+            index, transcript in
             try DetailedMinutesPrompt.partialUserMessage(
                 for: .init(
                     title: title,
                     transcripts: [transcript],
-                    bookmarks: []
+                    bookmarks: [],
+                    userNotes: partitionedNotes[index]
                 )
             ).utf8.count
         }
@@ -792,7 +853,8 @@ final class DeepSeekClientTests: XCTestCase {
             for: .init(
                 title: title,
                 transcripts: transcripts,
-                bookmarks: []
+                bookmarks: [],
+                userNotes: userNotes
             )
         ).utf8.count
         XCTAssertGreaterThan(directSize, limit)
