@@ -12,6 +12,61 @@ final class LaunchArgumentsTests: XCTestCase {
         )
     }
 
+    func testScreenshotFixtureRequiresExplicitUITestingContext() {
+        let fixture = "-ui-testing-screenshot-fixture"
+
+        XCTAssertTrue(
+            LaunchArguments.usesScreenshotUITestFixture([
+                "MeetingNotes", "-uiTesting", fixture,
+            ])
+        )
+        XCTAssertFalse(
+            LaunchArguments.usesScreenshotUITestFixture([
+                "MeetingNotes", fixture,
+            ])
+        )
+        XCTAssertFalse(
+            LaunchArguments.usesScreenshotUITestFixture([
+                "MeetingNotes", "-uiTesting",
+            ])
+        )
+    }
+
+    @MainActor
+    func testScreenshotFixtureSavesAnInMemoryCaptureWithoutLivePermission()
+        async throws {
+        #if DEBUG
+        let recordingsURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "LaunchArgumentsTests-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: recordingsURL) }
+        let container = try AppContainer.uiTesting(arguments: [
+            "MeetingNotes",
+            "-uiTesting",
+            "-ui-testing-screenshot-fixture",
+        ], recordingsURL: recordingsURL)
+
+        await container.libraryViewModel.startMeeting(mode: .offline)
+        await container.recordingAnnotationViewModel.captureScreenshot()
+
+        let snapshot = await container.coordinator.snapshot()
+        let meetingID = try XCTUnwrap(snapshot.meetingID)
+        let screenshots = try container.repository.screenshots(
+            meetingID: meetingID
+        )
+        XCTAssertEqual(screenshots.count, 1)
+        XCTAssertEqual(screenshots.first?.pixelWidth, 1)
+        XCTAssertEqual(screenshots.first?.pixelHeight, 1)
+        XCTAssertEqual(
+            container.recordingAnnotationViewModel.screenshotState,
+            ScreenshotCaptureState.saved
+        )
+        try await container.coordinator.stop()
+        #endif
+    }
+
     func testAudioLifecycleTriggerAcceptsOnlyDirectTemporaryFixturePath() {
         let key = "MEETING_NOTES_UI_AUDIO_PLAYER_LIFECYCLE_TRIGGER"
         let validPath = "/tmp/MeetingNotes-UITesting-Trigger-123"

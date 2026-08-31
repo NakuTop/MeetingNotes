@@ -86,7 +86,8 @@ final class AppContainer {
         audioDiagnosticExplainer:
             (any AudioDiagnosticExplanationRequesting)? = nil,
         applicationUpdateDriver: ApplicationUpdateDriving? = nil,
-        updateAbout: ApplicationUpdateAbout = .current()
+        updateAbout: ApplicationUpdateAbout = .current(),
+        screenshotCapture: (any MeetingScreenshotCapturing)? = nil
     ) {
         self.repository = repository
         self.fileStore = fileStore
@@ -157,6 +158,8 @@ final class AppContainer {
         let recordingAnnotationViewModel = RecordingAnnotationViewModel(
             repository: repository,
             fileStore: fileStore,
+            screenshotCapture: screenshotCapture
+                ?? MeetingScreenshotCaptureService(),
             presentationStore: recordingPresentationStore
         )
         self.recordingAnnotationViewModel = recordingAnnotationViewModel

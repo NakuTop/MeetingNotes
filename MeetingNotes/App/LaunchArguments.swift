@@ -2,6 +2,8 @@ import Foundation
 
 enum LaunchArguments {
     static let uiTesting = "-uiTesting"
+    static let uiTestingScreenshotFixture =
+        "-ui-testing-screenshot-fixture"
     static let uiTestingSlowRenameEnvironment =
         "MEETING_NOTES_UI_SLOW_RENAME"
     static let uiTestingAudioPlayerEnvironment =
@@ -21,6 +23,13 @@ enum LaunchArguments {
         _ arguments: [String] = ProcessInfo.processInfo.arguments
     ) -> Bool {
         arguments.contains(uiTesting)
+    }
+
+    static func usesScreenshotUITestFixture(
+        _ arguments: [String] = ProcessInfo.processInfo.arguments
+    ) -> Bool {
+        isUITesting(arguments)
+            && arguments.contains(uiTestingScreenshotFixture)
     }
 
     static func usesSlowRenameUITestFixture(
@@ -88,7 +97,9 @@ enum LaunchArguments {
 @MainActor
 extension AppContainer {
     static func uiTesting(
-        speakerDiarizationEnabled: Bool = false
+        speakerDiarizationEnabled: Bool = false,
+        arguments: [String] = ProcessInfo.processInfo.arguments,
+        recordingsURL explicitRecordingsURL: URL? = nil
     ) throws -> AppContainer {
         let repository = try MeetingRepository.inMemory()
         let usesSlowRenameFixture =
@@ -101,11 +112,14 @@ extension AppContainer {
             LaunchArguments.usesSpeakerArchiveUITestFixture()
         let usesMeetingEditingFixture =
             LaunchArguments.usesMeetingEditingUITestFixture()
+        let usesScreenshotFixture =
+            LaunchArguments.usesScreenshotUITestFixture(arguments)
         let audioPlayerMeetingID = LaunchArguments.audioPlayerMeetingID()
         let audioPlayerLifecycleTriggerURL =
             LaunchArguments.audioPlayerLifecycleTriggerURL()
-        let recordingsURL = URL(fileURLWithPath: "/tmp", isDirectory: true)
-            .appendingPathComponent(
+        let recordingsURL = explicitRecordingsURL
+            ?? URL(fileURLWithPath: "/tmp", isDirectory: true)
+                .appendingPathComponent(
                 "MeetingNotes-UITesting-\(ProcessInfo.processInfo.processIdentifier)",
                 isDirectory: true
             )
@@ -361,7 +375,10 @@ extension AppContainer {
             audioOutputTester: UITestAudioOutputTester(),
             audioDiagnosticCoordinatorFactory:
                 UITestAudioDiagnosticCoordinatorFactory(),
-            audioDiagnosticExplainer: UITestAudioDiagnosticExplainer()
+            audioDiagnosticExplainer: UITestAudioDiagnosticExplainer(),
+            screenshotCapture: usesScreenshotFixture
+                ? UITestScreenshotCapture()
+                : nil
         )
         if let triggerURL = audioPlayerLifecycleTriggerURL,
            let meetingID = audioPlayerMeetingID {
@@ -513,6 +530,25 @@ private final class UITestDelayedNotionTitleUpdater:
         _ = pageID
         _ = title
         try await Task.sleep(for: .seconds(5))
+    }
+}
+
+private struct UITestScreenshotCapture: MeetingScreenshotCapturing {
+    private static let onePixelPNGBase64 =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
+    func captureDisplayUnderMouse() async throws
+        -> MeetingScreenshotCaptureResult {
+        try await Task.sleep(for: .milliseconds(250))
+        try Task.checkCancellation()
+        guard let data = Data(base64Encoded: Self.onePixelPNGBase64) else {
+            throw MeetingScreenshotCaptureError.pngEncodingFailed
+        }
+        return MeetingScreenshotCaptureResult(
+            pngData: data,
+            pixelWidth: 1,
+            pixelHeight: 1
+        )
     }
 }
 

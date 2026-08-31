@@ -26,15 +26,17 @@ final class MeetingFlowUITests: XCTestCase {
         keepScreenshot(named: "01-home", of: app)
     }
 
-    func testFloatingRecorderAlwaysHasFourControlsAndBookmarkPersists() {
-        let app = launchApp()
+    func testFloatingRecorderAnnotationsPersistAndRemainEditable() {
+        let app = launchApp(
+            arguments: ["-ui-testing-screenshot-fixture"]
+        )
         let start = app.buttons["meeting.start.offline"]
         XCTAssertTrue(start.waitForExistence(timeout: 5))
         start.click()
         XCTAssertTrue(
             app.buttons["floating.pause"].waitForExistence(timeout: 5)
         )
-        assertExactlyFourFloatingControls(in: app)
+        assertExactlySixFloatingControls(in: app)
         let elapsed = app.descendants(matching: .any)[
             "floating.elapsed"
         ].firstMatch
@@ -66,11 +68,11 @@ final class MeetingFlowUITests: XCTestCase {
 
         app.buttons["floating.pause"].click()
         XCTAssertTrue(waitForLabel("继续", on: app.buttons["floating.pause"]))
-        assertExactlyFourFloatingControls(in: app)
+        assertExactlySixFloatingControls(in: app)
 
         app.buttons["floating.pause"].click()
         XCTAssertTrue(waitForLabel("暂停", on: app.buttons["floating.pause"]))
-        assertExactlyFourFloatingControls(in: app)
+        assertExactlySixFloatingControls(in: app)
 
         app.buttons["floating.bookmark"].click()
         XCTAssertTrue(
@@ -80,6 +82,25 @@ final class MeetingFlowUITests: XCTestCase {
         )
 
         let stop = app.buttons["floating.stop"]
+        app.buttons["floating.note"].click()
+        let noteField = app.textFields["floating.noteField"]
+        XCTAssertTrue(noteField.waitForExistence(timeout: 3))
+        XCTAssertTrue(stop.isHittable, "输入笔记时必须仍可结束会议")
+        noteField.typeText("跟进发布安排")
+        noteField.typeKey(.return, modifierFlags: [])
+        XCTAssertTrue(noteField.waitForNonExistence(timeout: 3))
+
+        let screenshot = app.buttons["floating.screenshot"]
+        screenshot.click()
+        XCTAssertTrue(
+            waitForEnabled(false, on: screenshot, timeout: 3),
+            "测试截图应进入捕获状态"
+        )
+        XCTAssertTrue(
+            waitForEnabled(true, on: screenshot, timeout: 3),
+            "测试截图应完成并恢复按钮"
+        )
+
         stop.click()
         XCTAssertTrue(stop.waitForNonExistence(timeout: 3))
         XCTAssertTrue(
@@ -87,6 +108,23 @@ final class MeetingFlowUITests: XCTestCase {
                 .waitForExistence(timeout: 5)
         )
         XCTAssertTrue(app.staticTexts["meeting.bookmark"].firstMatch.exists)
+
+        let note = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "meeting.timeline.note."
+            )
+        ).firstMatch
+        let capturedScreenshot = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "meeting.timeline.screenshot."
+            )
+        ).firstMatch
+        XCTAssertTrue(note.waitForExistence(timeout: 5))
+        XCTAssertTrue(capturedScreenshot.waitForExistence(timeout: 5))
+        XCTAssertTrue(note.label.contains("00:"))
+        XCTAssertTrue(capturedScreenshot.label.contains("截图"))
 
         let returnHome = app.buttons["meeting.returnHome"]
         XCTAssertTrue(returnHome.waitForExistence(timeout: 5))
@@ -103,6 +141,43 @@ final class MeetingFlowUITests: XCTestCase {
         )
         XCTAssertTrue(app.buttons["meeting.start.online"].exists)
         XCTAssertTrue(historyMeeting.waitForExistence(timeout: 5))
+        historyMeeting.click()
+
+        let reopenedNote = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "meeting.timeline.note."
+            )
+        ).firstMatch
+        XCTAssertTrue(reopenedNote.waitForExistence(timeout: 5))
+        XCTAssertTrue(accessibleText(of: reopenedNote).contains("跟进发布安排"))
+        replaceText(in: reopenedNote, with: "跟进发布安排（已修正）")
+        XCTAssertTrue(
+            waitForStaticText(
+                identifier: "meeting.edits.saveStatus",
+                label: "已保存到本机",
+                in: app,
+                timeout: 5
+            )
+        )
+        reopenedNote.rightClick()
+        let deleteNote = app.menuItems["删除笔记"]
+        XCTAssertTrue(deleteNote.waitForExistence(timeout: 3))
+        deleteNote.click()
+        XCTAssertTrue(reopenedNote.waitForNonExistence(timeout: 5))
+
+        let reopenedScreenshot = app.buttons.matching(
+            NSPredicate(
+                format: "identifier BEGINSWITH %@",
+                "meeting.timeline.screenshot."
+            )
+        ).firstMatch
+        XCTAssertTrue(reopenedScreenshot.waitForExistence(timeout: 3))
+        reopenedScreenshot.rightClick()
+        let deleteScreenshot = app.menuItems["删除截图"]
+        XCTAssertTrue(deleteScreenshot.waitForExistence(timeout: 3))
+        deleteScreenshot.click()
+        XCTAssertTrue(reopenedScreenshot.waitForNonExistence(timeout: 5))
         keepScreenshot(named: "04-returned-home", of: app)
     }
 
@@ -843,13 +918,14 @@ final class MeetingFlowUITests: XCTestCase {
     }
 
     private func launchApp(
+        arguments: [String] = [],
         environment: [String: String] = [:],
         temporaryArtifacts: [URL] = []
     ) -> XCUIApplication {
         continueAfterFailure = false
         installDocumentsPermissionDenialMonitor()
         let app = XCUIApplication()
-        app.launchArguments = ["-uiTesting"]
+        app.launchArguments = ["-uiTesting"] + arguments
         app.launchEnvironment = environment
         app.launch()
         let candidates = NSRunningApplication.runningApplications(
@@ -1004,7 +1080,7 @@ final class MeetingFlowUITests: XCTestCase {
         field.typeText(text)
     }
 
-    private func assertExactlyFourFloatingControls(
+    private func assertExactlySixFloatingControls(
         in app: XCUIApplication,
         file: StaticString = #filePath,
         line: UInt = #line
@@ -1015,7 +1091,23 @@ final class MeetingFlowUITests: XCTestCase {
                 "floating."
             )
         )
-        XCTAssertEqual(controls.count, 4, file: file, line: line)
+        XCTAssertEqual(controls.count, 6, file: file, line: line)
+    }
+
+    private func waitForEnabled(
+        _ enabled: Bool,
+        on element: XCUIElement,
+        timeout: TimeInterval
+    ) -> Bool {
+        let predicate = NSPredicate(format: "enabled == %@", enabled as NSNumber)
+        let expectation = XCTNSPredicateExpectation(
+            predicate: predicate,
+            object: element
+        )
+        return XCTWaiter.wait(
+            for: [expectation],
+            timeout: timeout
+        ) == .completed
     }
 
     private func keepScreenshot(
