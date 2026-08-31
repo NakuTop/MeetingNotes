@@ -352,6 +352,67 @@ final class UpdateReleasePolicyTests: XCTestCase {
         }
     }
 
+    func testUnsignedValidatorIsSeparateAndFailClosed() throws {
+        let relativePath =
+            "Scripts/validate_unsigned_update_release.sh"
+        let validatorURL = repositoryRoot().appendingPathComponent(
+            relativePath
+        )
+        let exists = FileManager.default.fileExists(
+            atPath: validatorURL.path
+        )
+
+        XCTAssertTrue(exists, "Missing dedicated unsigned validator")
+        guard exists else { return }
+
+        let validator = try repositoryText(relativePath)
+        let requiredChecks = [
+            "configuration must be Release",
+            "hdiutil verify",
+            "codesign --verify --deep --strict",
+            "Signature=adhoc",
+            "TeamIdentifier=not set",
+            "Authority=Developer ID Application:",
+            "Timestamp=",
+            "xcrun stapler validate",
+            "spctl --assess --type execute",
+            "@rpath/Sparkle.framework/Versions/B/Sparkle",
+            "@executable_path/../Frameworks",
+            "com.apple.security.app-sandbox",
+            "com.apple.security.device.audio-input",
+            "com.apple.security.network.client",
+            "com.apple.security.get-task-allow",
+            "-spks",
+            "-spki",
+            "sparkle:edSignature",
+            "sparkle:version",
+            "sparkle:shortVersionString",
+            "sparkle:hardwareRequirements",
+            "Curve25519.Signing.PublicKey",
+            "APPLE_DISTRIBUTABLE=NO",
+            "SPARKLE_UPDATE_PUBLISHABLE=YES"
+        ]
+
+        for check in requiredChecks {
+            XCTAssertTrue(
+                validator.contains(check),
+                "Missing unsigned release gate: \(check)"
+            )
+        }
+
+        let signedValidator = try repositoryText(
+            "Scripts/validate_update_release.sh"
+        )
+        XCTAssertTrue(
+            signedValidator.contains("Developer ID Application:")
+        )
+        XCTAssertTrue(signedValidator.contains("xcrun stapler validate"))
+        XCTAssertTrue(signedValidator.contains("PUBLISHABLE=YES"))
+        XCTAssertFalse(
+            signedValidator.contains("SPARKLE_UPDATE_PUBLISHABLE=YES")
+        )
+    }
+
     private func repositoryText(_ path: String) throws -> String {
         try String(
             contentsOf: repositoryRoot().appendingPathComponent(path),
