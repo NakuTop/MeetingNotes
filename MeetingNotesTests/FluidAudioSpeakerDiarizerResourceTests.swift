@@ -3,6 +3,19 @@ import XCTest
 
 final class FluidAudioSpeakerDiarizerResourceTests:
     DiarizationAdapterTestCase {
+    func testProductionOfflineDiarizerUsesVerifiedClusteringThreshold() {
+        let config = OfflineFluidAudioDiarizationEngine.productionConfig
+
+        XCTAssertEqual(
+            config.clustering.threshold,
+            0.7045655,
+            accuracy: 0.0000001
+        )
+        XCTAssertNil(config.clustering.minSpeakers)
+        XCTAssertNil(config.clustering.maxSpeakers)
+        XCTAssertNil(config.clustering.numSpeakers)
+    }
+
     func testRejectsInvalidIntervalsAtAdapterBoundary() async throws {
         let root = try makeTemporaryRoot()
         let source = try makeSource(

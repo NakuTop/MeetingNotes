@@ -771,12 +771,20 @@ private struct DiarizationTimelineSegmentPlan: Sendable {
     let frameCount: Int64
 }
 
-private final class OfflineFluidAudioDiarizationEngine:
+final class OfflineFluidAudioDiarizationEngine:
     DiarizationEngine,
     @unchecked Sendable {
+    static let productionConfig = OfflineDiarizerConfig(
+        clusteringThreshold: 0.7045655
+    )
+
     nonisolated(unsafe) private let manager: OfflineDiarizerManager
 
-    init(manager: OfflineDiarizerManager = OfflineDiarizerManager()) {
+    init(
+        manager: OfflineDiarizerManager = OfflineDiarizerManager(
+            config: OfflineFluidAudioDiarizationEngine.productionConfig
+        )
+    ) {
         self.manager = manager
     }
 
