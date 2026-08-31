@@ -1,0 +1,21 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>MeetingNotes</title>
+        <item>
+            <title>1.2.0</title>
+            <pubDate>Mon, 31 Aug 2026 10:19:14 +0800</pubDate>
+            <sparkle:version>16</sparkle:version>
+            <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[- 保留正式版原有会议流程，整合麦克风兼容捕获与智能音频诊断更新。
+- 修复模型准备期间会议悬浮窗、结束会议、删除会议及设置可用性。
+- 支持转录、重点总结与完整纪要随时编辑、同词替换及本机自动保存。
+- Notion 手动同步时替换应用管理的旧内容，不再重复叠加。
+- 新增基于 GitHub 与 Sparkle 的免费应用内更新通道。
+]]></description>
+            <enclosure url="https://github.com/NakuTop/MeetingNotes/releases/download/v1.2.0-unsigned-build16/MeetingNotes-1.2.0-build16-unsigned.dmg" length="9236097" type="application/octet-stream" sparkle:edSignature="XMwtWmkLADixKc5nn5kwQCZUzhmDnVLSzCEdT6Kap8NNlEt6cJ8oPVKvQFSEfrJQ9UtBAuy4+GUfvQc2abfqDg=="/>
+        </item>
+    </channel>
+</rss>
