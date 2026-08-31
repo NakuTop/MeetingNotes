@@ -1,3 +1,4 @@
+import QuickLook
 import SwiftUI
 
 struct TranscriptDisplayEntry: Identifiable, Equatable {
@@ -223,6 +224,8 @@ enum TranscriptDisplayPolicy {
 struct TranscriptView: View {
     let transcripts: [CanonicalTranscriptEntry]
     let bookmarks: [BookmarkRecord]
+    var notes: [MeetingNoteRecord] = []
+    var screenshots: [MeetingScreenshotRecord] = []
     var customSpeakerNames: [String: String] = [:]
     var frequentSpeakerNames: [String] = []
     var speakerNameErrorMessage: String?
@@ -233,8 +236,15 @@ struct TranscriptView: View {
     var onFlushEdits: (() -> Void)?
     var onRequestExactReplacement: ((String) -> Void)?
     var transcriptDrafts: [MeetingTranscriptEditDraft] = []
+    var noteDrafts: [MeetingNoteEditDraft] = []
+    var onChangeNote: ((String, MeetingNoteDisplayItem) -> Void)?
+    var onDeleteNote: ((MeetingNoteDisplayItem) -> Void)?
+    var onResolveScreenshot:
+        ((MeetingScreenshotDisplayItem) async -> URL?)?
+    var onDeleteScreenshot: ((MeetingScreenshotDisplayItem) -> Void)?
 
     @State private var editingSpeaker: TranscriptSpeakerEditingTarget?
+    @State private var previewURL: URL?
 
     private var visibleTurns: [TranscriptDisplayTurn] {
         TranscriptDisplayPolicy.turns(
@@ -244,12 +254,24 @@ struct TranscriptView: View {
         )
     }
 
+    private var timelineItems: [MeetingTimelineDisplayItem] {
+        MeetingTimelineDisplayPolicy.items(
+            transcriptTurns: visibleTurns,
+            notes: notes,
+            screenshots: screenshots
+        )
+    }
+
     private func draftText(
         for target: MeetingTranscriptEditTarget
     ) -> String? {
         transcriptDrafts.first {
             $0.target.hasSameDraftIdentity(as: target)
         }?.text
+    }
+
+    private func noteDraftText(for note: MeetingNoteDisplayItem) -> String? {
+        noteDrafts.first { $0.target.id == note.id }?.text
     }
 
     private var speakerOptions: [TranscriptSpeakerOption] {
@@ -272,98 +294,138 @@ struct TranscriptView: View {
     }
 
     var body: some View {
-        if visibleTurns.isEmpty {
-            Label("暂无转录", systemImage: "text.bubble")
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            LazyVStack(alignment: .leading, spacing: 8) {
-                if !speakerOptions.isEmpty {
-                    speakerSelector
-                        .padding(.bottom, 4)
-                }
+        Group {
+            if timelineItems.isEmpty {
+                Label("暂无转录、笔记或截图", systemImage: "text.bubble")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    if !speakerOptions.isEmpty {
+                        speakerSelector
+                            .padding(.bottom, 4)
+                    }
 
-                ForEach(visibleTurns) { turn in
-                    let speakerBadge = TranscriptSpeakerDisplayPolicy.badge(
-                        speakerID: turn.speakerID,
-                        source: turn.source,
-                        customNames: customSpeakerNames
-                    )
-                    let editTarget = MeetingTranscriptEditTarget(turn: turn)
-                    let displayedText = draftText(for: editTarget)
-                        ?? turn.text
-
-                    HStack(alignment: .firstTextBaseline, spacing: 12) {
-                        Text(MeetingDisplayFormat.timecode(turn.startTime))
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .frame(width: 52, alignment: .leading)
-                        if let speakerBadge,
-                           let speakerID = turn.speakerID {
-                            speakerButton(
-                                speakerID: speakerID,
-                                badge: speakerBadge,
-                                accessibilityIdentifier:
-                                    "meeting.transcripts.turnSpeaker.\(speakerID)"
+                    ForEach(timelineItems) { item in
+                        switch item {
+                        case let .transcript(turn):
+                            transcriptRow(turn)
+                        case let .note(note):
+                            MeetingNoteTimelineEventView(
+                                item: note,
+                                text: Binding(
+                                    get: {
+                                        noteDraftText(for: note) ?? note.text
+                                    },
+                                    set: { value in
+                                        onChangeNote?(value, note)
+                                    }
+                                ),
+                                onFlush: onFlushEdits,
+                                onRequestExactReplacement:
+                                    onRequestExactReplacement,
+                                onDelete: onDeleteNote.map { action in
+                                    { action(note) }
+                                }
+                            )
+                        case let .screenshot(screenshot):
+                            MeetingScreenshotTimelineEventView(
+                                item: screenshot,
+                                resolveURL: {
+                                    guard let onResolveScreenshot else {
+                                        return nil
+                                    }
+                                    return await onResolveScreenshot(screenshot)
+                                },
+                                onOpen: { previewURL = $0 },
+                                onDelete: onDeleteScreenshot.map { action in
+                                    { action(screenshot) }
+                                }
                             )
                         }
-                        InlineEditableMeetingText(
-                            text: Binding(
-                                get: {
-                                    draftText(for: editTarget) ?? turn.text
-                                },
-                                set: { value in
-                                    onChangeTranscript?(value, editTarget)
-                                }
-                            ),
-                            accessibilityIdentifier:
-                                "meeting.transcripts.text.\(Int((turn.startTime * 1_000).rounded()))",
-                            onFlush: {
-                                onFlushEdits?()
-                            },
-                            onRequestExactReplacement:
-                                onRequestExactReplacement
-                        )
-                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(9)
-                    .background(
-                        turn.isHighlighted
-                            ? Color.accentColor.opacity(0.14)
-                            : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 8)
-                    )
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier(
-                        "meeting.transcripts.turn.\(Int((turn.startTime * 1_000).rounded()))"
-                    )
-                    .accessibilityLabel(
-                        "\(MeetingDisplayFormat.timecode(turn.startTime))\(speakerBadge.map { "，\($0.label)" } ?? "")，\(displayedText)\(turn.isHighlighted ? "，书签附近" : "")"
-                    )
                 }
             }
-            .popover(item: $editingSpeaker, arrowEdge: .top) { target in
-                SpeakerNameEditor(
-                    currentName: target.currentName,
-                    frequentNames: frequentSpeakerNames,
-                    canRestoreDefault: target.hasCustomName,
-                    errorMessage: speakerNameErrorMessage,
-                    onSave: { newName in
-                        if onRenameSpeaker?(target.speakerID, newName) == true {
-                            editingSpeaker = nil
-                        }
-                    },
-                    onRestoreDefault: {
-                        if onClearSpeakerName?(target.speakerID) == true {
-                            editingSpeaker = nil
-                        }
-                    },
-                    onCancel: {
+        }
+        .popover(item: $editingSpeaker, arrowEdge: .top) { target in
+            SpeakerNameEditor(
+                currentName: target.currentName,
+                frequentNames: frequentSpeakerNames,
+                canRestoreDefault: target.hasCustomName,
+                errorMessage: speakerNameErrorMessage,
+                onSave: { newName in
+                    if onRenameSpeaker?(target.speakerID, newName) == true {
                         editingSpeaker = nil
                     }
+                },
+                onRestoreDefault: {
+                    if onClearSpeakerName?(target.speakerID) == true {
+                        editingSpeaker = nil
+                    }
+                },
+                onCancel: {
+                    editingSpeaker = nil
+                }
+            )
+        }
+        .quickLookPreview($previewURL)
+    }
+
+    private func transcriptRow(_ turn: TranscriptDisplayTurn) -> some View {
+        let speakerBadge = TranscriptSpeakerDisplayPolicy.badge(
+            speakerID: turn.speakerID,
+            source: turn.source,
+            customNames: customSpeakerNames
+        )
+        let editTarget = MeetingTranscriptEditTarget(turn: turn)
+        let displayedText = draftText(for: editTarget) ?? turn.text
+
+        return HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(MeetingDisplayFormat.timecode(turn.startTime))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 52, alignment: .leading)
+            if let speakerBadge,
+               let speakerID = turn.speakerID {
+                speakerButton(
+                    speakerID: speakerID,
+                    badge: speakerBadge,
+                    accessibilityIdentifier:
+                        "meeting.transcripts.turnSpeaker.\(speakerID)"
                 )
             }
+            InlineEditableMeetingText(
+                text: Binding(
+                    get: {
+                        draftText(for: editTarget) ?? turn.text
+                    },
+                    set: { value in
+                        onChangeTranscript?(value, editTarget)
+                    }
+                ),
+                accessibilityIdentifier:
+                    "meeting.transcripts.text.\(Int((turn.startTime * 1_000).rounded()))",
+                onFlush: {
+                    onFlushEdits?()
+                },
+                onRequestExactReplacement: onRequestExactReplacement
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(9)
+        .background(
+            turn.isHighlighted
+                ? Color.accentColor.opacity(0.14)
+                : Color.clear,
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(
+            "meeting.transcripts.turn.\(Int((turn.startTime * 1_000).rounded()))"
+        )
+        .accessibilityLabel(
+            "\(MeetingDisplayFormat.timecode(turn.startTime))\(speakerBadge.map { "，\($0.label)" } ?? "")，\(displayedText)\(turn.isHighlighted ? "，书签附近" : "")"
+        )
     }
 
     private var speakerSelector: some View {

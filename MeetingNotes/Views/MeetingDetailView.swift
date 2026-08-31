@@ -162,6 +162,8 @@ struct MeetingDetailView: View {
                         TranscriptView(
                             transcripts: transcriptEntries,
                             bookmarks: meeting.bookmarks,
+                            notes: meeting.notes,
+                            screenshots: meeting.screenshots,
                             customSpeakerNames: meeting.speakerDisplayNames,
                             frequentSpeakerNames: viewModel
                                 .frequentSpeakerNames,
@@ -194,10 +196,51 @@ struct MeetingDetailView: View {
                             onFlushEdits: flushMeetingEdits,
                             onRequestExactReplacement:
                                 requestExactReplacement,
-                            transcriptDrafts: viewModel.transcriptDrafts
+                            transcriptDrafts: viewModel.transcriptDrafts,
+                            noteDrafts: viewModel.noteDrafts,
+                            onChangeNote: { text, note in
+                                viewModel.updateNoteDraft(text, for: note)
+                            },
+                            onDeleteNote: { note in
+                                if viewModel.deleteNote(note) {
+                                    onMeetingChanged()
+                                }
+                            },
+                            onResolveScreenshot: { screenshot in
+                                await viewModel.screenshotPreviewURL(
+                                    for: screenshot
+                                )
+                            },
+                            onDeleteScreenshot: { screenshot in
+                                Task { @MainActor [viewModel] in
+                                    if await viewModel.deleteScreenshot(
+                                        screenshot
+                                    ) {
+                                        onMeetingChanged()
+                                    }
+                                }
+                            }
                         )
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 8)
+
+                        if let message = viewModel.timelineErrorMessage {
+                            HStack(spacing: 8) {
+                                Label(
+                                    message,
+                                    systemImage:
+                                        "exclamationmark.triangle.fill"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                Spacer()
+                                Button("关闭") {
+                                    viewModel.dismissTimelineError()
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.top, 6)
+                        }
                     } label: {
                         Text("完整转录内容")
                             .font(.headline)

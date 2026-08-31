@@ -114,6 +114,11 @@ struct MeetingTranscriptEditDraft: Equatable, Sendable {
     let text: String
 }
 
+struct MeetingNoteEditDraft: Equatable, Sendable {
+    let target: MeetingNoteDisplayItem
+    let text: String
+}
+
 enum MeetingEditableDocumentField: Hashable, Sendable {
     case summaryOverview
     case summaryKeyPoint(Int)
@@ -145,6 +150,7 @@ final class MeetingDetailViewModel {
         RecordingSessionPresentationStore?
     private let editAutosaver: MeetingEditAutosaver
     private let exactReplacement: MeetingExactReplacement
+    private let fileStore: MeetingFileStore?
 
     private(set) var meeting: MeetingRecord?
     private(set) var summaryDraft: GeneratedMeetingSummary?
@@ -160,12 +166,14 @@ final class MeetingDetailViewModel {
     private(set) var replacementPreview: MeetingExactReplacementPreview?
     private(set) var replacementErrorMessage: String?
     private(set) var notionSyncErrorMessage: String?
+    private(set) var timelineErrorMessage: String?
     var selectedDocumentKind: MeetingDocumentKind = .summary
     private(set) var documentOperation: MeetingDocumentOperation = .idle
     private var summaryDocumentErrorMessage: String?
     private var detailedMinutesDocumentErrorMessage: String?
     private var dismissedSpeakerProcessingWarningKey: String?
     private var pendingTranscriptDrafts: [PendingTranscriptDraft] = []
+    private var pendingNoteDrafts: [PendingNoteDraft] = []
     private var summaryDraftToken: UUID?
     private var detailedMinutesDraftToken: UUID?
 
@@ -181,7 +189,8 @@ final class MeetingDetailViewModel {
         recordingPresentationStore:
             RecordingSessionPresentationStore? = nil,
         editAutosaver: MeetingEditAutosaver? = nil,
-        exactReplacement: MeetingExactReplacement? = nil
+        exactReplacement: MeetingExactReplacement? = nil,
+        fileStore: MeetingFileStore? = nil
     ) {
         self.meetingID = meetingID
         self.repository = repository
@@ -194,6 +203,7 @@ final class MeetingDetailViewModel {
         self.editAutosaver = editAutosaver ?? MeetingEditAutosaver()
         self.exactReplacement = exactReplacement
             ?? MeetingExactReplacement(repository: repository)
+        self.fileStore = fileStore
         meeting = try? repository.meeting(id: meetingID)
         synchronizeCleanDocumentDrafts()
     }
@@ -202,12 +212,17 @@ final class MeetingDetailViewModel {
         pendingTranscriptDrafts.map(\.draft)
     }
 
+    var noteDrafts: [MeetingNoteEditDraft] {
+        pendingNoteDrafts.map(\.draft)
+    }
+
     var localSaveState: MeetingLocalSaveState {
         editAutosaver.state
     }
 
     var hasPendingEdits: Bool {
         !pendingTranscriptDrafts.isEmpty
+            || !pendingNoteDrafts.isEmpty
             || summaryDraftToken != nil
             || detailedMinutesDraftToken != nil
     }
@@ -561,6 +576,125 @@ final class MeetingDetailViewModel {
             )
         }
         reschedulePendingEdits()
+    }
+
+    func noteDraftText(for note: MeetingNoteDisplayItem) -> String {
+        pendingNoteDrafts.first { $0.draft.target.id == note.id }?
+            .draft.text ?? note.text
+    }
+
+    func updateNoteDraft(
+        _ text: String,
+        for note: MeetingNoteDisplayItem
+    ) {
+        timelineErrorMessage = nil
+        if text == note.text {
+            pendingNoteDrafts.removeAll { $0.draft.target.id == note.id }
+        } else if let index = pendingNoteDrafts.firstIndex(where: {
+            $0.draft.target.id == note.id
+        }) {
+            let target = pendingNoteDrafts[index].draft.target
+            pendingNoteDrafts[index] = PendingNoteDraft(
+                draft: MeetingNoteEditDraft(target: target, text: text),
+                token: UUID()
+            )
+        } else {
+            pendingNoteDrafts.append(
+                PendingNoteDraft(
+                    draft: MeetingNoteEditDraft(target: note, text: text),
+                    token: UUID()
+                )
+            )
+        }
+        reschedulePendingEdits()
+    }
+
+    func deleteNote(_ note: MeetingNoteDisplayItem) -> Bool {
+        let pending = pendingNoteDrafts.filter {
+            $0.draft.target.id == note.id
+        }
+        pendingNoteDrafts.removeAll { $0.draft.target.id == note.id }
+        reschedulePendingEdits()
+        timelineErrorMessage = nil
+        do {
+            try repository.deleteNote(meetingID: meetingID, id: note.id)
+            load()
+            return true
+        } catch {
+            pendingNoteDrafts.append(contentsOf: pending)
+            reschedulePendingEdits()
+            timelineErrorMessage = "无法删除笔记，请稍后重试。"
+            return false
+        }
+    }
+
+    func screenshotPreviewURL(
+        for screenshot: MeetingScreenshotDisplayItem
+    ) async -> URL? {
+        guard let fileStore else {
+            timelineErrorMessage = "无法打开截图。"
+            return nil
+        }
+        do {
+            let url = try await fileStore.resolveScreenshotURL(
+                meetingID: meetingID,
+                relativePath: screenshot.relativePath
+            )
+            timelineErrorMessage = nil
+            return url
+        } catch {
+            timelineErrorMessage = "无法打开截图。"
+            return nil
+        }
+    }
+
+    func deleteScreenshot(
+        _ screenshot: MeetingScreenshotDisplayItem
+    ) async -> Bool {
+        guard let fileStore else {
+            timelineErrorMessage = "无法删除截图，请稍后重试。"
+            return false
+        }
+        timelineErrorMessage = nil
+
+        let staged: StagedScreenshotDeletion
+        do {
+            staged = try await fileStore.stageScreenshotDeletion(
+                meetingID: meetingID,
+                relativePath: screenshot.relativePath
+            )
+        } catch {
+            timelineErrorMessage = "无法删除截图，请稍后重试。"
+            return false
+        }
+
+        do {
+            try repository.deleteScreenshot(
+                meetingID: meetingID,
+                id: screenshot.id
+            )
+        } catch {
+            do {
+                try await fileStore.rollbackScreenshotDeletion(staged)
+            } catch {
+                timelineErrorMessage = "截图文件恢复失败，请保留当前会议并重试。"
+                return false
+            }
+            timelineErrorMessage = "无法删除截图，请稍后重试。"
+            return false
+        }
+
+        do {
+            try await fileStore.commitScreenshotDeletion(staged)
+        } catch {
+            timelineErrorMessage = "截图记录已删除，但本地文件清理失败。"
+        }
+        load()
+        return true
+    }
+
+    func dismissTimelineError() {
+        timelineErrorMessage = nil
     }
 
     func updateSummaryDraft(_ value: GeneratedMeetingSummary) {
@@ -920,6 +1054,7 @@ final class MeetingDetailViewModel {
         do {
             meeting = try repository.meeting(id: meetingID)
             reconcilePendingTranscriptDrafts()
+            reconcilePendingNoteDrafts()
             synchronizeCleanDocumentDrafts()
         } catch {
             meeting = nil
@@ -1128,6 +1263,28 @@ final class MeetingDetailViewModel {
         }
     }
 
+    private func reconcilePendingNoteDrafts() {
+        guard !pendingNoteDrafts.isEmpty,
+              let notes = try? repository.notes(meetingID: meetingID) else {
+            return
+        }
+        let notesByID = Dictionary(uniqueKeysWithValues: notes.map {
+            ($0.id, MeetingNoteDisplayItem(record: $0))
+        })
+        pendingNoteDrafts = pendingNoteDrafts.compactMap { pending in
+            guard let current = notesByID[pending.draft.target.id] else {
+                return nil
+            }
+            return PendingNoteDraft(
+                draft: MeetingNoteEditDraft(
+                    target: current,
+                    text: pending.draft.text
+                ),
+                token: pending.token
+            )
+        }
+    }
+
     private func reschedulePendingEdits() {
         guard hasPendingEdits else {
             editAutosaver.cancel()
@@ -1140,6 +1297,7 @@ final class MeetingDetailViewModel {
 
     private func persistPendingEdits() throws {
         let transcriptSnapshots = pendingTranscriptDrafts
+        let noteSnapshots = pendingNoteDrafts
         let summarySnapshot = summaryDraftToken.flatMap { token in
             summaryDraft.map { (token: token, value: $0) }
         }
@@ -1177,6 +1335,23 @@ final class MeetingDetailViewModel {
             }
         }
 
+        for snapshot in noteSnapshots {
+            guard pendingNoteDrafts.contains(where: {
+                $0.token == snapshot.token
+            }) else {
+                continue
+            }
+            let target = snapshot.draft.target
+            try repository.upsertNote(
+                meetingID: meetingID,
+                id: target.id,
+                timestamp: target.timestamp,
+                text: snapshot.draft.text,
+                sequenceIndex: target.sequenceIndex
+            )
+            pendingNoteDrafts.removeAll { $0.token == snapshot.token }
+        }
+
         if let summarySnapshot,
            summaryDraftToken == summarySnapshot.token {
             try repository.updateSummaryManually(
@@ -1205,6 +1380,11 @@ final class MeetingDetailViewModel {
 
     private struct PendingTranscriptDraft {
         let draft: MeetingTranscriptEditDraft
+        let token: UUID
+    }
+
+    private struct PendingNoteDraft {
+        let draft: MeetingNoteEditDraft
         let token: UUID
     }
 

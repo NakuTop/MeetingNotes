@@ -1431,21 +1431,17 @@ final class MeetingRepository {
             throw MeetingTimelineRepositoryError.screenshotNotFound(id)
         }
 
-        let previousMeetingUpdatedAt = meeting.updatedAt
-        let contentSnapshot = try beginContentMutation(for: meeting)
-        let screenshotSnapshot = MeetingScreenshotSnapshot(screenshot)
+        _ = try beginContentMutation(for: meeting)
         meeting.screenshots.removeAll { $0.id == id }
         context.delete(screenshot)
         meeting.updatedAt = now
         do {
             try saveContext()
         } catch {
-            context.insert(screenshot)
-            screenshotSnapshot.restore(screenshot)
-            screenshot.meeting = meeting
-            meeting.screenshots.append(screenshot)
-            meeting.updatedAt = previousMeetingUpdatedAt
-            contentSnapshot.restore(meeting)
+            // The caller may suspend while rolling the staged file back.
+            // Roll back the SwiftData transaction itself so an unsaved delete
+            // cannot reappear during that suspension.
+            context.rollback()
             throw error
         }
     }
@@ -3542,36 +3538,6 @@ private struct MeetingNoteSnapshot {
         note.createdAt = createdAt
         note.updatedAt = updatedAt
         note.sequenceIndex = sequenceIndex
-    }
-}
-
-private struct MeetingScreenshotSnapshot {
-    let timestamp: TimeInterval
-    let relativePath: String
-    let pixelWidth: Int
-    let pixelHeight: Int
-    let byteCount: Int
-    let createdAt: Date
-    let sequenceIndex: Int
-
-    init(_ screenshot: MeetingScreenshotRecord) {
-        timestamp = screenshot.timestamp
-        relativePath = screenshot.relativePath
-        pixelWidth = screenshot.pixelWidth
-        pixelHeight = screenshot.pixelHeight
-        byteCount = screenshot.byteCount
-        createdAt = screenshot.createdAt
-        sequenceIndex = screenshot.sequenceIndex
-    }
-
-    func restore(_ screenshot: MeetingScreenshotRecord) {
-        screenshot.timestamp = timestamp
-        screenshot.relativePath = relativePath
-        screenshot.pixelWidth = pixelWidth
-        screenshot.pixelHeight = pixelHeight
-        screenshot.byteCount = byteCount
-        screenshot.createdAt = createdAt
-        screenshot.sequenceIndex = sequenceIndex
     }
 }
 

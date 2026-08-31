@@ -408,7 +408,8 @@ final class AppContainer {
             documentManager: meetingDocumentsUseCase,
             titleUpdater: meetingTitleUpdater,
             speakerDiarizationRetryer: speakerDiarizationRetryer,
-            recordingPresentationStore: recordingPresentationStore
+            recordingPresentationStore: recordingPresentationStore,
+            fileStore: fileStore
         )
         detailViewModels[meetingID] = viewModel
         pendingMeetingEditFlusher.register(viewModel)

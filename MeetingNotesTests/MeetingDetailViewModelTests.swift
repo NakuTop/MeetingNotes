@@ -2576,6 +2576,173 @@ final class MeetingDetailViewModelTests: XCTestCase {
         XCTAssertEqual(manager.generatedReplacingManualEdits, [true])
     }
 
+    func testTimelineNoteDraftAutosavesAndRetryPersistsAfterFailure()
+        async throws {
+        let failure = DetailRepositoryFailureSwitch()
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                if failure.shouldFail {
+                    throw DetailInjectedRepositoryError.forced
+                }
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        let noteID = UUID()
+        try repository.upsertNote(
+            meetingID: meetingID,
+            id: noteID,
+            timestamp: 4,
+            text: "原笔记",
+            sequenceIndex: 0
+        )
+        let note = MeetingNoteDisplayItem(
+            id: noteID,
+            timestamp: 4,
+            text: "原笔记",
+            sequenceIndex: 0
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+
+        viewModel.updateNoteDraft("修正后的笔记", for: note)
+        failure.shouldFail = true
+        await viewModel.flushEdits()
+
+        XCTAssertEqual(viewModel.noteDraftText(for: note), "修正后的笔记")
+        XCTAssertTrue(viewModel.hasPendingEdits)
+        XCTAssertEqual(
+            try repository.notes(meetingID: meetingID).first?.text,
+            "原笔记"
+        )
+
+        failure.shouldFail = false
+        await viewModel.retrySavingEdits()
+
+        XCTAssertEqual(
+            try repository.notes(meetingID: meetingID).first?.text,
+            "修正后的笔记"
+        )
+        XCTAssertFalse(viewModel.hasPendingEdits)
+        XCTAssertEqual(viewModel.localSaveState, .saved)
+    }
+
+    func testScreenshotDeleteRestoresFileAndRecordWhenRepositorySaveFails()
+        async throws {
+        let failure = DetailRepositoryFailureSwitch()
+        let repository = try MeetingRepository.inMemory(
+            contextSaver: { context in
+                if failure.shouldFail {
+                    throw DetailInjectedRepositoryError.forced
+                }
+                try context.save()
+            }
+        )
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        let screenshotID = UUID()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "MeetingTimelineDelete-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: root)
+        }
+        let fileStore = MeetingFileStore(rootURL: root)
+        let relativePath = try await fileStore.saveScreenshotPNG(
+            Data([0x89, 0x50, 0x4E, 0x47]),
+            meetingID: meetingID,
+            screenshotID: screenshotID
+        )
+        try repository.appendScreenshot(
+            meetingID: meetingID,
+            id: screenshotID,
+            timestamp: 2,
+            relativePath: relativePath,
+            pixelWidth: 100,
+            pixelHeight: 80,
+            byteCount: 4,
+            sequenceIndex: 0
+        )
+        let screenshot = MeetingScreenshotDisplayItem(
+            id: screenshotID,
+            timestamp: 2,
+            relativePath: relativePath,
+            pixelWidth: 100,
+            pixelHeight: 80,
+            byteCount: 4,
+            sequenceIndex: 0
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy(),
+            fileStore: fileStore
+        )
+        failure.shouldFail = true
+
+        let deleted = await viewModel.deleteScreenshot(screenshot)
+
+        XCTAssertFalse(deleted)
+        XCTAssertEqual(
+            try repository.screenshots(meetingID: meetingID).map(\.id),
+            [screenshotID]
+        )
+        let restoredURL = try await fileStore.resolveScreenshotURL(
+            meetingID: meetingID,
+            relativePath: relativePath
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: restoredURL.path))
+    }
+
+    func testScreenshotPreviewRejectsExternalAbsolutePath() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "MeetingTimelinePreview-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: root)
+        }
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy(),
+            fileStore: MeetingFileStore(rootURL: root)
+        )
+        let screenshot = MeetingScreenshotDisplayItem(
+            id: UUID(),
+            timestamp: 0,
+            relativePath: "/tmp/outside.png",
+            pixelWidth: 1,
+            pixelHeight: 1,
+            byteCount: 1,
+            sequenceIndex: 0
+        )
+
+        let previewURL = await viewModel.screenshotPreviewURL(for: screenshot)
+
+        XCTAssertNil(previewURL)
+    }
+
     private func makeExactReplacementMeeting(
         in repository: MeetingRepository,
         startedAt: Date,
