@@ -3,6 +3,28 @@
     <channel>
         <title>MeetingNotes</title>
         <item>
+            <title>1.3.0</title>
+            <pubDate>Tue, 01 Sep 2026 13:37:01 +0800</pubDate>
+            <sparkle:version>18</sparkle:version>
+            <sparkle:shortVersionString>1.3.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# MeetingNotes 1.3.0（18）
+
+> 免费自签名正式版，未经 Apple Developer ID 签名或公证。首次安装时需在 macOS 中手动允许；请仅从 NakuTop/MeetingNotes 官方 GitHub 下载。
+
+- 保留原正式版会议流程，合入已通过实机测试的麦克风兼容捕获与智能音频诊断。
+- 修复模型准备期间悬浮窗、结束会议、删除会议及设置不可用的问题。
+- 支持在转录过程中编辑文字，并可编辑重点总结与完整纪要；支持同词统一替换和本机自动保存。
+- Notion 手动同步会替换应用管理的旧内容；会议截图可同步到 Notion，但不会发送给 DeepSeek。
+- 新增会议时间轴笔记与电脑截图，并保持原有磨砂透明界面风格。
+- FluidAudio 使用已验证的说话人聚类阈值，改善线下会议说话人分离。
+- 高精度模型使用 `openai_whisper-large-v3`，均衡模型保持 `small_216MB`。
+- 提供基于 GitHub 与 Sparkle 的免费应用内更新通道。
+]]></description>
+            <enclosure url="https://github.com/NakuTop/MeetingNotes/releases/download/v1.3.0/MeetingNotes.dmg" length="9539673" type="application/octet-stream" sparkle:edSignature="Ddt12xdEYw23QevYGsIkB7HR+kQbiDenArGRWtdRaR99yNQ/kCTorpOHCSqMeAtqnhJm7+F1/MFMqOt2+LAUBg=="/>
+        </item>
+        <item>
             <title>1.2.0</title>
             <pubDate>Mon, 31 Aug 2026 10:19:14 +0800</pubDate>
             <sparkle:version>16</sparkle:version>
