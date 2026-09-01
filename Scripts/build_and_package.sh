@@ -3,6 +3,7 @@
 #
 # Optional environment:
 #   DEVELOPER_ID_APPLICATION="Developer ID Application: ..."
+#   MEETINGNOTES_LOCAL_SIGNING_IDENTITY="MeetingNotes Local Update Signing"
 #   DEVELOPMENT_TEAM="..."
 #   NOTARY_KEYCHAIN_PROFILE="..."
 set -euo pipefail
@@ -28,8 +29,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+LOCAL_SIGNING_IDENTITY="${MEETINGNOTES_LOCAL_SIGNING_IDENTITY:-MeetingNotes Local Update Signing}"
+LOCAL_CERTIFICATE_SHA1="1487C197139F45D699244AC63B8F46753CBFF9F3"
+
+if [[ "$CONFIGURATION" == "Beta" ]]; then
+    LOCAL_REQUIREMENTS_FILE="Configuration/MeetingNotesBetaRequirements.req"
+else
+    LOCAL_REQUIREMENTS_FILE="Configuration/MeetingNotesStableRequirements.req"
+fi
+
 if [[ -n "${DEVELOPER_ID_APPLICATION:-}" ]]; then
     SIGNING_MODE="developer-id"
+elif security find-identity -v -p codesigning \
+    | grep -Fq "$LOCAL_SIGNING_IDENTITY"; then
+    SIGNING_MODE="local-identity"
+elif [[ "$CONFIGURATION" == "Beta" ]]; then
+    echo "ERROR: Beta local signing identity is unavailable" >&2
+    exit 1
 else
     SIGNING_MODE="ad-hoc"
 fi
@@ -51,6 +67,9 @@ if [[ "$SIGNING_MODE" == "developer-id" ]]; then
     if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
         SIGN_ARGS+=("DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM")
     fi
+elif [[ "$SIGNING_MODE" == "local-identity" ]]; then
+    SIGN_ARGS+=(CODE_SIGN_STYLE=Manual)
+    SIGN_ARGS+=(CODE_SIGN_IDENTITY="$LOCAL_SIGNING_IDENTITY")
 else
     SIGN_ARGS+=(CODE_SIGN_STYLE=Manual)
     SIGN_ARGS+=(CODE_SIGN_IDENTITY=-)
@@ -81,12 +100,12 @@ if [[ "$CONFIGURATION" == "Beta" ]]; then
     EXPECTED_BUNDLE_ID="com.shenminghao.MeetingNotes.beta"
     EXPECTED_DISPLAY_NAME="会议记录 Beta"
     EXPECTED_VERSION="1.3.0"
-    EXPECTED_BUILD="17"
+    EXPECTED_BUILD="18"
 else
     EXPECTED_BUNDLE_ID="com.shenminghao.MeetingNotes"
     EXPECTED_DISPLAY_NAME="会议记录"
-    EXPECTED_VERSION="1.2.0"
-    EXPECTED_BUILD="16"
+    EXPECTED_VERSION="1.3.0"
+    EXPECTED_BUILD="18"
 fi
 
 fail_metadata() {
@@ -135,10 +154,17 @@ if [[ "$SIGNING_MODE" == "developer-id" ]]; then
     SIGN_IDENTITY="$DEVELOPER_ID_APPLICATION"
     EXTRA_SIGN_FLAGS=(--timestamp)
     RUNTIME_SIGN_FLAGS=(-o runtime)
+    APP_REQUIREMENTS=()
+elif [[ "$SIGNING_MODE" == "local-identity" ]]; then
+    SIGN_IDENTITY="$LOCAL_SIGNING_IDENTITY"
+    EXTRA_SIGN_FLAGS=()
+    RUNTIME_SIGN_FLAGS=()
+    APP_REQUIREMENTS=(--requirements="$LOCAL_REQUIREMENTS_FILE")
 else
     SIGN_IDENTITY="-"
     EXTRA_SIGN_FLAGS=()
     RUNTIME_SIGN_FLAGS=()
+    APP_REQUIREMENTS=()
 fi
 
 # Xcode 26 CopySwiftLibs can leave the compatibility dylib with a stale
@@ -152,6 +178,7 @@ fi
 codesign --force ${EXTRA_SIGN_FLAGS[@]+"${EXTRA_SIGN_FLAGS[@]}"} \
     --sign "$SIGN_IDENTITY" \
     ${RUNTIME_SIGN_FLAGS[@]+"${RUNTIME_SIGN_FLAGS[@]}"} \
+    ${APP_REQUIREMENTS[@]+"${APP_REQUIREMENTS[@]}"} \
     --entitlements "$EXPANDED_ENTITLEMENTS" \
     "$APP"
 
@@ -179,6 +206,38 @@ if [[ "$SIGNING_MODE" == "developer-id" ]]; then
         echo "ERROR: Developer ID designated requirement anchor missing" >&2
         exit 1
     fi
+elif [[ "$SIGNING_MODE" == "local-identity" ]]; then
+    SIGN_DETAILS="$(codesign -dvvv "$APP" 2>&1 || true)"
+    if grep -Fq "Signature=adhoc" <<<"$SIGN_DETAILS"; then
+        echo "ERROR: local identity unexpectedly produced an ad-hoc signature" \
+            >&2
+        exit 1
+    fi
+    if grep -Eq 'flags=0x[0-9a-fA-F]+\([^)]*runtime' \
+        <<<"$SIGN_DETAILS"; then
+        echo "ERROR: local self-signed package unexpectedly enables hardened runtime" \
+            >&2
+        exit 1
+    fi
+    DESIGNATED_REQUIREMENT="$(codesign -d -r- "$APP" 2>&1 || true)"
+    if grep -Fq "designated => cdhash" <<<"$DESIGNATED_REQUIREMENT"; then
+        echo "ERROR: unstable cdhash-only designated requirement" >&2
+        exit 1
+    fi
+    if ! grep -Fq "identifier \"$EXPECTED_BUNDLE_ID\"" \
+        <<<"$DESIGNATED_REQUIREMENT"; then
+        echo "ERROR: local designated requirement identifier mismatch" >&2
+        exit 1
+    fi
+    if ! grep -Eiq \
+        "certificate leaf = H\"${LOCAL_CERTIFICATE_SHA1}\"" \
+        <<<"$DESIGNATED_REQUIREMENT"; then
+        echo "ERROR: local designated requirement certificate mismatch" >&2
+        exit 1
+    fi
+    codesign --verify --deep --strict --verbose=2 \
+        -R="identifier \"$EXPECTED_BUNDLE_ID\" and certificate leaf = H\"$LOCAL_CERTIFICATE_SHA1\"" \
+        "$APP"
 else
     SIGN_DETAILS="$(codesign -dvvv "$APP" 2>&1 || true)"
     if grep -Eq 'flags=0x[0-9a-fA-F]+\([^)]*runtime' \
@@ -237,7 +296,11 @@ if [[ "$SIGNING_MODE" == "developer-id" ]]; then
     codesign --verify --verbose=2 "$DMG"
 fi
 
-NOTARIZATION_STATUS="skipped-ad-hoc"
+if [[ "$SIGNING_MODE" == "local-identity" ]]; then
+    NOTARIZATION_STATUS="skipped-local-self-signed"
+else
+    NOTARIZATION_STATUS="skipped-ad-hoc"
+fi
 STAPLER="SKIPPED"
 if [[ "$SIGNING_MODE" == "developer-id" ]]; then
     if [[ -n "${NOTARY_KEYCHAIN_PROFILE:-}" ]]; then
@@ -324,6 +387,8 @@ if [[ "$NOTARIZATION_STATUS" == "accepted" ]]; then
     GATEKEEPER_ASSESSMENT="PASS"
 elif [[ "$SIGNING_MODE" == "ad-hoc" ]]; then
     GATEKEEPER_ASSESSMENT="SKIPPED_ADHOC"
+elif [[ "$SIGNING_MODE" == "local-identity" ]]; then
+    GATEKEEPER_ASSESSMENT="SKIPPED_LOCAL_SELF_SIGNED"
 fi
 
 PACKAGE_VALIDATION="PASS"

@@ -71,6 +71,11 @@ struct FloatingPanelPositionStore {
     }
 }
 
+private final class KeyboardCapableFloatingPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
 @MainActor
 final class FloatingPanelController: NSObject, NSWindowDelegate {
     let panel: NSPanel
@@ -104,7 +109,7 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
         self.reduceMotion = reduceMotion
         self.recordingPresentationStore = recordingPresentationStore
         self.annotationViewModel = annotationViewModel
-        panel = NSPanel(
+        panel = KeyboardCapableFloatingPanel(
             contentRect: NSRect(
                 origin: .zero,
                 size: FloatingPanelSizePolicy.compact
@@ -171,6 +176,11 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
     func setNoteEditorPresented(_ isPresented: Bool) {
         isNoteEditorPresented = isPresented
         updatePanelSize()
+        if isPresented {
+            panel.makeKey()
+        } else if panel.isKeyWindow {
+            panel.resignKey()
+        }
     }
 
     func setScreenshotFeedbackPresented(_ isPresented: Bool) {

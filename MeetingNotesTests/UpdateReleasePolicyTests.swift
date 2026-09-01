@@ -309,6 +309,75 @@ final class UpdateReleasePolicyTests: XCTestCase {
         )
     }
 
+    func testPackagerUsesStablePrivacySigningIdentityWhenAvailable() throws {
+        let packager = try repositoryText(
+            "Scripts/build_and_package.sh"
+        )
+
+        XCTAssertTrue(
+            packager.contains("MEETINGNOTES_LOCAL_SIGNING_IDENTITY")
+        )
+        XCTAssertTrue(packager.contains("SIGNING_MODE=\"local-identity\""))
+        XCTAssertTrue(
+            packager.contains(
+                "Configuration/MeetingNotesBetaRequirements.req"
+            )
+        )
+        XCTAssertTrue(
+            packager.contains(
+                "Configuration/MeetingNotesStableRequirements.req"
+            )
+        )
+        XCTAssertTrue(
+            packager.contains(
+                "local signing identity is unavailable"
+            )
+        )
+        XCTAssertTrue(
+            packager.contains(
+                "unstable cdhash-only designated requirement"
+            )
+        )
+    }
+
+    func testBetaPrivacyRequirementBindsIdentifierAndCertificate()
+        throws {
+        let requirement = try repositoryText(
+            "Configuration/MeetingNotesBetaRequirements.req"
+        )
+
+        XCTAssertTrue(
+            requirement.contains(
+                "identifier \"com.shenminghao.MeetingNotes.beta\""
+            )
+        )
+        XCTAssertNotNil(
+            requirement.range(
+                of: #"certificate leaf = H\"[0-9a-fA-F]{40}\""#,
+                options: .regularExpression
+            )
+        )
+    }
+
+    func testStablePrivacyRequirementBindsIdentifierAndCertificate()
+        throws {
+        let requirement = try repositoryText(
+            "Configuration/MeetingNotesStableRequirements.req"
+        )
+
+        XCTAssertTrue(
+            requirement.contains(
+                "identifier \"com.shenminghao.MeetingNotes\""
+            )
+        )
+        XCTAssertNotNil(
+            requirement.range(
+                of: #"certificate leaf = H\"[0-9a-fA-F]{40}\""#,
+                options: .regularExpression
+            )
+        )
+    }
+
     func testPublishableDecisionRunsAfterNotarizationAndStapling()
         throws {
         let packager = try repositoryText(
@@ -404,7 +473,7 @@ final class UpdateReleasePolicyTests: XCTestCase {
         )
     }
 
-    func testStableReleaseIdentityIs120Build16() throws {
+    func testStableReleaseIdentityIs130Build18() throws {
         let projectYAML = try repositoryText("project.yml")
         let project = try repositoryText(
             "MeetingNotes.xcodeproj/project.pbxproj"
@@ -418,8 +487,8 @@ final class UpdateReleasePolicyTests: XCTestCase {
             endingBefore: "packages:"
         )
 
-        XCTAssertTrue(baseSettings.contains("CURRENT_PROJECT_VERSION: 16"))
-        XCTAssertTrue(baseSettings.contains("MARKETING_VERSION: 1.2.0"))
+        XCTAssertTrue(baseSettings.contains("CURRENT_PROJECT_VERSION: 18"))
+        XCTAssertTrue(baseSettings.contains("MARKETING_VERSION: 1.3.0"))
         XCTAssertTrue(baseSettings.contains("MEETINGNOTES_DISPLAY_NAME: 会议记录"))
         XCTAssertTrue(
             projectYAML.contains(
@@ -428,17 +497,17 @@ final class UpdateReleasePolicyTests: XCTestCase {
         )
         XCTAssertNotNil(
             project.range(
-                of: #"/\* Release \*/ = \{isa = XCBuildConfiguration;[\s\S]*?CURRENT_PROJECT_VERSION = 16;[\s\S]*?MARKETING_VERSION = 1\.2\.0;[\s\S]*?MEETINGNOTES_DISPLAY_NAME = \"会议记录\";[\s\S]*?PRODUCT_BUNDLE_IDENTIFIER = com\.shenminghao\.MeetingNotes;"#,
+                of: #"/\* Release \*/ = \{isa = XCBuildConfiguration;[\s\S]*?CURRENT_PROJECT_VERSION = 18;[\s\S]*?MARKETING_VERSION = 1\.3\.0;[\s\S]*?MEETINGNOTES_DISPLAY_NAME = \"会议记录\";[\s\S]*?PRODUCT_BUNDLE_IDENTIFIER = com\.shenminghao\.MeetingNotes;"#,
                 options: .regularExpression
             )
         )
         XCTAssertTrue(
-            packager.contains("EXPECTED_VERSION=\"1.2.0\"")
+            packager.contains("EXPECTED_VERSION=\"1.3.0\"")
         )
-        XCTAssertTrue(packager.contains("EXPECTED_BUILD=\"16\""))
+        XCTAssertTrue(packager.contains("EXPECTED_BUILD=\"18\""))
     }
 
-    func testBetaReleaseIdentityIs130Build17() throws {
+    func testBetaReleaseIdentityIs130Build18() throws {
         let projectYAML = try repositoryText("project.yml")
         let project = try repositoryText(
             "MeetingNotes.xcodeproj/project.pbxproj"
@@ -463,7 +532,7 @@ final class UpdateReleasePolicyTests: XCTestCase {
         )
 
         XCTAssertTrue(betaYAML.contains("MARKETING_VERSION: 1.3.0"))
-        XCTAssertTrue(betaYAML.contains("CURRENT_PROJECT_VERSION: 17"))
+        XCTAssertTrue(betaYAML.contains("CURRENT_PROJECT_VERSION: 18"))
         XCTAssertTrue(
             betaYAML.contains(
                 "PRODUCT_BUNDLE_IDENTIFIER: com.shenminghao.MeetingNotes.beta"
@@ -474,14 +543,14 @@ final class UpdateReleasePolicyTests: XCTestCase {
         )
         XCTAssertNotNil(
             project.range(
-                of: #"/\* Beta \*/ = \{isa = XCBuildConfiguration;[\s\S]*?CURRENT_PROJECT_VERSION = 17;[\s\S]*?MARKETING_VERSION = 1\.3\.0;[\s\S]*?MEETINGNOTES_DISPLAY_NAME = "会议记录 Beta";[\s\S]*?PRODUCT_BUNDLE_IDENTIFIER = com\.shenminghao\.MeetingNotes\.beta;"#,
+                of: #"/\* Beta \*/ = \{isa = XCBuildConfiguration;[\s\S]*?CURRENT_PROJECT_VERSION = 18;[\s\S]*?MARKETING_VERSION = 1\.3\.0;[\s\S]*?MEETINGNOTES_DISPLAY_NAME = "会议记录 Beta";[\s\S]*?PRODUCT_BUNDLE_IDENTIFIER = com\.shenminghao\.MeetingNotes\.beta;"#,
                 options: .regularExpression
             )
         )
         XCTAssertTrue(betaPackager.contains("EXPECTED_VERSION=\"1.3.0\""))
-        XCTAssertTrue(betaPackager.contains("EXPECTED_BUILD=\"17\""))
-        XCTAssertTrue(stablePackager.contains("EXPECTED_VERSION=\"1.2.0\""))
-        XCTAssertTrue(stablePackager.contains("EXPECTED_BUILD=\"16\""))
+        XCTAssertTrue(betaPackager.contains("EXPECTED_BUILD=\"18\""))
+        XCTAssertTrue(stablePackager.contains("EXPECTED_VERSION=\"1.3.0\""))
+        XCTAssertTrue(stablePackager.contains("EXPECTED_BUILD=\"18\""))
     }
 
     func testPackagerExpandsAndVerifiesFinalSparkleEntitlements()

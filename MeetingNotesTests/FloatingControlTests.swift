@@ -165,6 +165,35 @@ final class FloatingControlTests: XCTestCase {
     }
 
     @MainActor
+    func testNoteEditorTemporarilyMakesFloatingPanelKey() {
+        let suiteName = "FloatingPanelKeyboardTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let presentation = RecordingSessionPresentationStore()
+        let context = makeAnnotationContext(presentation: presentation)
+        defer { context.remove() }
+        let controller = FloatingPanelController(
+            defaults: defaults,
+            animationDuration: 0,
+            reduceMotion: { false },
+            recordingPresentationStore: presentation,
+            annotationViewModel: context.viewModel,
+            action: { _ in }
+        )
+
+        controller.show()
+        controller.setNoteEditorPresented(true)
+
+        XCTAssertTrue(controller.panel.canBecomeKey)
+        XCTAssertTrue(controller.panel.isKeyWindow)
+
+        controller.setNoteEditorPresented(false)
+
+        XCTAssertFalse(controller.panel.isKeyWindow)
+        controller.hide()
+    }
+
+    @MainActor
     func testPanelReusesHostingViewAcrossPauseAndRepeatVisibilityCycles() {
         let suiteName = "FloatingPanelReuseTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

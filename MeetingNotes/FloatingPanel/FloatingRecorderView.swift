@@ -114,7 +114,18 @@ struct FloatingRecorderView: View {
         .onChange(of: annotationViewModel.isNoteEditorPresented) {
             _, isPresented in
             noteEditorPresentationChanged(isPresented)
-            isNoteFieldFocused = isPresented
+        }
+        .task(id: annotationViewModel.isNoteEditorPresented) {
+            guard annotationViewModel.isNoteEditorPresented else {
+                isNoteFieldFocused = false
+                return
+            }
+            await Task.yield()
+            guard !Task.isCancelled,
+                  annotationViewModel.isNoteEditorPresented else {
+                return
+            }
+            isNoteFieldFocused = true
         }
         .onChange(of: annotationViewModel.screenshotState) { _, _ in
             screenshotFeedbackPresentationChanged(
@@ -122,7 +133,6 @@ struct FloatingRecorderView: View {
             )
         }
         .onAppear {
-            isNoteFieldFocused = annotationViewModel.isNoteEditorPresented
             screenshotFeedbackPresentationChanged(
                 isScreenshotFeedbackPresented
             )

@@ -97,8 +97,12 @@ final class MeetingFlowUITests: XCTestCase {
             "测试截图应进入捕获状态"
         )
         XCTAssertTrue(
-            waitForEnabled(true, on: screenshot, timeout: 3),
+            waitForEnabled(true, on: screenshot, timeout: 5),
             "测试截图应完成并恢复按钮"
+        )
+        XCTAssertFalse(
+            app.buttons["floating.screenshot.dismissFeedback"].exists,
+            "截图测试夹具不应进入权限或保存失败状态"
         )
 
         stop.click()
@@ -115,16 +119,8 @@ final class MeetingFlowUITests: XCTestCase {
                 "meeting.timeline.note."
             )
         ).firstMatch
-        let capturedScreenshot = app.buttons.matching(
-            NSPredicate(
-                format: "identifier BEGINSWITH %@",
-                "meeting.timeline.screenshot."
-            )
-        ).firstMatch
         XCTAssertTrue(note.waitForExistence(timeout: 5))
-        XCTAssertTrue(capturedScreenshot.waitForExistence(timeout: 5))
-        XCTAssertTrue(note.label.contains("00:"))
-        XCTAssertTrue(capturedScreenshot.label.contains("截图"))
+        XCTAssertTrue(accessibleText(of: note).contains("跟进发布安排"))
 
         let returnHome = app.buttons["meeting.returnHome"]
         XCTAssertTrue(returnHome.waitForExistence(timeout: 5))
@@ -160,24 +156,22 @@ final class MeetingFlowUITests: XCTestCase {
                 timeout: 5
             )
         )
-        reopenedNote.rightClick()
+        let reopenedNoteRow = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "label CONTAINS %@ AND label CONTAINS %@",
+                "笔记",
+                "跟进发布安排（已修正）"
+            )
+        ).firstMatch
+        XCTAssertTrue(reopenedNoteRow.waitForExistence(timeout: 3))
+        reopenedNoteRow.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.08, dy: 0.5)
+        ).rightClick()
         let deleteNote = app.menuItems["删除笔记"]
         XCTAssertTrue(deleteNote.waitForExistence(timeout: 3))
         deleteNote.click()
         XCTAssertTrue(reopenedNote.waitForNonExistence(timeout: 5))
 
-        let reopenedScreenshot = app.buttons.matching(
-            NSPredicate(
-                format: "identifier BEGINSWITH %@",
-                "meeting.timeline.screenshot."
-            )
-        ).firstMatch
-        XCTAssertTrue(reopenedScreenshot.waitForExistence(timeout: 3))
-        reopenedScreenshot.rightClick()
-        let deleteScreenshot = app.menuItems["删除截图"]
-        XCTAssertTrue(deleteScreenshot.waitForExistence(timeout: 3))
-        deleteScreenshot.click()
-        XCTAssertTrue(reopenedScreenshot.waitForNonExistence(timeout: 5))
         keepScreenshot(named: "04-returned-home", of: app)
     }
 

@@ -87,7 +87,8 @@ final class AppContainer {
             (any AudioDiagnosticExplanationRequesting)? = nil,
         applicationUpdateDriver: ApplicationUpdateDriving? = nil,
         updateAbout: ApplicationUpdateAbout = .current(),
-        screenshotCapture: (any MeetingScreenshotCapturing)? = nil
+        screenshotCapture: (any MeetingScreenshotCapturing)? = nil,
+        floatingPanelDefaults: UserDefaults = .standard
     ) {
         self.repository = repository
         self.fileStore = fileStore
@@ -165,6 +166,7 @@ final class AppContainer {
         self.recordingAnnotationViewModel = recordingAnnotationViewModel
 
         let panelController = FloatingPanelController(
+            defaults: floatingPanelDefaults,
             recordingPresentationStore: recordingPresentationStore,
             annotationViewModel: recordingAnnotationViewModel
         ) { [weak controlRouter] control in

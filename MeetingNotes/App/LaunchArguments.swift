@@ -378,7 +378,8 @@ extension AppContainer {
             audioDiagnosticExplainer: UITestAudioDiagnosticExplainer(),
             screenshotCapture: usesScreenshotFixture
                 ? UITestScreenshotCapture()
-                : nil
+                : nil,
+            floatingPanelDefaults: defaults
         )
         if let triggerURL = audioPlayerLifecycleTriggerURL,
            let meetingID = audioPlayerMeetingID {
@@ -539,7 +540,7 @@ private struct UITestScreenshotCapture: MeetingScreenshotCapturing {
 
     func captureDisplayUnderMouse() async throws
         -> MeetingScreenshotCaptureResult {
-        try await Task.sleep(for: .milliseconds(250))
+        try await Task.sleep(for: .milliseconds(1_500))
         try Task.checkCancellation()
         guard let data = Data(base64Encoded: Self.onePixelPNGBase64) else {
             throw MeetingScreenshotCaptureError.pngEncodingFailed
