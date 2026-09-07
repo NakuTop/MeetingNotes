@@ -538,8 +538,8 @@ private struct UITestScreenshotCapture: MeetingScreenshotCapturing {
     private static let onePixelPNGBase64 =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 
-    func captureDisplayUnderMouse() async throws
-        -> MeetingScreenshotCaptureResult {
+    func captureSelectedWindow() async throws
+        -> MeetingScreenshotCaptureResult? {
         try await Task.sleep(for: .milliseconds(1_500))
         try Task.checkCancellation()
         guard let data = Data(base64Encoded: Self.onePixelPNGBase64) else {

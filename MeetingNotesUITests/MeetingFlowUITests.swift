@@ -1068,7 +1068,20 @@ final class MeetingFlowUITests: XCTestCase {
         )
     }
 
-    private func replaceText(in field: XCUIElement, with text: String) {
+    private func replaceText(
+        in field: XCUIElement,
+        with text: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let ready = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"),
+            object: field
+        )
+        guard XCTWaiter.wait(for: [ready], timeout: 3) == .completed else {
+            XCTFail("Editor did not become hittable: \(field)", file: file, line: line)
+            return
+        }
         field.click()
         field.typeKey("a", modifierFlags: .command)
         field.typeText(text)
@@ -1249,8 +1262,29 @@ final class MeetingFlowUITests: XCTestCase {
         _ element: XCUIElement,
         in scrollView: XCUIElement
     ) {
-        for _ in 0..<14 where !element.isHittable {
-            scrollView.scroll(byDeltaX: 0, deltaY: -90)
+        // Offscreen native editors can still exist in accessibility. Choose the
+        // direction from their frame; search both ways if lazy content is absent.
+        for fallbackDelta in [-90.0, 90.0] {
+            for _ in 0..<28 {
+                if element.isHittable { return }
+                var delta = fallbackDelta
+                if element.exists {
+                    let targetFrame = element.frame
+                    let viewport = scrollView.frame
+                    if !targetFrame.isEmpty {
+                        if targetFrame.maxY <= viewport.minY {
+                            delta = 90
+                        } else if targetFrame.minY >= viewport.maxY {
+                            delta = -90
+                        } else if targetFrame.midY < viewport.midY {
+                            delta = 90
+                        } else {
+                            delta = -90
+                        }
+                    }
+                }
+                scrollView.scroll(byDeltaX: 0, deltaY: delta)
+            }
         }
     }
 

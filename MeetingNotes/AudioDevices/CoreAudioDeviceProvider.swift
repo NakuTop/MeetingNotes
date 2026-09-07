@@ -185,6 +185,9 @@ enum CoreAudioDeviceProvider {
                     return nil
                 }
                 let deviceUID = try uid(deviceID)
+                // Our private system-audio input is not a microphone. Keep
+                // genuine third-party virtual/aggregate microphones usable.
+                guard !SystemAudioTapPolicy.isOwnedAggregateUID(deviceUID) else { return nil }
                 let deviceName = try name(deviceID)
                 let alive = try isAlive(deviceID)
                 return CoreAudioInputDevice(

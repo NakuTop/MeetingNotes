@@ -33,7 +33,7 @@ struct OnboardingView: View {
                     privacyRow(
                         symbol: "checkmark.shield",
                         title: "权限按需请求",
-                        detail: "线下会议只需麦克风；在线会议还需屏幕与系统音频录制权限。"
+                        detail: "线下会议只需麦克风；在线会议会按需请求系统音频权限，无需共享桌面。截图另需屏幕录制权限。"
                     )
                 }
 

@@ -1,10 +1,230 @@
 import AppKit
+import Observation
 import SwiftUI
+
+struct InlineMeetingTextMeasurementKey: Equatable {
+    let text: String
+    let availableWidth: CGFloat?
+    let fontName: String
+    let fontPointSize: CGFloat
+    let alignment: NSTextAlignment
+    let lineLimit: Int?
+}
+
+struct InlineMeetingTextMeasurementCache {
+    private var cachedKey: InlineMeetingTextMeasurementKey?
+    private var cachedSize: CGSize?
+    private(set) var computationCount = 0
+
+    mutating func resolve(
+        key: InlineMeetingTextMeasurementKey,
+        compute: () -> CGSize
+    ) -> CGSize {
+        if cachedKey == key, let cachedSize {
+            return cachedSize
+        }
+        let size = compute()
+        cachedKey = key
+        cachedSize = size
+        computationCount += 1
+        return size
+    }
+}
+
+@MainActor
+@Observable
+final class InlineMeetingTextLocalBuffer {
+    private(set) var value: String
+
+    init(initialValue: String) {
+        value = initialValue
+    }
+
+    func updateFromNative(
+        _ newValue: String,
+        propagate: (String) -> Void
+    ) {
+        if value != newValue {
+            value = newValue
+        }
+        propagate(newValue)
+    }
+
+    func reconcile(externalValue: String) {
+        guard value != externalValue else { return }
+        value = externalValue
+    }
+}
 
 final class InlineMeetingNativeTextView: NSTextView {
     weak var replacementTarget: AnyObject?
     var replacementAction: Selector?
     var onStringChange: ((String) -> Void)?
+    var measurementCache = InlineMeetingTextMeasurementCache()
+    private weak var observedUndoManager: UndoManager?
+    private var textBeforeUndoOrRedo: String?
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateUndoManagerObservation()
+    }
+
+    private func updateUndoManagerObservation() {
+        let manager = window == nil ? nil : undoManager
+        guard manager !== observedUndoManager else { return }
+        let center = NotificationCenter.default
+        let names: [Notification.Name] = [
+            .NSUndoManagerWillUndoChange, .NSUndoManagerWillRedoChange,
+            .NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange,
+        ]
+        for name in names {
+            center.removeObserver(
+                self, name: name, object: observedUndoManager
+            )
+        }
+        observedUndoManager = manager
+        textBeforeUndoOrRedo = nil
+        guard let manager else { return }
+        for name in [
+            Notification.Name.NSUndoManagerWillUndoChange,
+            Notification.Name.NSUndoManagerWillRedoChange,
+        ] {
+            center.addObserver(
+                self, selector: #selector(nativeUndoOrRedoWillStart(_:)),
+                name: name, object: manager
+            )
+        }
+        for name in [
+            Notification.Name.NSUndoManagerDidUndoChange,
+            Notification.Name.NSUndoManagerDidRedoChange,
+        ] {
+            center.addObserver(
+                self, selector: #selector(nativeUndoOrRedoDidComplete(_:)),
+                name: name, object: manager
+            )
+        }
+    }
+
+    @objc private func nativeUndoOrRedoWillStart(_ notification: Notification) {
+        guard window != nil,
+              let manager = notification.object as? UndoManager,
+              manager === observedUndoManager,
+              manager === undoManager else { return }
+        textBeforeUndoOrRedo = string
+    }
+
+    @objc private func nativeUndoOrRedoDidComplete(_ notification: Notification) {
+        guard window != nil,
+              let manager = notification.object as? UndoManager,
+              manager === observedUndoManager,
+              manager === undoManager else { return }
+        let previous = textBeforeUndoOrRedo
+        textBeforeUndoOrRedo = nil
+        guard let previous, previous != string else { return }
+        // Native undo can mutate text storage without calling didChangeText().
+        // Reconcile synchronously, before a SwiftUI refresh can replay old text.
+        // Other editors sharing the window's manager must not publish stale text.
+        onStringChange?(string)
+        invalidateIntrinsicContentSize()
+    }
+
+    @discardableResult
+    func applyPresentation(
+        font: NSFont,
+        textColor: NSColor,
+        alignment: NSTextAlignment,
+        lineLimit: Int?
+    ) -> Bool {
+        var layoutChanged = false
+        if self.font != font {
+            self.font = font
+            layoutChanged = true
+        }
+        if self.textColor != textColor {
+            self.textColor = textColor
+        }
+        if self.alignment != alignment {
+            self.alignment = alignment
+            layoutChanged = true
+        }
+        if textContainer?.maximumNumberOfLines != (lineLimit ?? 0) {
+            textContainer?.maximumNumberOfLines = lineLimit ?? 0
+            layoutChanged = true
+        }
+        if textContainer?.lineBreakMode != .byCharWrapping {
+            textContainer?.lineBreakMode = .byCharWrapping
+            layoutChanged = true
+        }
+        return layoutChanged
+    }
+
+    func measuredSize(
+        availableWidth: CGFloat?,
+        font: NSFont,
+        alignment: NSTextAlignment,
+        lineLimit: Int?,
+        measure: (NSString, NSSize, [NSAttributedString.Key: Any]) -> NSRect = {
+            text, size, attributes in
+            text.boundingRect(
+                with: size,
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: attributes
+            )
+        }
+    ) -> CGSize {
+        let measurementText = string.isEmpty ? " " : string
+        let key = InlineMeetingTextMeasurementKey(
+            text: measurementText,
+            availableWidth: availableWidth,
+            fontName: font.fontName,
+            fontPointSize: font.pointSize,
+            alignment: alignment,
+            lineLimit: lineLimit
+        )
+        return measurementCache.resolve(key: key) {
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.alignment = alignment
+            paragraphStyle.lineBreakMode = .byCharWrapping
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .paragraphStyle: paragraphStyle,
+            ]
+            let measuredWidth: CGFloat
+            if let availableWidth {
+                measuredWidth = availableWidth
+            } else {
+                let unconstrained = measure(
+                    measurementText as NSString,
+                    NSSize(width: 10_000, height: CGFloat.greatestFiniteMagnitude),
+                    attributes
+                )
+                measuredWidth = ceil(unconstrained.width)
+            }
+            let lineHeight = ceil(
+                font.ascender - font.descender + font.leading
+            )
+            guard measuredWidth > 0 else {
+                return CGSize(width: 0, height: lineHeight)
+            }
+            let measured = measure(
+                measurementText as NSString,
+                NSSize(width: measuredWidth, height: CGFloat.greatestFiniteMagnitude),
+                attributes
+            )
+            var measuredHeight = max(ceil(measured.height), lineHeight)
+            if let lineLimit {
+                measuredHeight = min(
+                    measuredHeight,
+                    lineHeight * CGFloat(lineLimit)
+                )
+            }
+            return CGSize(width: measuredWidth, height: measuredHeight)
+        }
+    }
 
     override func setFrameSize(_ newSize: NSSize) {
         let widthChanged = abs(frame.width - newSize.width) > 0.5
@@ -16,6 +236,8 @@ final class InlineMeetingNativeTextView: NSTextView {
 
     override func didChangeText() {
         super.didChangeText()
+        // Also handles managers supplied lazily by a window or text delegate.
+        updateUndoManagerObservation()
         onStringChange?(string)
         invalidateIntrinsicContentSize()
     }
@@ -89,29 +311,17 @@ struct InlineEditableMeetingText: View {
     var onRequestExactReplacement: ((String) -> Void)?
 
     var body: some View {
-        Text(text.isEmpty ? " " : text)
-            .font(.system(font, weight: fontWeight ?? .regular))
-            .foregroundStyle(foregroundColor)
-            .multilineTextAlignment(alignment)
-            .lineLimit(lineLimit)
-            .opacity(0)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-            .overlay(alignment: .topLeading) {
-                InlineEditableMeetingNativeView(
-                    text: $text,
-                    font: font,
-                    fontWeight: fontWeight,
-                    foregroundColor: foregroundColor,
-                    alignment: alignment,
-                    lineLimit: lineLimit,
-                    accessibilityIdentifier: accessibilityIdentifier,
-                    onFlush: onFlush,
-                    onRequestExactReplacement:
-                        onRequestExactReplacement
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+        InlineEditableMeetingTextContent(
+            externalText: $text,
+            font: font,
+            fontWeight: fontWeight,
+            foregroundColor: foregroundColor,
+            alignment: alignment,
+            lineLimit: lineLimit,
+            accessibilityIdentifier: accessibilityIdentifier,
+            onFlush: onFlush,
+            onRequestExactReplacement: onRequestExactReplacement
+        )
     }
 
     static func layoutWidth(
@@ -134,6 +344,83 @@ struct InlineEditableMeetingText: View {
             currentWidth: currentWidth,
             fittingWidth: fittingWidth
         )
+    }
+}
+
+private struct InlineEditableMeetingTextContent: View {
+    @Binding var externalText: String
+    @State private var buffer: InlineMeetingTextLocalBuffer
+
+    let font: Font.TextStyle
+    let fontWeight: Font.Weight?
+    let foregroundColor: Color
+    let alignment: TextAlignment
+    let lineLimit: Int?
+    let accessibilityIdentifier: String
+    let onFlush: () -> Void
+    let onRequestExactReplacement: ((String) -> Void)?
+
+    init(
+        externalText: Binding<String>,
+        font: Font.TextStyle,
+        fontWeight: Font.Weight?,
+        foregroundColor: Color,
+        alignment: TextAlignment,
+        lineLimit: Int?,
+        accessibilityIdentifier: String,
+        onFlush: @escaping () -> Void,
+        onRequestExactReplacement: ((String) -> Void)?
+    ) {
+        _externalText = externalText
+        _buffer = State(
+            initialValue: InlineMeetingTextLocalBuffer(
+                initialValue: externalText.wrappedValue
+            )
+        )
+        self.font = font
+        self.fontWeight = fontWeight
+        self.foregroundColor = foregroundColor
+        self.alignment = alignment
+        self.lineLimit = lineLimit
+        self.accessibilityIdentifier = accessibilityIdentifier
+        self.onFlush = onFlush
+        self.onRequestExactReplacement = onRequestExactReplacement
+    }
+
+    var body: some View {
+        Text(buffer.value.isEmpty ? " " : buffer.value)
+            .font(.system(font, weight: fontWeight ?? .regular))
+            .foregroundStyle(foregroundColor)
+            .multilineTextAlignment(alignment)
+            .lineLimit(lineLimit)
+            .opacity(0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .overlay(alignment: .topLeading) {
+                InlineEditableMeetingNativeView(
+                    text: Binding(
+                        get: { buffer.value },
+                        set: { newValue in
+                            buffer.updateFromNative(newValue) {
+                                externalText = $0
+                            }
+                        }
+                    ),
+                    font: font,
+                    fontWeight: fontWeight,
+                    foregroundColor: foregroundColor,
+                    alignment: alignment,
+                    lineLimit: lineLimit,
+                    accessibilityIdentifier: accessibilityIdentifier,
+                    onFlush: onFlush,
+                    onRequestExactReplacement:
+                        onRequestExactReplacement
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .onChange(of: externalText) { _, newValue in
+                buffer.reconcile(externalValue: newValue)
+            }
     }
 }
 
@@ -273,7 +560,8 @@ private struct InlineEditableMeetingNativeView: NSViewRepresentable {
             value in
             coordinator?.receiveTextChange(value)
         }
-        if textView.string != text {
+        let textChanged = textView.string != text
+        if textChanged {
             textView.string = text
         }
         textView.setAccessibilityIdentifier(accessibilityIdentifier)
@@ -281,8 +569,10 @@ private struct InlineEditableMeetingNativeView: NSViewRepresentable {
             on: textView,
             coordinator: context.coordinator
         )
-        applyPresentation(to: textView)
-        textView.invalidateIntrinsicContentSize()
+        let presentationChanged = applyPresentation(to: textView)
+        if textChanged || presentationChanged {
+            textView.invalidateIntrinsicContentSize()
+        }
     }
 
     func sizeThatFits(
@@ -291,57 +581,15 @@ private struct InlineEditableMeetingNativeView: NSViewRepresentable {
         context: Context
     ) -> CGSize? {
         _ = context
-        let measurementText = textView.string.isEmpty ? " " : textView.string
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.alignment = nativeAlignment
-        paragraphStyle.lineBreakMode = .byCharWrapping
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: nativeFont,
-            .paragraphStyle: paragraphStyle,
-        ]
-        let unconstrained = (measurementText as NSString).boundingRect(
-            with: NSSize(
-                width: 10_000,
-                height: CGFloat.greatestFiniteMagnitude
-            ),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: attributes
-        )
-        let fittingSize = CGSize(
-            width: ceil(unconstrained.width),
-            height: ceil(unconstrained.height)
-        )
-        let measuredWidth = Self.measurementWidth(
+        let availableWidth = Self.availableMeasurementWidth(
             proposal: proposal.width,
-            currentWidth: textView.bounds.width,
-            fittingWidth: fittingSize.width
+            currentWidth: textView.bounds.width
         )
-        let lineHeight = ceil(
-            nativeFont.ascender
-                - nativeFont.descender
-                + nativeFont.leading
-        )
-        guard measuredWidth > 0 else {
-            return CGSize(width: 0, height: lineHeight)
-        }
-        let measured = (measurementText as NSString).boundingRect(
-            with: NSSize(
-                width: measuredWidth,
-                height: CGFloat.greatestFiniteMagnitude
-            ),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: attributes
-        )
-        var measuredHeight = max(ceil(measured.height), lineHeight)
-        if let lineLimit {
-            measuredHeight = min(
-                measuredHeight,
-                lineHeight * CGFloat(lineLimit)
-            )
-        }
-        return CGSize(
-            width: measuredWidth,
-            height: measuredHeight
+        return textView.measuredSize(
+            availableWidth: availableWidth,
+            font: nativeFont,
+            alignment: nativeAlignment,
+            lineLimit: lineLimit
         )
     }
 
@@ -367,12 +615,27 @@ private struct InlineEditableMeetingNativeView: NSViewRepresentable {
         return fittingWidth
     }
 
-    private func applyPresentation(to textView: NSTextView) {
-        textView.font = nativeFont
-        textView.textColor = NSColor(foregroundColor)
-        textView.alignment = nativeAlignment
-        textView.textContainer?.maximumNumberOfLines = lineLimit ?? 0
-        textView.textContainer?.lineBreakMode = .byCharWrapping
+    private static func availableMeasurementWidth(
+        proposal: CGFloat?,
+        currentWidth: CGFloat
+    ) -> CGFloat? {
+        if let proposal, proposal.isFinite {
+            return max(proposal, 0)
+        }
+        if currentWidth.isFinite, currentWidth > 0 {
+            return currentWidth
+        }
+        return nil
+    }
+
+    @discardableResult
+    private func applyPresentation(to textView: InlineMeetingNativeTextView) -> Bool {
+        textView.applyPresentation(
+            font: nativeFont,
+            textColor: NSColor(foregroundColor),
+            alignment: nativeAlignment,
+            lineLimit: lineLimit
+        )
     }
 
     private func configureReplacementMenu(

@@ -235,21 +235,21 @@ final class MeetingCoordinatorTests: XCTestCase {
         )
     }
 
-    func testPermissionsMustBeAuthorizedBeforeRecording() async throws {
+    func testMicrophoneMustBeAuthorizedBeforeRecording() async throws {
         let fixture = makeFixture(
             permissions: [
-                .microphone: .authorized,
-                .screenRecording: .denied
+                .microphone: .denied,
+                .screenRecording: .authorized
             ]
         )
 
         do {
             try await fixture.coordinator.start(mode: .online)
-            XCTFail("Expected denied screen permission")
+            XCTFail("Expected denied microphone permission")
         } catch {
             XCTAssertEqual(
                 error as? MeetingCoordinatorError,
-                .permissionDenied([.screenRecording])
+                .permissionDenied([.microphone])
             )
         }
 
@@ -260,21 +260,21 @@ final class MeetingCoordinatorTests: XCTestCase {
         XCTAssertTrue(events.isEmpty)
     }
 
-    func testUnavailablePermissionPreventsRecordingFromStarting() async throws {
+    func testUnavailableMicrophonePermissionPreventsRecordingFromStarting() async throws {
         let fixture = makeFixture(
             permissions: [
-                .microphone: .authorized,
-                .screenRecording: .unavailable
+                .microphone: .unavailable,
+                .screenRecording: .authorized
             ]
         )
 
         do {
             try await fixture.coordinator.start(mode: .online)
-            XCTFail("Expected unavailable screen permission")
+            XCTFail("Expected unavailable microphone permission")
         } catch {
             XCTAssertEqual(
                 error as? MeetingCoordinatorError,
-                .permissionDenied([.screenRecording])
+                .permissionDenied([.microphone])
             )
         }
 
@@ -460,8 +460,8 @@ final class MeetingCoordinatorTests: XCTestCase {
         async throws {
         let fixture = makeFixture(
             permissions: [
-                .microphone: .authorized,
-                .screenRecording: .denied
+                .microphone: .denied,
+                .screenRecording: .authorized
             ],
             blockingTranscriptionFactoryOutcome: .success
         )
@@ -475,12 +475,12 @@ final class MeetingCoordinatorTests: XCTestCase {
 
         do {
             _ = try await fixture.coordinator.start(mode: .online)
-            XCTFail("Expected denied screen-recording permission")
+            XCTFail("Expected denied microphone permission")
             try? await fixture.coordinator.stop()
         } catch {
             XCTAssertEqual(
                 error as? MeetingCoordinatorError,
-                .permissionDenied([.screenRecording])
+                .permissionDenied([.microphone])
             )
         }
 

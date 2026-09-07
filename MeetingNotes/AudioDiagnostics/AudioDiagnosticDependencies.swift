@@ -1,11 +1,11 @@
 import AVFoundation
-import CoreMedia
 import Foundation
-@preconcurrency import ScreenCaptureKit
 
 struct AudioDiagnosticPermissionSnapshot: Sendable, Equatable {
     let microphone: AudioDiagnosticPermissionStatus
-    let screenRecording: AudioDiagnosticPermissionStatus
+    // Legacy screen-based reports may still carry this fact. Pure audio has
+    // no public permission preflight; nil means not applicable, not denied.
+    let screenRecording: AudioDiagnosticPermissionStatus?
 }
 
 protocol AudioDiagnosticCoordinating: Sendable {
@@ -37,10 +37,9 @@ struct LiveAudioDiagnosticPermissionChecker:
 
     func permissionSnapshot() async -> AudioDiagnosticPermissionSnapshot {
         let microphone = await system.status(for: .microphone)
-        let screenRecording = await system.status(for: .screenRecording)
         return AudioDiagnosticPermissionSnapshot(
             microphone: Self.status(microphone),
-            screenRecording: Self.status(screenRecording)
+            screenRecording: nil
         )
     }
 
@@ -490,9 +489,7 @@ private actor AudioDiagnosticSignalAccumulatorStore {
 enum AudioDiagnosticLiveSignalError: Error, Sendable, Equatable {
     case alreadyRunning
     case unsupportedPCMFormat
-    case screenCaptureUnavailable
-    case noDisplayAvailable
-    case screenCaptureSetupFailed
+    case systemAudioCaptureNotStarted
     case systemAudioBufferOverflow
 }
 
@@ -631,27 +628,6 @@ struct AudioDiagnosticSystemCaptureConfiguration: Sendable, Equatable {
     let excludesCurrentApplication = false
     let sampleRate = 48_000
     let channelCount = 1
-
-    func makeStreamConfiguration() -> SCStreamConfiguration {
-        let configuration = SCStreamConfiguration()
-        configuration.capturesAudio = capturesAudio
-        configuration.captureMicrophone = capturesMicrophone
-        configuration.excludesCurrentProcessAudio =
-            excludesCurrentProcessAudio
-        configuration.sampleRate = sampleRate
-        configuration.channelCount = channelCount
-        return configuration
-    }
-
-    func excludedApplicationBundleIdentifiers(
-        currentBundleIdentifier: String?
-    ) -> Set<String> {
-        guard excludesCurrentApplication,
-              let currentBundleIdentifier else {
-            return []
-        }
-        return [currentBundleIdentifier]
-    }
 }
 
 protocol AudioDiagnosticSystemAudioSession: Sendable {
@@ -668,7 +644,7 @@ protocol AudioDiagnosticSystemAudioSessionCreating: Sendable {
     ) async throws -> any AudioDiagnosticSystemAudioSession
 }
 
-protocol AudioDiagnosticScreenCaptureRuntime: Sendable {
+protocol AudioDiagnosticSystemCaptureRuntime: Sendable {
     func start(
         configuration: AudioDiagnosticSystemCaptureConfiguration
     ) async throws
@@ -690,7 +666,7 @@ actor LiveSystemAudioDiagnosticSignalTester:
 
     init(
         factory: any AudioDiagnosticSystemAudioSessionCreating =
-            ScreenCaptureKitAudioDiagnosticSessionFactory()
+            CoreAudioDiagnosticSessionFactory()
     ) {
         self.factory = factory
     }
@@ -724,7 +700,7 @@ actor LiveSystemAudioDiagnosticSignalTester:
                     afterCaptureStarts: afterCaptureStarts
                 )
             } onCancel: {
-                Task { await self.cancel() }
+                Task { await self.cancel(ifCurrent: requestedGeneration) }
             }
             try ensureCurrent(requestedGeneration)
             await finishOperation(requestedGeneration)
@@ -739,6 +715,11 @@ actor LiveSystemAudioDiagnosticSignalTester:
         guard let activeGeneration else { return }
         generation &+= 1
         await finishOperation(activeGeneration)
+    }
+
+    private func cancel(ifCurrent requestedGeneration: UInt64) async {
+        guard activeGeneration == requestedGeneration else { return }
+        await cancel()
     }
 
     private func ensureCurrent(_ requestedGeneration: UInt64) throws {
@@ -761,29 +742,29 @@ actor LiveSystemAudioDiagnosticSignalTester:
     }
 }
 
-struct ScreenCaptureKitAudioDiagnosticSessionFactory:
+struct CoreAudioDiagnosticSessionFactory:
     AudioDiagnosticSystemAudioSessionCreating {
     func makeSession(
         configuration: AudioDiagnosticSystemCaptureConfiguration
     ) async throws -> any AudioDiagnosticSystemAudioSession {
-        ScreenCaptureKitAudioDiagnosticSession(
+        SystemAudioDiagnosticSession(
             configuration: configuration,
-            runtime: LiveAudioDiagnosticScreenCaptureRuntime()
+            runtime: LiveAudioDiagnosticProcessTapRuntime()
         )
     }
 }
 
-actor ScreenCaptureKitAudioDiagnosticSession:
+actor SystemAudioDiagnosticSession:
     AudioDiagnosticSystemAudioSession {
     private let configuration: AudioDiagnosticSystemCaptureConfiguration
-    private let runtime: any AudioDiagnosticScreenCaptureRuntime
+    private let runtime: any AudioDiagnosticSystemCaptureRuntime
     private var activeGeneration: UInt64?
     private var runtimeGeneration: UInt64?
     private var generation: UInt64 = 0
 
     init(
         configuration: AudioDiagnosticSystemCaptureConfiguration,
-        runtime: any AudioDiagnosticScreenCaptureRuntime
+        runtime: any AudioDiagnosticSystemCaptureRuntime
     ) {
         self.configuration = configuration
         self.runtime = runtime
@@ -812,7 +793,7 @@ actor ScreenCaptureKitAudioDiagnosticSession:
                 try ensureCurrent(requestedGeneration)
                 return metrics
             } onCancel: {
-                Task { await self.cancel() }
+                Task { await self.cancel(ifCurrent: requestedGeneration) }
             }
             await finishOperation(requestedGeneration)
             return metrics
@@ -826,6 +807,11 @@ actor ScreenCaptureKitAudioDiagnosticSession:
         guard let activeGeneration else { return }
         generation &+= 1
         await finishOperation(activeGeneration)
+    }
+
+    private func cancel(ifCurrent requestedGeneration: UInt64) async {
+        guard activeGeneration == requestedGeneration else { return }
+        await cancel()
     }
 
     private func ensureCurrent(_ requestedGeneration: UInt64) throws {
@@ -847,277 +833,122 @@ actor ScreenCaptureKitAudioDiagnosticSession:
     }
 }
 
-actor LiveAudioDiagnosticScreenCaptureRuntime:
-    AudioDiagnosticScreenCaptureRuntime {
-    private static let bufferCapacity = 64
+actor LiveAudioDiagnosticProcessTapRuntime: AudioDiagnosticSystemCaptureRuntime {
+    private final class Run: @unchecked Sendable {
+        let capture: any SystemAudioCaptureSession
+        let completion: AsyncThrowingStream<Void, Error>
+        private let continuation: AsyncThrowingStream<Void, Error>.Continuation
+        private let lock = NSLock()
+        private var accumulator = AudioSignalAccumulator()
+        private var failure: Error?
+        private var closed = false
 
-    private let callbackQueue = DispatchQueue(
-        label: "MeetingNotes.AudioDiagnostic.SystemAudio",
-        qos: .userInitiated
-    )
+        init(capture: any SystemAudioCaptureSession) {
+            self.capture = capture
+            let pair = AsyncThrowingStream<Void, Error>.makeStream()
+            completion = pair.stream
+            continuation = pair.continuation
+        }
+
+        func receive(_ event: SystemAudioCaptureEvent) {
+            let terminalError: Error? = lock.withLock {
+                guard !closed else { return nil }
+                switch event {
+                case let .frame(frame):
+                    // Tap events arrive on the non-RT drain queue, not the
+                    // AUHAL callback. Accumulate immediately, including while
+                    // the one-second output tone awaits playback completion.
+                    // No audio arrays or per-frame tasks are retained here.
+                    accumulator.ingest(samples: frame.samples, sampleRate: frame.sampleRate,
+                                       channelCount: frame.channelCount)
+                    return nil
+                case let .failure(error):
+                    failure = error
+                    closed = true
+                    return error
+                }
+            }
+            if let terminalError { continuation.finish(throwing: terminalError) }
+        }
+
+        func snapshot() throws -> AudioSignalMetrics {
+            try lock.withLock {
+                if let failure { throw failure }
+                return accumulator.snapshot()
+            }
+        }
+
+        func close() {
+            let shouldFinish = lock.withLock {
+                guard !closed else { return false }
+                closed = true
+                return true
+            }
+            if shouldFinish { continuation.finish(throwing: CancellationError()) }
+        }
+    }
+
+    private let captureFactory: @Sendable (AudioDiagnosticSystemCaptureConfiguration) -> any SystemAudioCaptureSession
     private let observationWindow: LiveAudioDiagnosticObservationWindow
-    private var stream: SCStream?
-    private var relay: AudioDiagnosticScreenAudioRelay?
-    private var sampleStream: AsyncThrowingStream<
-        AudioDiagnosticOwnedSamples,
-        Error
-    >?
-    private var isStarting = false
-    private var generation: UInt64 = 0
+    private var activeRun: Run?
 
     init(
-        observationSleeper: any AudioDiagnosticTimeoutSleeping =
-            ContinuousAudioDiagnosticTimeoutSleeper()
+        captureFactory: @escaping @Sendable (AudioDiagnosticSystemCaptureConfiguration) -> any SystemAudioCaptureSession = {
+            CoreAudioProcessTapSession(excludesCurrentProcessAudio: $0.excludesCurrentProcessAudio)
+        },
+        observationSleeper: any AudioDiagnosticTimeoutSleeping = ContinuousAudioDiagnosticTimeoutSleeper()
     ) {
-        observationWindow = LiveAudioDiagnosticObservationWindow(
-            sleeper: observationSleeper
-        )
+        self.captureFactory = captureFactory
+        observationWindow = LiveAudioDiagnosticObservationWindow(sleeper: observationSleeper)
     }
 
-    func start(
-        configuration: AudioDiagnosticSystemCaptureConfiguration
-    ) async throws {
-        guard stream == nil, !isStarting else {
-            throw AudioDiagnosticLiveSignalError.alreadyRunning
-        }
-        isStarting = true
-        generation &+= 1
-        let requestedGeneration = generation
-
+    func start(configuration: AudioDiagnosticSystemCaptureConfiguration) async throws {
+        try Task.checkCancellation()
+        guard activeRun == nil else { throw AudioDiagnosticLiveSignalError.alreadyRunning }
+        let run = Run(capture: captureFactory(configuration))
+        activeRun = run
         do {
-            let content = try await SCShareableContent
-                .excludingDesktopWindows(
-                    false,
-                    onScreenWindowsOnly: true
-                )
-            try ensureCurrent(requestedGeneration)
-            guard let display = content.displays.first else {
-                throw AudioDiagnosticLiveSignalError.noDisplayAvailable
+            try await withTaskCancellationHandler {
+                try await run.capture.start { [weak run] event in
+                    run?.receive(event)
+                }
+                try ensureCurrent(run)
+            } onCancel: {
+                Task { await self.stop(run) }
             }
-
-            let excludedBundleIdentifiers =
-                configuration.excludedApplicationBundleIdentifiers(
-                    currentBundleIdentifier: Bundle.main.bundleIdentifier
-                )
-            let excludedApplications = content.applications.filter {
-                excludedBundleIdentifiers.contains($0.bundleIdentifier)
-            }
-            let filter = SCContentFilter(
-                display: display,
-                excludingApplications: excludedApplications,
-                exceptingWindows: []
-            )
-            let samplePair = AsyncThrowingStream<
-                AudioDiagnosticOwnedSamples,
-                Error
-            >.makeStream(
-                bufferingPolicy: .bufferingOldest(Self.bufferCapacity)
-            )
-            let relay = AudioDiagnosticScreenAudioRelay(
-                continuation: samplePair.continuation
-            )
-            let stream = SCStream(
-                filter: filter,
-                configuration: configuration.makeStreamConfiguration(),
-                delegate: relay
-            )
-
-            do {
-                try stream.addStreamOutput(
-                    relay,
-                    type: .audio,
-                    sampleHandlerQueue: callbackQueue
-                )
-            } catch {
-                relay.finish()
-                throw AudioDiagnosticLiveSignalError
-                    .screenCaptureSetupFailed
-            }
-            self.stream = stream
-            self.relay = relay
-            sampleStream = samplePair.stream
-            try await stream.startCapture()
-            try ensureCurrent(requestedGeneration)
-            isStarting = false
-        } catch is CancellationError {
-            isStarting = false
-            throw CancellationError()
-        } catch let error as AudioDiagnosticLiveSignalError {
-            isStarting = false
-            throw error
         } catch {
-            isStarting = false
-            throw AudioDiagnosticLiveSignalError.screenCaptureUnavailable
+            await stop(run)
+            throw error
         }
     }
 
-    func measureSignal(
-        duration: TimeInterval
-    ) async throws -> AudioSignalMetrics {
-        guard let sampleStream else {
-            throw AudioDiagnosticLiveSignalError.screenCaptureSetupFailed
+    func measureSignal(duration: TimeInterval) async throws -> AudioSignalMetrics {
+        guard let run = activeRun else {
+            throw AudioDiagnosticLiveSignalError.systemAudioCaptureNotStarted
         }
-        let accumulator = AudioDiagnosticSignalAccumulatorStore()
-        try await observationWindow.observe(
-            sampleStream,
-            duration: duration
-        ) { ownedSamples in
-            await accumulator.ingest(
-                samples: ownedSamples.values,
-                sampleRate: ownedSamples.sampleRate,
-                channelCount: ownedSamples.channelCount
-            )
-        }
-        return await accumulator.snapshot()
+        // The stream only signals a failure/cancel; the existing observation
+        // clock determines the window. Samples have already been counted.
+        try await observationWindow.observe(run.completion, duration: duration) { _ in }
+        try ensureCurrent(run)
+        return try run.snapshot()
     }
 
     func stop() async {
-        generation &+= 1
-        isStarting = false
-        await stopActiveStreamIfNeeded()
+        guard let run = activeRun else { return }
+        await stop(run)
     }
 
-    private func ensureCurrent(_ requestedGeneration: UInt64) throws {
+    private func ensureCurrent(_ run: Run) throws {
         try Task.checkCancellation()
-        guard generation == requestedGeneration else {
-            throw CancellationError()
-        }
+        guard activeRun === run else { throw CancellationError() }
     }
 
-    private func stopActiveStreamIfNeeded() async {
-        guard let stream, let relay else { return }
-        self.stream = nil
-        self.relay = nil
-        sampleStream = nil
-        try? await stream.stopCapture()
-        try? stream.removeStreamOutput(relay, type: .audio)
-        await ScreenAudioCallbackBarrier.wait(for: [callbackQueue])
-        relay.finish()
-    }
-}
-
-private struct AudioDiagnosticOwnedSamples: Sendable {
-    let values: [Float]
-    let sampleRate: Double
-    let channelCount: Int
-}
-
-private final class AudioDiagnosticScreenAudioRelay:
-    NSObject,
-    SCStreamOutput,
-    SCStreamDelegate,
-    @unchecked Sendable {
-    private let lock = NSLock()
-    private let decoder = AudioSampleBufferDecoder()
-    private var continuation: AsyncThrowingStream<
-        AudioDiagnosticOwnedSamples,
-        Error
-    >.Continuation?
-
-    init(
-        continuation: AsyncThrowingStream<
-            AudioDiagnosticOwnedSamples,
-            Error
-        >.Continuation
-    ) {
-        self.continuation = continuation
-    }
-
-    func stream(
-        _ stream: SCStream,
-        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-        of outputType: SCStreamOutputType
-    ) {
-        _ = stream
-        guard outputType == .audio else { return }
-
-        do {
-            let decoded = try decoder.decode(sampleBuffer)
-            let ownedSamples = try Self.copySamples(
-                from: decoded.buffer,
-                sampleRate: decoded.sampleRate
-            )
-            let currentContinuation = lock.withLock {
-                continuation
-            }
-            guard let currentContinuation else { return }
-            let result = currentContinuation.yield(ownedSamples)
-            if case .dropped = result {
-                finish(
-                    throwing:
-                        AudioDiagnosticLiveSignalError
-                            .systemAudioBufferOverflow
-                )
-            }
-        } catch {
-            finish(throwing: error)
-        }
-    }
-
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
-        _ = stream
-        finish(throwing: error)
-    }
-
-    func finish() {
-        finish(throwing: nil)
-    }
-
-    private func finish(throwing error: Error?) {
-        let currentContinuation = lock.withLock {
-            let currentContinuation = continuation
-            continuation = nil
-            return currentContinuation
-        }
-        guard let currentContinuation else { return }
-        if let error {
-            currentContinuation.finish(throwing: error)
-        } else {
-            currentContinuation.finish()
-        }
-    }
-
-    private static func copySamples(
-        from buffer: AVAudioPCMBuffer,
-        sampleRate: Double
-    ) throws -> AudioDiagnosticOwnedSamples {
-        guard buffer.format.commonFormat == .pcmFormatFloat32,
-              let channelData = buffer.floatChannelData else {
-            throw AudioDiagnosticLiveSignalError.unsupportedPCMFormat
-        }
-        let frameCount = Int(buffer.frameLength)
-        let channelCount = Int(buffer.format.channelCount)
-        guard frameCount > 0, channelCount > 0 else {
-            return AudioDiagnosticOwnedSamples(
-                values: [],
-                sampleRate: sampleRate,
-                channelCount: max(1, channelCount)
-            )
-        }
-
-        var values: [Float] = []
-        values.reserveCapacity(frameCount * channelCount)
-        if buffer.format.isInterleaved {
-            values.append(
-                contentsOf: UnsafeBufferPointer(
-                    start: channelData[0],
-                    count: frameCount * channelCount
-                )
-            )
-        } else {
-            for channel in 0..<channelCount {
-                values.append(
-                    contentsOf: UnsafeBufferPointer(
-                        start: channelData[channel],
-                        count: frameCount
-                    )
-                )
-            }
-        }
-        return AudioDiagnosticOwnedSamples(
-            values: values,
-            sampleRate: sampleRate,
-            channelCount: channelCount
-        )
+    private func stop(_ run: Run) async {
+        guard activeRun === run else { return }
+        activeRun = nil
+        run.close()
+        // Stop only this attempt. The process-tap session owns deferred
+        // cleanup if its non-cooperative HAL startup finishes after cancel.
+        await run.capture.stop()
     }
 }

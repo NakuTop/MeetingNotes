@@ -182,11 +182,17 @@ final class RecordingAnnotationViewModel {
         let createdAt = now()
         screenshotState = .capturing
 
-        let captured: MeetingScreenshotCaptureResult
+        let captured: MeetingScreenshotCaptureResult?
         do {
-            captured = try await screenshotCapture.captureDisplayUnderMouse()
+            captured = try await screenshotCapture.captureSelectedWindow()
         } catch {
             updateScreenshotFailure(error, for: snapshot)
+            return
+        }
+        guard let captured else {
+            if isCurrent(snapshot) {
+                screenshotState = .idle
+            }
             return
         }
 

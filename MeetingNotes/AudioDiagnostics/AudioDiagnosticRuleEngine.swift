@@ -49,6 +49,7 @@ struct AudioDiagnosticRuleEngine: Sendable {
         let systemAudioIsApplicable =
             facts.screenPermission == .authorized
             || facts.systemAudioMetrics != nil
+            || facts.systemAudioTestOutcome == .succeeded
         if systemAudioIsApplicable {
             if let systemAudioMetrics = facts.systemAudioMetrics {
                 switch systemAudioMetrics.level {

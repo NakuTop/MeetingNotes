@@ -2,6 +2,94 @@ import XCTest
 @testable import MeetingNotes
 
 final class MeetingDocumentModeSliderDragPolicyTests: XCTestCase {
+    func testTapAnywhereInLeftHalfSelectsSummary() {
+        for locationX in [0, 1, 24, 49] as [CGFloat] {
+            XCTAssertEqual(
+                MeetingDocumentModeSliderTapPolicy.selection(
+                    currentSelection: .detailedMinutes,
+                    locationX: locationX,
+                    width: 100,
+                    isDisabled: false
+                ),
+                .summary
+            )
+        }
+    }
+
+    func testTapAnywhereInRightHalfSelectsDetailedMinutes() {
+        for locationX in [51, 75, 99, 100] as [CGFloat] {
+            XCTAssertEqual(
+                MeetingDocumentModeSliderTapPolicy.selection(
+                    currentSelection: .summary,
+                    locationX: locationX,
+                    width: 100,
+                    isDisabled: false
+                ),
+                .detailedMinutes
+            )
+        }
+    }
+
+    func testTapAtExactMidpointKeepsCurrentSelection() {
+        XCTAssertEqual(
+            MeetingDocumentModeSliderTapPolicy.selection(
+                currentSelection: .summary,
+                locationX: 50,
+                width: 100,
+                isDisabled: false
+            ),
+            .summary
+        )
+        XCTAssertEqual(
+            MeetingDocumentModeSliderTapPolicy.selection(
+                currentSelection: .detailedMinutes,
+                locationX: 50,
+                width: 100,
+                isDisabled: false
+            ),
+            .detailedMinutes
+        )
+    }
+
+    func testDisabledOrInvalidTapKeepsCurrentSelection() {
+        XCTAssertEqual(
+            MeetingDocumentModeSliderTapPolicy.selection(
+                currentSelection: .summary,
+                locationX: 75,
+                width: 100,
+                isDisabled: true
+            ),
+            .summary
+        )
+        XCTAssertEqual(
+            MeetingDocumentModeSliderTapPolicy.selection(
+                currentSelection: .detailedMinutes,
+                locationX: -1,
+                width: 100,
+                isDisabled: false
+            ),
+            .detailedMinutes
+        )
+        XCTAssertEqual(
+            MeetingDocumentModeSliderTapPolicy.selection(
+                currentSelection: .summary,
+                locationX: 101,
+                width: 100,
+                isDisabled: false
+            ),
+            .summary
+        )
+        XCTAssertEqual(
+            MeetingDocumentModeSliderTapPolicy.selection(
+                currentSelection: .summary,
+                locationX: 25,
+                width: 0,
+                isDisabled: false
+            ),
+            .summary
+        )
+    }
+
     func testLeftToRightCrossingSelectsDetailedMinutes() {
         let update = MeetingDocumentModeSliderDragPolicy.update(
             startingSelection: .summary,

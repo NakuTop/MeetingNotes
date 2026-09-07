@@ -19,32 +19,83 @@ struct MeetingScreenshotCaptureResult: Equatable, Sendable {
     let pixelHeight: Int
 }
 
-protocol MeetingScreenshotCapturing: Sendable {
-    func captureDisplayUnderMouse() async throws
-        -> MeetingScreenshotCaptureResult
+@MainActor
+protocol MeetingScreenshotCapturing {
+    func captureSelectedWindow() async throws
+        -> MeetingScreenshotCaptureResult?
 }
 
-struct MeetingScreenshotDisplayDescriptor: Equatable, Sendable {
-    let displayID: CGDirectDisplayID
-    let frame: CGRect
-    let pixelWidth: Int
-    let pixelHeight: Int
-    let isMain: Bool
+struct MeetingScreenshotPixelSize: Equatable, Sendable {
+    let width: Int
+    let height: Int
 }
 
-struct MeetingScreenshotScreenSnapshot: Equatable, Sendable {
-    let mouseLocation: CGPoint
-    let displays: [MeetingScreenshotDisplayDescriptor]
+enum MeetingScreenshotWindowPixelPolicy {
+    static func outputSize(
+        contentRect: CGRect,
+        pointPixelScale: CGFloat,
+        maximum: MeetingScreenshotPixelSize
+    ) -> MeetingScreenshotPixelSize? {
+        guard contentRect.width.isFinite,
+              contentRect.height.isFinite,
+              pointPixelScale.isFinite,
+              contentRect.width > 0,
+              contentRect.height > 0,
+              pointPixelScale > 0,
+              maximum.width > 0,
+              maximum.height > 0 else {
+            return nil
+        }
+
+        let nativeWidth = ceil(contentRect.width * pointPixelScale)
+        let nativeHeight = ceil(contentRect.height * pointPixelScale)
+        guard nativeWidth.isFinite,
+              nativeHeight.isFinite,
+              nativeWidth > 0,
+              nativeHeight > 0,
+              nativeWidth <= CGFloat(Int.max),
+              nativeHeight <= CGFloat(Int.max) else {
+            return nil
+        }
+
+        let scale = min(
+            1,
+            CGFloat(maximum.width) / nativeWidth,
+            CGFloat(maximum.height) / nativeHeight
+        )
+        return MeetingScreenshotPixelSize(
+            width: max(1, Int(floor(nativeWidth * scale))),
+            height: max(1, Int(floor(nativeHeight * scale)))
+        )
+    }
 }
 
-enum MeetingScreenshotDisplaySelector {
-    static func select(
-        from displays: [MeetingScreenshotDisplayDescriptor],
-        mouseLocation: CGPoint
-    ) -> MeetingScreenshotDisplayDescriptor? {
-        displays.first { $0.frame.contains(mouseLocation) }
-            ?? displays.first(where: \.isMain)
-            ?? displays.first
+struct MeetingScreenshotWindowSelection: Equatable, @unchecked Sendable {
+    let id: UUID
+    let contentRect: CGRect
+    let pointPixelScale: CGFloat
+
+    fileprivate let contentFilter: SCContentFilter?
+
+    init(
+        id: UUID = UUID(),
+        contentRect: CGRect,
+        pointPixelScale: CGFloat,
+        contentFilter: SCContentFilter? = nil
+    ) {
+        self.id = id
+        self.contentRect = contentRect
+        self.pointPixelScale = pointPixelScale
+        self.contentFilter = contentFilter
+    }
+
+    static func == (
+        lhs: MeetingScreenshotWindowSelection,
+        rhs: MeetingScreenshotWindowSelection
+    ) -> Bool {
+        lhs.id == rhs.id
+            && lhs.contentRect == rhs.contentRect
+            && lhs.pointPixelScale == rhs.pointPixelScale
     }
 }
 
@@ -56,63 +107,72 @@ struct MeetingScreenshotCapturedImage: @unchecked Sendable {
     }
 }
 
-protocol MeetingScreenshotCaptureBackend: Sendable {
-    func shareableDisplayIDs() async throws -> [CGDirectDisplayID]
+@MainActor
+protocol MeetingScreenshotCaptureBackend {
+    func selectWindow() async throws -> MeetingScreenshotWindowSelection?
 
     func captureImage(
-        displayID: CGDirectDisplayID,
+        selection: MeetingScreenshotWindowSelection,
         pixelWidth: Int,
         pixelHeight: Int
     ) async throws -> MeetingScreenshotCapturedImage
 }
 
-struct MeetingScreenshotCaptureService: MeetingScreenshotCapturing, Sendable {
-    typealias ScreenSnapshotProvider =
-        @MainActor @Sendable () -> MeetingScreenshotScreenSnapshot
+@MainActor
+struct MeetingScreenshotCaptureService: MeetingScreenshotCapturing {
+    typealias MaximumPixelSizeProvider =
+        @MainActor @Sendable () -> MeetingScreenshotPixelSize?
+    typealias PNGEncoder =
+        @Sendable (MeetingScreenshotCapturedImage) -> Data?
 
     private let backend: any MeetingScreenshotCaptureBackend
-    private let screenSnapshot: ScreenSnapshotProvider
+    private let maximumPixelSize: MaximumPixelSizeProvider
+    private let encodePNG: PNGEncoder
 
     init(
         backend: any MeetingScreenshotCaptureBackend =
             ScreenCaptureKitMeetingScreenshotBackend(),
-        screenSnapshot: @escaping ScreenSnapshotProvider = {
-            MeetingScreenshotScreenSnapshotReader.current()
+        maximumPixelSize: @escaping MaximumPixelSizeProvider = {
+            MeetingScreenshotMaximumPixelSizeReader.current()
+        },
+        encodePNG: @escaping PNGEncoder = {
+            MeetingScreenshotPNGEncoder.encode($0.image)
         }
     ) {
         self.backend = backend
-        self.screenSnapshot = screenSnapshot
+        self.maximumPixelSize = maximumPixelSize
+        self.encodePNG = encodePNG
     }
 
-    func captureDisplayUnderMouse() async throws
-        -> MeetingScreenshotCaptureResult {
+    func captureSelectedWindow() async throws
+        -> MeetingScreenshotCaptureResult? {
         try Task.checkCancellation()
-        let snapshot = await screenSnapshot()
-        try Task.checkCancellation()
-        guard let selected = MeetingScreenshotDisplaySelector.select(
-            from: snapshot.displays,
-            mouseLocation: snapshot.mouseLocation
-        ) else {
-            throw MeetingScreenshotCaptureError.noDisplayAvailable
-        }
 
-        let shareableDisplayIDs: [CGDirectDisplayID]
+        let selection: MeetingScreenshotWindowSelection?
         do {
-            shareableDisplayIDs = try await backend.shareableDisplayIDs()
+            selection = try await backend.selectWindow()
         } catch {
             throw Self.captureError(from: error)
         }
         try Task.checkCancellation()
-        guard shareableDisplayIDs.contains(selected.displayID) else {
-            throw MeetingScreenshotCaptureError.selectedDisplayUnavailable
+        guard let selection else { return nil }
+        guard let maximum = maximumPixelSize() else {
+            throw MeetingScreenshotCaptureError.noDisplayAvailable
+        }
+        guard let size = MeetingScreenshotWindowPixelPolicy.outputSize(
+            contentRect: selection.contentRect,
+            pointPixelScale: selection.pointPixelScale,
+            maximum: maximum
+        ) else {
+            throw MeetingScreenshotCaptureError.captureFailed
         }
 
         let captured: MeetingScreenshotCapturedImage
         do {
             captured = try await backend.captureImage(
-                displayID: selected.displayID,
-                pixelWidth: selected.pixelWidth,
-                pixelHeight: selected.pixelHeight
+                selection: selection,
+                pixelWidth: size.width,
+                pixelHeight: size.height
             )
         } catch {
             throw Self.captureError(from: error)
@@ -120,14 +180,28 @@ struct MeetingScreenshotCaptureService: MeetingScreenshotCapturing, Sendable {
         try Task.checkCancellation()
 
         let image = captured.image
-        guard let pngData = MeetingScreenshotPNGEncoder.encode(image) else {
+        guard let pngData = try await Self.encodeOffMainActor(
+            captured,
+            using: encodePNG
+        ) else {
             throw MeetingScreenshotCaptureError.pngEncodingFailed
         }
+        try Task.checkCancellation()
         return MeetingScreenshotCaptureResult(
             pngData: pngData,
             pixelWidth: image.width,
             pixelHeight: image.height
         )
+    }
+
+    private nonisolated static func encodeOffMainActor(
+        _ image: MeetingScreenshotCapturedImage,
+        using encoder: PNGEncoder
+    ) async throws -> Data? {
+        try Task.checkCancellation()
+        let data = encoder(image)
+        try Task.checkCancellation()
+        return data
     }
 
     private static func captureError(from error: Error) -> Error {
@@ -145,89 +219,193 @@ struct MeetingScreenshotCaptureService: MeetingScreenshotCapturing, Sendable {
 }
 
 @MainActor
-private enum MeetingScreenshotScreenSnapshotReader {
-    static func current() -> MeetingScreenshotScreenSnapshot {
-        let mainDisplayID = NSScreen.main.flatMap(displayID(for:))
-        let displays: [MeetingScreenshotDisplayDescriptor] =
-            NSScreen.screens.compactMap { screen
-                -> MeetingScreenshotDisplayDescriptor? in
-            guard let displayID = displayID(for: screen) else { return nil }
+private enum MeetingScreenshotMaximumPixelSizeReader {
+    static func current() -> MeetingScreenshotPixelSize? {
+        let sizes = NSScreen.screens.compactMap { screen
+            -> MeetingScreenshotPixelSize? in
+            let key = NSDeviceDescriptionKey("NSScreenNumber")
+            guard let number = screen.deviceDescription[key] as? NSNumber else {
+                return nil
+            }
+            let displayID = CGDirectDisplayID(number.uint32Value)
             let pixelWidth = Int(CGDisplayPixelsWide(displayID))
             let pixelHeight = Int(CGDisplayPixelsHigh(displayID))
-            return MeetingScreenshotDisplayDescriptor(
-                displayID: displayID,
-                frame: screen.frame,
-                pixelWidth: max(
-                    1,
-                    pixelWidth > 0
-                        ? pixelWidth
-                        : Int(screen.frame.width * screen.backingScaleFactor)
-                ),
-                pixelHeight: max(
-                    1,
-                    pixelHeight > 0
-                        ? pixelHeight
-                        : Int(screen.frame.height * screen.backingScaleFactor)
-                ),
-                isMain: displayID == mainDisplayID
+            guard pixelWidth > 0, pixelHeight > 0 else { return nil }
+            return MeetingScreenshotPixelSize(
+                width: pixelWidth,
+                height: pixelHeight
             )
         }
-        return MeetingScreenshotScreenSnapshot(
-            mouseLocation: NSEvent.mouseLocation,
-            displays: displays
-        )
-    }
-
-    private static func displayID(for screen: NSScreen) -> CGDirectDisplayID? {
-        let key = NSDeviceDescriptionKey("NSScreenNumber")
-        guard let number = screen.deviceDescription[key] as? NSNumber else {
+        guard let maximumWidth = sizes.map(\.width).max(),
+              let maximumHeight = sizes.map(\.height).max() else {
             return nil
         }
-        return CGDirectDisplayID(number.uint32Value)
+        return MeetingScreenshotPixelSize(
+            width: maximumWidth,
+            height: maximumHeight
+        )
     }
 }
 
-private actor ScreenCaptureKitMeetingScreenshotBackend:
-    MeetingScreenshotCaptureBackend {
-    private var displaysByID: [CGDirectDisplayID: SCDisplay] = [:]
+final class MeetingScreenshotSelectionGate: @unchecked Sendable {
+    enum TerminalResult {
+        case selected(MeetingScreenshotWindowSelection)
+        case cancelled
+        case failure(Error)
+    }
 
-    func shareableDisplayIDs() async throws -> [CGDirectDisplayID] {
-        let content = try await SCShareableContent.current
-        try Task.checkCancellation()
-        displaysByID = Dictionary(
-            uniqueKeysWithValues: content.displays.map {
-                ($0.displayID, $0)
-            }
+    private enum State {
+        case pending
+        case terminal(TerminalResult)
+        case waiting(
+            CheckedContinuation<MeetingScreenshotWindowSelection?, Error>
         )
-        return content.displays.map(\.displayID)
+        case resumed
+    }
+
+    private let lock = NSLock()
+    private var state: State = .pending
+    private var storedResumeCount = 0
+
+    var resumeCount: Int {
+        lock.withLock { storedResumeCount }
+    }
+
+    var isPending: Bool {
+        lock.withLock {
+            switch state {
+            case .pending, .waiting: return true
+            case .terminal, .resumed: return false
+            }
+        }
+    }
+
+    func wait() async throws -> MeetingScreenshotWindowSelection? {
+        try Task.checkCancellation()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                register(continuation)
+            }
+        } onCancel: {
+            finish(.failure(CancellationError()))
+        }
+    }
+
+    func finish(_ result: TerminalResult) {
+        let continuation = lock.withLock {
+            () -> CheckedContinuation<
+                MeetingScreenshotWindowSelection?, Error
+            >? in
+            switch state {
+            case .pending:
+                state = .terminal(result)
+                return nil
+            case let .waiting(continuation):
+                state = .resumed
+                storedResumeCount += 1
+                return continuation
+            case .terminal, .resumed:
+                return nil
+            }
+        }
+        if let continuation {
+            Self.resume(continuation, with: result)
+        }
+    }
+
+    private func register(
+        _ continuation: CheckedContinuation<
+            MeetingScreenshotWindowSelection?, Error
+        >
+    ) {
+        let terminal = lock.withLock { () -> TerminalResult? in
+            switch state {
+            case .pending:
+                state = .waiting(continuation)
+                return nil
+            case let .terminal(result):
+                state = .resumed
+                storedResumeCount += 1
+                return result
+            case .waiting, .resumed:
+                state = .resumed
+                storedResumeCount += 1
+                return .failure(CancellationError())
+            }
+        }
+        if let terminal {
+            Self.resume(continuation, with: terminal)
+        }
+    }
+
+    private static func resume(
+        _ continuation: CheckedContinuation<
+            MeetingScreenshotWindowSelection?, Error
+        >,
+        with result: TerminalResult
+    ) {
+        switch result {
+        case let .selected(selection):
+            continuation.resume(returning: selection)
+        case .cancelled:
+            continuation.resume(returning: nil)
+        case let .failure(error):
+            continuation.resume(throwing: error)
+        }
+    }
+}
+
+@MainActor
+final class ScreenCaptureKitMeetingScreenshotBackend:
+    NSObject,
+    MeetingScreenshotCaptureBackend {
+    typealias CaptureImageOperation = @MainActor (
+        SCContentFilter, SCStreamConfiguration,
+        @escaping (CGImage?, Error?) -> Void
+    ) -> Void
+
+    private let captureImageOperation: CaptureImageOperation
+    private let windowPicker: any MeetingScreenshotWindowSelecting
+
+    init(
+        windowPicker: any MeetingScreenshotWindowSelecting = MeetingScreenshotDirectWindowPicker(),
+        captureImageOperation: @escaping CaptureImageOperation = { filter, configuration, completion in
+        SCScreenshotManager.captureImage(
+            contentFilter: filter, configuration: configuration,
+            completionHandler: completion
+        )
+    }) {
+        self.windowPicker = windowPicker
+        self.captureImageOperation = captureImageOperation
+        super.init()
+    }
+
+    func selectWindow() async throws -> MeetingScreenshotWindowSelection? {
+        try await windowPicker.selectWindow()
     }
 
     func captureImage(
-        displayID: CGDirectDisplayID,
+        selection: MeetingScreenshotWindowSelection,
         pixelWidth: Int,
         pixelHeight: Int
     ) async throws -> MeetingScreenshotCapturedImage {
-        guard let display = displaysByID[displayID] else {
+        guard let filter = selection.contentFilter else {
             throw MeetingScreenshotCaptureError.selectedDisplayUnavailable
         }
         try Task.checkCancellation()
 
-        let filter = SCContentFilter(
-            display: display,
-            excludingWindows: []
-        )
         let configuration = SCStreamConfiguration()
         configuration.width = max(1, pixelWidth)
         configuration.height = max(1, pixelHeight)
+        configuration.captureResolution = .best
+        configuration.scalesToFit = false
+        configuration.preservesAspectRatio = true
         configuration.showsCursor = true
         configuration.capturesAudio = false
 
         let image = try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<CGImage, Error>) in
-            SCScreenshotManager.captureImage(
-                contentFilter: filter,
-                configuration: configuration
-            ) { image, error in
+            captureImageOperation(filter, configuration) { image, error in
                 if let error {
                     continuation.resume(throwing: error)
                 } else if let image {
@@ -244,7 +422,57 @@ private actor ScreenCaptureKitMeetingScreenshotBackend:
     }
 }
 
-private enum MeetingScreenshotPNGEncoder {
+// ScreenCaptureKit delivers these Objective-C callbacks on replayd's XPC queue,
+// not MainActor. A per-request observer owns only an immutable, lock-protected
+// gate; delayed callbacks cannot complete a later selection request.
+final class MeetingScreenshotPickerObserver:
+    NSObject, SCContentSharingPickerObserver, @unchecked Sendable {
+    private let gate: MeetingScreenshotSelectionGate
+
+    init(gate: MeetingScreenshotSelectionGate) {
+        self.gate = gate
+        super.init()
+    }
+
+    func contentSharingPicker(
+        _ picker: SCContentSharingPicker,
+        didCancelFor stream: SCStream?
+    ) {
+        _ = picker
+        _ = stream
+        gate.finish(.cancelled)
+    }
+
+    func contentSharingPickerStartDidFailWithError(_ error: Error) {
+        gate.finish(.failure(error))
+    }
+
+    func contentSharingPicker(
+        _ picker: SCContentSharingPicker,
+        didUpdateWith filter: SCContentFilter,
+        for stream: SCStream?
+    ) {
+        _ = picker
+        _ = stream
+        guard filter.style == .window else {
+            gate.finish(
+                .failure(MeetingScreenshotCaptureError.captureFailed)
+            )
+            return
+        }
+        gate.finish(
+            .selected(
+                MeetingScreenshotWindowSelection(
+                    contentRect: filter.contentRect,
+                    pointPixelScale: CGFloat(filter.pointPixelScale),
+                    contentFilter: filter
+                )
+            )
+        )
+    }
+}
+
+enum MeetingScreenshotPNGEncoder {
     static func encode(_ image: CGImage) -> Data? {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(

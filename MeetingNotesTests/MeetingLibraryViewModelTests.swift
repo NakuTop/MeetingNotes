@@ -692,6 +692,18 @@ final class MeetingLibraryViewModelTests: XCTestCase {
         )
     }
 
+    func testSystemAudioRenderFailureShowsSafeStageAndCodeNotPermissionInstructions() async {
+        let viewModel = makeViewModel(starter: SystemAudioFailureStarter())
+        await viewModel.startMeeting(mode: .online)
+        let message = viewModel.errorMessage ?? ""
+        XCTAssertTrue(message.contains("音频渲染"))
+        XCTAssertTrue(message.contains("-50"))
+        XCTAssertTrue(message.contains("智能诊断"))
+        XCTAssertFalse(message.contains("允许"))
+        XCTAssertFalse(message.contains("权限"))
+        XCTAssertTrue(viewModel.permissionRepairPermissions.isEmpty)
+    }
+
     func testRetryLastStartUsesSameFailedModeOnceAndClearsRepairOnSuccess() async {
         let meetingID = UUID()
         let starter = SequencedMeetingStarterSpy(
@@ -1386,6 +1398,12 @@ private actor MeetingStarterSpy: MeetingStarting {
 
     func modes() -> [MeetingMode] {
         startedModes
+    }
+}
+
+private struct SystemAudioFailureStarter: MeetingStarting {
+    func start(mode: MeetingMode, onMeetingCreated: @Sendable @escaping (UUID) async -> Void) async throws -> UUID {
+        throw SystemAudioCaptureError.inputFailure(.renderFailed(-50))
     }
 }
 

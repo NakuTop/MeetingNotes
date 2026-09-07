@@ -1,9 +1,42 @@
 import AVFoundation
-import ScreenCaptureKit
+import CoreAudio
 import XCTest
 @testable import MeetingNotes
 
 final class AudioDiagnosticCoordinatorTests: XCTestCase {
+    func testLiveDiagnosticDoesNotProbeScreenPermissionAndTestsActualSystemAudio() async throws {
+        let events = AudioDiagnosticEventRecorder()
+        let system = LiveCapturePermissionSystem(
+            microphoneStatus: { .authorized },
+            screenPreflight: { events.append("screenPreflight"); return false },
+            screenProbe: { events.append("screenProbe"); return .denied }
+        )
+        let permissions = LiveAudioDiagnosticPermissionChecker(system: system)
+        let snapshot = await permissions.permissionSnapshot()
+        XCTAssertEqual(snapshot.microphone, .authorized)
+        XCTAssertNil(snapshot.screenRecording, "Screen authorization is not an audio-tap preflight")
+        XCTAssertTrue(events.values.isEmpty)
+        let coordinator = AudioDiagnosticCoordinator(
+            recordingActivity: RecordingActivityStub(isActive: false),
+            permissions: permissions,
+            inputDevice: InputDeviceAvailabilityStub(isAvailable: true),
+            outputTester: OutputTesterStub(),
+            microphoneTester: SignalTesterStub(),
+            systemAudioTester: SystemSignalTesterStub(events: events),
+            timeoutRacer: ImmediateTimeoutRacer()
+        )
+        try await coordinator.prepare()
+        try await coordinator.continueAfterOutputConfirmation(heardTone: true)
+        guard case let .readyForUpload(report) = await coordinator.state else {
+            return XCTFail("Expected actual system-audio evidence")
+        }
+        XCTAssertEqual(report.primaryIssue, .captureHealthy)
+        XCTAssertEqual(report.facts.systemAudioTestOutcome, .succeeded)
+        XCTAssertEqual(report.facts.systemAudioMetrics, audibleMetrics())
+        XCTAssertNil(report.facts.screenPermission)
+        XCTAssertFalse(events.values.contains("screenProbe"))
+    }
+
     func testPrepareChecksAvailabilityAndPlaysToneBeforeAwaitingConfirmation()
         async throws {
         let events = AudioDiagnosticEventRecorder()
@@ -1780,34 +1813,26 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
         )
     }
 
-    func testDiagnosticStreamConfigurationDoesNotAlterProductionCapturePolicy() {
-        let diagnosticConfiguration =
-            AudioDiagnosticSystemCaptureConfiguration()
-        let diagnostic = diagnosticConfiguration.makeStreamConfiguration()
-        let production = ScreenAudioCaptureConfiguration
-            .makeStreamConfiguration(microphoneDeviceID: nil)
-
+    func testDiagnosticConfigurationIncludesTestToneWithoutChangingMeetingTapPolicy() {
+        let diagnostic = AudioDiagnosticSystemCaptureConfiguration()
         XCTAssertTrue(diagnostic.capturesAudio)
-        XCTAssertFalse(diagnostic.captureMicrophone)
+        XCTAssertFalse(diagnostic.capturesMicrophone)
         XCTAssertFalse(diagnostic.excludesCurrentProcessAudio)
-        XCTAssertTrue(
-            diagnosticConfiguration.excludedApplicationBundleIdentifiers(
-                currentBundleIdentifier: "com.shenminghao.MeetingNotes"
-            ).isEmpty
-        )
-        XCTAssertTrue(production.excludesCurrentProcessAudio)
+        XCTAssertFalse(diagnostic.excludesCurrentApplication)
+        let production = SystemAudioTapPolicy.description(excluding: 77)
+        XCTAssertEqual(production.processes, [77])
     }
 
-    func testScreenCaptureKitFactoryDefersHardwareAccessUntilSessionRuns()
+    func testCoreAudioFactoryDefersHardwareAccessUntilSessionRuns()
         async throws {
-        let factory = ScreenCaptureKitAudioDiagnosticSessionFactory()
+        let factory = CoreAudioDiagnosticSessionFactory()
 
         let session = try await factory.makeSession(
             configuration: AudioDiagnosticSystemCaptureConfiguration()
         )
 
         XCTAssertTrue(
-            session is ScreenCaptureKitAudioDiagnosticSession
+            session is SystemAudioDiagnosticSession
         )
         await session.cancel()
     }
@@ -1895,11 +1920,11 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
         _ = try? await replacement.value
     }
 
-    func testScreenSessionStartsThenCallbacksMeasuresAndStops()
+    func testSystemSessionStartsThenCallbacksMeasuresAndStops()
         async throws {
         let events = AudioDiagnosticEventRecorder()
-        let runtime = ScreenCaptureRuntimeStub(events: events)
-        let session = ScreenCaptureKitAudioDiagnosticSession(
+        let runtime = SystemCaptureRuntimeStub(events: events)
+        let session = SystemAudioDiagnosticSession(
             configuration: AudioDiagnosticSystemCaptureConfiguration(),
             runtime: runtime
         )
@@ -1917,9 +1942,9 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
         )
     }
 
-    func testScreenSessionStartFailureStillStopsExactlyOnce() async {
-        let runtime = FailingScreenCaptureRuntime()
-        let session = ScreenCaptureKitAudioDiagnosticSession(
+    func testSystemSessionStartFailureStillStopsExactlyOnce() async {
+        let runtime = FailingSystemCaptureRuntime()
+        let session = SystemAudioDiagnosticSession(
             configuration: AudioDiagnosticSystemCaptureConfiguration(),
             runtime: runtime
         )
@@ -1930,7 +1955,7 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
         } catch {
             XCTAssertEqual(
                 error as? AudioDiagnosticLiveSignalError,
-                .screenCaptureSetupFailed
+                .systemAudioCaptureNotStarted
             )
         }
         await session.cancel()
@@ -1938,10 +1963,10 @@ final class AudioDiagnosticCoordinatorTests: XCTestCase {
         XCTAssertEqual(stopCount, 1)
     }
 
-    func testScreenSessionCancelDuringSuspendedStartIsIdempotent()
+    func testSystemSessionCancelDuringSuspendedStartIsIdempotent()
         async {
-        let runtime = SuspendingScreenCaptureRuntime()
-        let session = ScreenCaptureKitAudioDiagnosticSession(
+        let runtime = SuspendingSystemCaptureRuntime()
+        let session = SystemAudioDiagnosticSession(
             configuration: AudioDiagnosticSystemCaptureConfiguration(),
             runtime: runtime
         )
@@ -3038,8 +3063,8 @@ private actor BlockingSystemAudioSession:
     }
 }
 
-private actor ScreenCaptureRuntimeStub:
-    AudioDiagnosticScreenCaptureRuntime {
+private actor SystemCaptureRuntimeStub:
+    AudioDiagnosticSystemCaptureRuntime {
     private let events: AudioDiagnosticEventRecorder
     private(set) var stopCount = 0
 
@@ -3066,15 +3091,15 @@ private actor ScreenCaptureRuntimeStub:
     }
 }
 
-private actor FailingScreenCaptureRuntime:
-    AudioDiagnosticScreenCaptureRuntime {
+private actor FailingSystemCaptureRuntime:
+    AudioDiagnosticSystemCaptureRuntime {
     private(set) var stopCount = 0
 
     func start(
         configuration: AudioDiagnosticSystemCaptureConfiguration
     ) async throws {
         _ = configuration
-        throw AudioDiagnosticLiveSignalError.screenCaptureSetupFailed
+        throw AudioDiagnosticLiveSignalError.systemAudioCaptureNotStarted
     }
 
     func measureSignal(duration: TimeInterval) async throws
@@ -3087,8 +3112,8 @@ private actor FailingScreenCaptureRuntime:
     }
 }
 
-private actor SuspendingScreenCaptureRuntime:
-    AudioDiagnosticScreenCaptureRuntime {
+private actor SuspendingSystemCaptureRuntime:
+    AudioDiagnosticSystemCaptureRuntime {
     private let started = AudioDiagnosticTestSignal()
     private var startContinuation: CheckedContinuation<Void, Never>?
     private(set) var measureCount = 0

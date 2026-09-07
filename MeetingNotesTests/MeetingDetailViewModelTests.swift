@@ -1,10 +1,500 @@
 import AppKit
 import Foundation
+import Observation
+import SwiftUI
 import XCTest
 @testable import MeetingNotes
 
+private struct UndoRecordingPlaybackLoader: MeetingAudioSourceLoading, MeetingWaveformLoading {
+    func load(meetingID: UUID) async throws -> MeetingAudioSource {
+        throw CancellationError()
+    }
+
+    func values(for source: MeetingAudioSource, bucketCount: Int) async throws -> [Float] {
+        []
+    }
+}
+
+@MainActor
+private final class UndoRecordingPlaybackEngine: MeetingAudioPlaybackEngine {
+    func prepare(
+        source: MeetingAudioSource,
+        onPeriodicTime: @escaping @MainActor @Sendable (TimeInterval) -> Void,
+        onEnd: @escaping @MainActor @Sendable () -> Void
+    ) async throws -> TimeInterval { throw CancellationError() }
+    func play() { XCTFail("Recording editor tests must not play audio") }
+    func pause() {}
+    func seek(to time: TimeInterval) {}
+    func stop() {}
+}
+
 @MainActor
 final class MeetingDetailViewModelTests: XCTestCase {
+    func testLiveDetailViewRetainsNativeUndoAcrossObservedRecordingRefresh() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(mode: .offline, startedAt: .now)
+        try repository.updateMeetingState(id: meetingID, state: .recording)
+        let original = "录制状态下要保留的完整文字"
+        try repository.appendTranscript(
+            meetingID: meetingID, start: 0, end: 4, text: original
+        )
+        let scheduledSaveCompleted = expectation(description: "live autosave completed")
+        scheduledSaveCompleted.assertForOverFulfill = false
+        let autosaver = MeetingEditAutosaver(onDelayedTaskCompletion: {
+            scheduledSaveCompleted.fulfill()
+        })
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy(), editAutosaver: autosaver
+        )
+        let playback = MeetingAudioPlayerController(
+            sourceLoader: UndoRecordingPlaybackLoader(),
+            waveformLoader: UndoRecordingPlaybackLoader(), engine: UndoRecordingPlaybackEngine()
+        )
+        let host = NSHostingView(rootView: MeetingDetailView(
+            viewModel: viewModel, audioPlayerController: playback, onReturnHome: {}
+        ))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 1600),
+            styleMask: [.titled], backing: .buffered, defer: true
+        )
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        func editors(in view: NSView) -> [InlineMeetingNativeTextView] {
+            if let editor = view as? InlineMeetingNativeTextView { return [editor] }
+            return view.subviews.flatMap { editors(in: $0) }
+        }
+        let editor = try XCTUnwrap(editors(in: host).first { $0.string == original })
+        XCTAssertTrue(window.makeFirstResponder(editor))
+        let manager = try XCTUnwrap(editor.undoManager)
+        defer {
+            autosaver.cancel()
+            window.makeFirstResponder(nil)
+            manager.removeAllActions()
+            window.contentView = nil
+        }
+        editor.setSelectedRange(NSRange(location: 0, length: 3))
+        editor.deleteBackward(nil)
+        let deleted = editor.string
+        host.layoutSubtreeIfNeeded()
+        XCTAssertTrue(manager.canUndo, "Undo must exist immediately during recording")
+        XCTAssertTrue(window.firstResponder === editor, "Typing must retain focus")
+        try repository.appendTranscript(
+            meetingID: meetingID, start: 5, end: 8,
+            text: "继续录制追加的内容"
+        )
+        viewModel.load()
+        host.layoutSubtreeIfNeeded()
+        await fulfillment(of: [scheduledSaveCompleted], timeout: 2)
+        XCTAssertEqual(viewModel.localSaveState, .saved)
+        host.layoutSubtreeIfNeeded()
+        XCTAssertTrue(editors(in: host).contains { $0 === editor })
+        XCTAssertEqual(editor.string, deleted)
+        XCTAssertTrue(manager.canUndo, "Observed refresh must preserve undo")
+        XCTAssertTrue(window.firstResponder === editor, "Live refresh must not steal edit focus")
+        XCTAssertTrue(window.firstResponder?.tryToPerform(NSSelectorFromString("undo:"), with: nil) == true)
+        await viewModel.flushEdits()
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID).map(\.text),
+            [original, "继续录制追加的内容"]
+        )
+        XCTAssertTrue(manager.canRedo)
+        XCTAssertTrue(editor.tryToPerform(NSSelectorFromString("redo:"), with: nil))
+        await viewModel.flushEdits()
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID).map(\.text)
+                .joined(separator: " "),
+            "\(deleted) 继续录制追加的内容"
+        )
+        XCTAssertEqual(viewModel.meeting?.state, .recording)
+        XCTAssertFalse(window.isVisible)
+        XCTAssertFalse(window.isKeyWindow)
+    }
+
+    func testLiveGroupedTranscriptAppendPreservesManualUndoAndRedo() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(mode: .offline, startedAt: .now)
+        try repository.updateMeetingState(id: meetingID, state: .recording)
+        let original = "第一位说话人的原始文字"
+        try repository.appendTranscript(
+            meetingID: meetingID, start: 0, end: 4, text: original, speakerID: "room-1"
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID, start: 5, end: 8, text: "第二位说话人", speakerID: "room-2"
+        )
+        let autosaver = MeetingEditAutosaver(delay: { _ in throw CancellationError() })
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy(), editAutosaver: autosaver
+        )
+        func root() -> TranscriptView {
+            TranscriptView(
+                projection: viewModel.timelineProjection,
+                onChangeTranscript: { viewModel.updateTranscriptDraft($0, for: $1) },
+                transcriptText: { viewModel.transcriptDraftText(for: $0) }
+            )
+        }
+        func editors(in view: NSView) -> [InlineMeetingNativeTextView] {
+            if let editor = view as? InlineMeetingNativeTextView { return [editor] }
+            return view.subviews.flatMap { editors(in: $0) }
+        }
+        let host = NSHostingView(rootView: root())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 350),
+            styleMask: [.titled], backing: .buffered, defer: true
+        )
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        let editor = try XCTUnwrap(editors(in: host).first { $0.string == original })
+        XCTAssertTrue(window.makeFirstResponder(editor))
+        let manager = try XCTUnwrap(editor.undoManager)
+        defer {
+            autosaver.cancel()
+            window.makeFirstResponder(nil)
+            manager.removeAllActions()
+            window.contentView = nil
+        }
+        editor.insertText("", replacementRange: NSRange(location: 0, length: 3))
+        editor.breakUndoCoalescing()
+        let deleted = editor.string
+        try repository.appendTranscript(
+            meetingID: meetingID, start: 9, end: 12,
+            text: "持续追加的新转录", speakerID: "room-2"
+        )
+        viewModel.load()
+        host.rootView = root()
+        host.layoutSubtreeIfNeeded()
+        XCTAssertTrue(editors(in: host).contains { $0 === editor })
+        XCTAssertEqual(editor.string, deleted)
+        XCTAssertTrue(manager.canUndo)
+        manager.undo()
+        await viewModel.flushEdits()
+        host.rootView = root()
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(editor.string, original)
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID).map(\.text),
+            [original, "第二位说话人", "持续追加的新转录"]
+        )
+        XCTAssertTrue(manager.canRedo)
+        manager.redo()
+        await viewModel.flushEdits()
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID).first?.text, deleted
+        )
+        XCTAssertEqual(viewModel.meeting?.state, .recording)
+        XCTAssertFalse(window.isVisible)
+        XCTAssertFalse(window.isKeyWindow)
+    }
+
+    func testNativeUndoUsingOldCorrectionTargetAfterFinalizationRestoresSavedText()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(mode: .offline, startedAt: .now)
+        func replaceGeneratedText(_ text: String, revision: Int) throws {
+            try repository.replaceTranscripts(
+                meetingID: meetingID,
+                drafts: [AttributedTranscriptDraft(
+                    transcript: TranscriptDraft(startTime: 10, endTime: 12, text: text),
+                    speakerID: "room-test", source: .room
+                )], sourceRevision: revision
+            )
+        }
+        try replaceGeneratedText("原始转录", revision: 1)
+        let originalID = try XCTUnwrap(repository.transcripts(meetingID: meetingID).first?.id)
+        let originalCorrection = "已有的人工修正"
+        try repository.saveTranscriptCorrection(
+            meetingID: meetingID, transcriptIDs: [originalID],
+            anchorStartTime: 10, anchorEndTime: 12, source: .room,
+            originalText: "原始转录", replacementText: originalCorrection
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let oldTarget = MeetingTranscriptEditTarget(turn: try XCTUnwrap(
+            viewModel.timelineProjection.visibleTurns.first
+        ))
+        let correctionID = try XCTUnwrap(oldTarget.correctionID)
+        viewModel.updateTranscriptDraft("已保存的误删", for: oldTarget)
+        await viewModel.flushEdits()
+        try replaceGeneratedText("最终转录", revision: 2)
+        viewModel.load()
+        let rebound = try XCTUnwrap(viewModel.timelineProjection.visibleTurns.first)
+        XCTAssertEqual(rebound.correctionID, correctionID)
+        XCTAssertNotEqual(rebound.transcriptIDs, oldTarget.transcriptIDs)
+        XCTAssertEqual(rebound.text, "已保存的误删")
+
+        // Native undo still belongs to the old binding, whose transcript IDs
+        // were replaced by finalization. Its correction identity stays stable.
+        viewModel.updateTranscriptDraft(originalCorrection, for: oldTarget)
+        await viewModel.flushEdits()
+
+        let corrections = try repository.meeting(id: meetingID).transcriptCorrections
+        XCTAssertEqual(corrections.count, 1)
+        XCTAssertEqual(corrections.first?.id, correctionID)
+        XCTAssertEqual(corrections.first?.transcriptIDs, rebound.transcriptIDs)
+        XCTAssertEqual(corrections.first?.replacementText, originalCorrection)
+    }
+
+    func testNativeUndoAfterFullDeletionAndAutosaveKeepsTheRealTranscriptRow()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(mode: .offline, startedAt: .now)
+        let original = "整段误删后仍然可以撤销"
+        try repository.appendTranscript(
+            meetingID: meetingID, start: 0, end: 4, text: original
+        )
+        let action = DetailActionSpy()
+        let autosaver = MeetingEditAutosaver(delay: { _ in throw CancellationError() })
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID, repository: repository,
+            settingsStore: makeSettingsStore(), action: action,
+            titleUpdater: DetailTitleUpdaterSpy(), editAutosaver: autosaver
+        )
+        func makeRoot() -> TranscriptView {
+            TranscriptView(
+                projection: viewModel.timelineProjection,
+                onChangeTranscript: { viewModel.updateTranscriptDraft($0, for: $1) },
+                transcriptText: { viewModel.transcriptDraftText(for: $0) }
+            )
+        }
+        func findEditor(in view: NSView) -> InlineMeetingNativeTextView? {
+            if let editor = view as? InlineMeetingNativeTextView { return editor }
+            return view.subviews.lazy.compactMap { findEditor(in: $0) }.first
+        }
+        let host = NSHostingView(rootView: makeRoot())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 240),
+            styleMask: [.titled], backing: .buffered, defer: true
+        )
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        let editor = try XCTUnwrap(findEditor(in: host))
+        let manager = try XCTUnwrap(editor.undoManager)
+        defer {
+            autosaver.cancel()
+            manager.removeAllActions()
+            window.contentView = nil
+        }
+        editor.insertText("", replacementRange: NSRange(
+            location: 0, length: (original as NSString).length
+        ))
+        editor.breakUndoCoalescing()
+        await viewModel.flushEdits()
+        host.rootView = makeRoot()
+        host.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(viewModel.timelineProjection.visibleTurns.first?.text, "")
+        XCTAssertTrue(findEditor(in: host) === editor)
+        XCTAssertTrue(editor.window === window)
+
+        // A new recording segment must survive undo of the older manual edit.
+        try repository.appendTranscript(
+            meetingID: meetingID, start: 10, end: 14, text: "后来新增的转录"
+        )
+        viewModel.load()
+        host.rootView = makeRoot()
+        host.layoutSubtreeIfNeeded()
+        manager.undo()
+        await viewModel.flushEdits()
+        host.rootView = makeRoot()
+        host.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID).map(\.text),
+            [original, "后来新增的转录"]
+        )
+        XCTAssertEqual(editor.string, original)
+        manager.redo()
+        await viewModel.flushEdits()
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID).map(\.text),
+            ["", "后来新增的转录"]
+        )
+        XCTAssertFalse(window.isVisible)
+        XCTAssertFalse(window.isKeyWindow)
+        XCTAssertEqual(action.callCount, 0, "Undo must not send anything to Notion")
+    }
+
+    func testNativeUndoUsingPreSaveTargetRestoresPersistedTranscript() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(mode: .offline, startedAt: .now)
+        let original = "撤销后应恢复的会议文字"
+        try repository.appendTranscript(
+            meetingID: meetingID, start: 0, end: 4, text: original
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let target = MeetingTranscriptEditTarget(turn: try XCTUnwrap(
+            viewModel.timelineProjection.visibleTurns.first
+        ))
+        viewModel.updateTranscriptDraft("误删后的文字", for: target)
+        await viewModel.flushEdits()
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID).first?.text,
+            "误删后的文字"
+        )
+
+        // Native undo can arrive after save but before the representable gets
+        // the next projection's target. Use the actual original binding target.
+        viewModel.updateTranscriptDraft(original, for: target)
+        await viewModel.flushEdits()
+
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID).first?.text,
+            original
+        )
+    }
+
+    func testDocumentTypingReusesPersistedBaselineAndRefreshesAfterSave()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(mode: .offline, startedAt: .now)
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "", overview: "原总结", keyPoints: [],
+                decisions: [], actionItems: [], bookmarkInsights: []
+            ), model: "test"
+        )
+        try repository.saveGeneratedDetailedMinutes(
+            meetingID: meetingID,
+            generated: GeneratedDetailedMinutes(
+                overview: "原纪要",
+                sections: (0..<300).map {
+                    DetailedMinutesSection(
+                        title: "议题\($0)", timeRange: nil,
+                        speakers: ["说话人"], content: String(repeating: "会议内容", count: 20)
+                    )
+                }, decisions: [], actionItems: [], openQuestions: []
+            ), model: "test", promptVersion: 1
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let initialDecodes = viewModel.documentBaselineDecodeCount
+        for index in 0..<100 {
+            XCTAssertTrue(viewModel.updateDocumentDraftText("总结\(index)", field: .summaryOverview))
+            XCTAssertTrue(viewModel.updateDocumentDraftText("纪要\(index)", field: .detailedMinutesOverview))
+        }
+        XCTAssertEqual(viewModel.documentBaselineDecodeCount, initialDecodes)
+        XCTAssertTrue(viewModel.hasPendingEdits)
+        viewModel.updateDocumentDraftText("原总结", field: .summaryOverview)
+        viewModel.updateDocumentDraftText("原纪要", field: .detailedMinutesOverview)
+        XCTAssertFalse(viewModel.hasPendingEdits)
+
+        viewModel.updateDocumentDraftText("已保存的新纪要", field: .detailedMinutesOverview)
+        await viewModel.flushEdits()
+        XCTAssertFalse(viewModel.hasPendingEdits)
+        viewModel.updateDocumentDraftText("临时内容", field: .detailedMinutesOverview)
+        viewModel.updateDocumentDraftText("已保存的新纪要", field: .detailedMinutesOverview)
+        XCTAssertFalse(viewModel.hasPendingEdits, "保存后改回新基准应不再有脏草稿")
+    }
+
+    func testDocumentBaselineRefreshesAfterExternalRegeneration() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(mode: .offline, startedAt: .now)
+        try repository.saveGeneratedSummary(
+            meetingID: meetingID,
+            generated: GeneratedMeetingSummary(
+                suggestedTitle: "", overview: "旧总结", keyPoints: [],
+                decisions: [], actionItems: [], bookmarkInsights: []
+            ), model: "test"
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        try repository.updateSummaryManually(
+            meetingID: meetingID,
+            value: GeneratedMeetingSummary(
+                suggestedTitle: "", overview: "外部更新", keyPoints: [],
+                decisions: [], actionItems: [], bookmarkInsights: []
+            )
+        )
+        viewModel.load()
+        XCTAssertEqual(viewModel.summaryDraft?.overview, "外部更新")
+        viewModel.updateDocumentDraftText("临时输入", field: .summaryOverview)
+        viewModel.updateDocumentDraftText("外部更新", field: .summaryOverview)
+        XCTAssertFalse(viewModel.hasPendingEdits)
+    }
+
+    func testMultipleTranscriptDraftsFlushRebuildsProjectionOnlyOnce() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(mode: .offline, startedAt: .now)
+        for index in 0..<12 {
+            try repository.appendTranscript(
+                meetingID: meetingID, start: Double(index * 5),
+                end: Double(index * 5 + 4), text: "原文\(index)"
+            )
+        }
+        let entries = try repository.canonicalTranscripts(meetingID: meetingID)
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        for entry in entries {
+            viewModel.updateTranscriptDraft("修正：\(entry.text)", for: entry)
+        }
+        let buildsBefore = viewModel.timelineProjectionBuildCount
+        await viewModel.flushEdits()
+        XCTAssertEqual(viewModel.timelineProjectionBuildCount - buildsBefore, 1)
+        XCTAssertFalse(viewModel.hasPendingEdits)
+        XCTAssertEqual(
+            try repository.canonicalTranscripts(meetingID: meetingID).map(\.text),
+            entries.map { "修正：\($0.text)" }
+        )
+    }
+
+    func testPartialDraftSaveFailureRefreshesSavedRowsAndPreservesRemainingDrafts()
+        async throws {
+        var savesUntilFailure: Int?
+        let repository = try MeetingRepository.inMemory(contextSaver: { context in
+            if let remaining = savesUntilFailure {
+                if remaining == 0 { throw DetailInjectedRepositoryError.forced }
+                savesUntilFailure = remaining - 1
+            }
+            try context.save()
+        })
+        let meetingID = try repository.createMeeting(mode: .offline, startedAt: .now)
+        for index in 0..<3 {
+            try repository.appendTranscript(
+                meetingID: meetingID, start: Double(index * 5),
+                end: Double(index * 5 + 4), text: "原文\(index)"
+            )
+        }
+        let entries = try repository.canonicalTranscripts(meetingID: meetingID)
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        for entry in entries { viewModel.updateTranscriptDraft("修正：\(entry.text)", for: entry) }
+        savesUntilFailure = 1
+        let buildsBefore = viewModel.timelineProjectionBuildCount
+        await viewModel.flushEdits()
+        XCTAssertEqual(viewModel.transcriptDrafts.count, 2)
+        XCTAssertEqual(viewModel.timelineProjectionBuildCount - buildsBefore, 1)
+        XCTAssertEqual(viewModel.localSaveState, .failed(message: "无法自动保存本地修改，请稍后重试。"))
+        XCTAssertEqual(try repository.canonicalTranscripts(meetingID: meetingID).first?.text, "修正：原文0")
+        savesUntilFailure = nil
+        await viewModel.retrySavingEdits()
+        XCTAssertFalse(viewModel.hasPendingEdits)
+        XCTAssertEqual(try repository.canonicalTranscripts(meetingID: meetingID).map(\.text), entries.map { "修正：\($0.text)" })
+    }
+
     func testInlineTextSizingAdvertisesACompressibleHStackMinimum() {
         XCTAssertEqual(
             InlineEditableMeetingText.layoutWidth(
@@ -43,6 +533,94 @@ final class MeetingDetailViewModelTests: XCTestCase {
             ),
             480
         )
+    }
+
+    func testInlineTextMeasurementCacheReusesUnchangedLayoutInputs() {
+        var cache = InlineMeetingTextMeasurementCache()
+        let key = InlineMeetingTextMeasurementKey(
+            text: "保持不变的文字",
+            availableWidth: 320,
+            fontName: "Helvetica",
+            fontPointSize: 14,
+            alignment: .left,
+            lineLimit: nil
+        )
+        var computations = 0
+
+        let first = cache.resolve(key: key) {
+            computations += 1
+            return CGSize(width: 320, height: 40)
+        }
+        let second = cache.resolve(key: key) {
+            computations += 1
+            return CGSize(width: 1, height: 1)
+        }
+
+        XCTAssertEqual(first, CGSize(width: 320, height: 40))
+        XCTAssertEqual(second, first)
+        XCTAssertEqual(computations, 1)
+        XCTAssertEqual(cache.computationCount, 1)
+    }
+
+    func testInlineTextMeasurementCacheInvalidatesForEveryLayoutInput() {
+        var cache = InlineMeetingTextMeasurementCache()
+        let original = InlineMeetingTextMeasurementKey(
+            text: "原始文字",
+            availableWidth: 320,
+            fontName: "Helvetica",
+            fontPointSize: 14,
+            alignment: .left,
+            lineLimit: nil
+        )
+        let changedKeys = [
+            InlineMeetingTextMeasurementKey(
+                text: "变化文字",
+                availableWidth: 320,
+                fontName: "Helvetica",
+                fontPointSize: 14,
+                alignment: .left,
+                lineLimit: nil
+            ),
+            InlineMeetingTextMeasurementKey(
+                text: "变化文字",
+                availableWidth: 280,
+                fontName: "Helvetica",
+                fontPointSize: 14,
+                alignment: .left,
+                lineLimit: nil
+            ),
+            InlineMeetingTextMeasurementKey(
+                text: "变化文字",
+                availableWidth: 280,
+                fontName: "Helvetica-Bold",
+                fontPointSize: 14,
+                alignment: .left,
+                lineLimit: nil
+            ),
+            InlineMeetingTextMeasurementKey(
+                text: "变化文字",
+                availableWidth: 280,
+                fontName: "Helvetica-Bold",
+                fontPointSize: 15,
+                alignment: .center,
+                lineLimit: 2
+            ),
+        ]
+        var computations = 0
+
+        _ = cache.resolve(key: original) {
+            computations += 1
+            return CGSize(width: 320, height: 20)
+        }
+        for key in changedKeys {
+            _ = cache.resolve(key: key) {
+                computations += 1
+                return CGSize(width: key.availableWidth ?? 0, height: 20)
+            }
+        }
+
+        XCTAssertEqual(computations, changedKeys.count + 1)
+        XCTAssertEqual(cache.computationCount, changedKeys.count + 1)
     }
 
     func testInlineContextMenuBindsNativeEditingCommandsToClickedEditor()
@@ -91,6 +669,202 @@ final class MeetingDetailViewModelTests: XCTestCase {
         editor.didChangeText()
 
         XCTAssertEqual(observedValues, ["用户输入"])
+    }
+
+    func testInlineTextLocalBufferUpdatesCurrentRowAndPropagatesDraft() {
+        let buffer = InlineMeetingTextLocalBuffer(initialValue: "原文字")
+        var propagated: [String] = []
+
+        buffer.updateFromNative("输入后的文字") {
+            propagated.append($0)
+        }
+
+        XCTAssertEqual(buffer.value, "输入后的文字")
+        XCTAssertEqual(propagated, ["输入后的文字"])
+
+        buffer.reconcile(externalValue: "外部保存后的文字")
+
+        XCTAssertEqual(buffer.value, "外部保存后的文字")
+        XCTAssertEqual(propagated, ["输入后的文字"])
+    }
+
+    func testTranscriptDraftBoundaryChangesOnlyWhenDirtyTargetSetChanges()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "原始文字"
+        )
+        let entry = try XCTUnwrap(
+            repository.canonicalTranscripts(meetingID: meetingID).first
+        )
+        let target = MeetingTranscriptEditTarget(entry: entry)
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let initialRevision = viewModel.draftBoundaryRevision
+
+        viewModel.updateTranscriptDraft("第一键", for: target)
+        let firstToken = try XCTUnwrap(
+            viewModel.transcriptDraftToken(for: target)
+        )
+
+        XCTAssertEqual(
+            viewModel.draftBoundaryRevision,
+            initialRevision + 1
+        )
+        XCTAssertEqual(viewModel.transcriptDrafts.count, 1)
+
+        viewModel.updateTranscriptDraft("第一键第二键", for: target)
+        let secondToken = try XCTUnwrap(
+            viewModel.transcriptDraftToken(for: target)
+        )
+
+        XCTAssertNotEqual(firstToken, secondToken)
+        XCTAssertEqual(
+            viewModel.draftBoundaryRevision,
+            initialRevision + 1
+        )
+        XCTAssertEqual(viewModel.transcriptDrafts.count, 1)
+        XCTAssertEqual(
+            viewModel.transcriptDraftText(for: target),
+            "第一键第二键"
+        )
+
+        viewModel.updateTranscriptDraft(entry.text, for: target)
+
+        XCTAssertEqual(
+            viewModel.draftBoundaryRevision,
+            initialRevision + 2
+        )
+        XCTAssertTrue(viewModel.transcriptDrafts.isEmpty)
+        XCTAssertNil(viewModel.transcriptDraftToken(for: target))
+    }
+
+    func testNoteDraftBoundaryChangesOnlyWhenDirtyTargetSetChanges() throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        let note = MeetingNoteDisplayItem(
+            id: UUID(),
+            timestamp: 12,
+            text: "原始笔记",
+            sequenceIndex: 0
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let initialRevision = viewModel.draftBoundaryRevision
+
+        viewModel.updateNoteDraft("第一键", for: note)
+        let firstToken = try XCTUnwrap(
+            viewModel.noteDraftToken(forID: note.id)
+        )
+        viewModel.updateNoteDraft("第一键第二键", for: note)
+        let secondToken = try XCTUnwrap(
+            viewModel.noteDraftToken(forID: note.id)
+        )
+
+        XCTAssertNotEqual(firstToken, secondToken)
+        XCTAssertEqual(
+            viewModel.draftBoundaryRevision,
+            initialRevision + 1
+        )
+        XCTAssertEqual(viewModel.noteDrafts.count, 1)
+        XCTAssertEqual(viewModel.noteDraftText(for: note), "第一键第二键")
+
+        viewModel.updateNoteDraft(note.text, for: note)
+
+        XCTAssertEqual(
+            viewModel.draftBoundaryRevision,
+            initialRevision + 2
+        )
+        XCTAssertTrue(viewModel.noteDrafts.isEmpty)
+        XCTAssertNil(viewModel.noteDraftToken(forID: note.id))
+    }
+
+    func testCharacterOnlyTranscriptDraftUpdateReusesTimelineProjection()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        try repository.appendTranscript(
+            meetingID: meetingID,
+            start: 0,
+            end: 1,
+            text: "原始文字"
+        )
+        let entry = try XCTUnwrap(
+            repository.canonicalTranscripts(meetingID: meetingID).first
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let initialBuildCount = viewModel.timelineProjectionBuildCount
+
+        viewModel.updateTranscriptDraft("第一键", for: entry)
+        let firstDirtyBuildCount = viewModel.timelineProjectionBuildCount
+        viewModel.updateTranscriptDraft("第一键第二键", for: entry)
+
+        XCTAssertEqual(firstDirtyBuildCount, initialBuildCount + 1)
+        XCTAssertEqual(
+            viewModel.timelineProjectionBuildCount,
+            firstDirtyBuildCount
+        )
+        XCTAssertEqual(viewModel.timelineProjection.visibleTurns.count, 1)
+    }
+
+    func testUnchangedLoadDoesNotRepublishMeetingOrRebuildProjection()
+        throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: .now
+        )
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID,
+            repository: repository,
+            settingsStore: makeSettingsStore(),
+            action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let changes = MeetingDetailObservationCounter()
+        let initialBuildCount = viewModel.timelineProjectionBuildCount
+        withObservationTracking {
+            _ = viewModel.meeting
+        } onChange: {
+            changes.increment()
+        }
+
+        viewModel.load()
+
+        XCTAssertEqual(changes.value, 0)
+        XCTAssertEqual(
+            viewModel.timelineProjectionBuildCount,
+            initialBuildCount
+        )
     }
 
     func testDirtyGroupedTurnDoesNotAbsorbNewSameSpeakerSegmentBetweenKeystrokes()
@@ -314,6 +1088,70 @@ final class MeetingDetailViewModelTests: XCTestCase {
         try repository.updateMeetingState(id: meetingID, state: .ready)
         await refreshTask.value
         XCTAssertEqual(viewModel.meeting?.state, .ready)
+    }
+
+    func testLiveProjectionSurvivesPreparingAndFinalizingUntilReady() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(mode: .offline, startedAt: .now)
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let refresh = Task {
+            await viewModel.refreshWhileRecording(interval: .milliseconds(1))
+        }
+        defer { refresh.cancel() }
+        // Give the actual refresh loop time to enter while still preparing.
+        // Polling below has a deadline, rather than assuming a sleep is enough.
+        for _ in 0..<20 { await Task.yield() }
+        try repository.updateMeetingState(id: meetingID, state: .recording)
+        try repository.appendTranscript(meetingID: meetingID, start: 0, end: 1, text: "实时第一句")
+        for _ in 0..<200 where viewModel.timelineProjection.visibleTurns.isEmpty {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(viewModel.timelineProjection.visibleTurns.map(\.text), ["实时第一句"])
+        try repository.updateMeetingState(id: meetingID, state: .finalizing)
+        for _ in 0..<20 { await Task.yield() }
+        try repository.appendTranscript(meetingID: meetingID, start: 3, end: 4, text: "结束后的最后一句")
+        try repository.updateMeetingState(id: meetingID, state: .ready)
+        await refresh.value
+        XCTAssertEqual(viewModel.timelineProjection.visibleTurns.map(\.text), ["实时第一句", "结束后的最后一句"])
+    }
+
+    func testPlaybackTaskCancellationStillPublishesFinalTranscript() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(mode: .offline, startedAt: .now)
+        try repository.updateMeetingState(id: meetingID, state: .recording)
+        let viewModel = MeetingDetailViewModel(
+            meetingID: meetingID, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy()
+        )
+        let sleeping = expectation(description: "refresh reached its next poll")
+        let refresh = Task {
+            await viewModel.refreshWhileRecording(interval: .seconds(60)) { interval in
+                sleeping.fulfill()
+                try await Task.sleep(for: interval)
+            }
+        }
+        defer { refresh.cancel() }
+        await fulfillment(of: [sleeping], timeout: 1)
+        try repository.appendTranscript(
+            meetingID: meetingID, start: 0, end: 1, text: "最后一段不能丢"
+        )
+        try repository.finalizeMeeting(
+            id: meetingID, endedAt: .now, activeDuration: 1
+        )
+        XCTAssertNotNil(viewModel.meeting?.endedAt)
+        // endedAt changes the real SwiftUI playbackKey, cancelling its old
+        // refresh task while the new task switches to preparing the player.
+        refresh.cancel()
+        await refresh.value
+        XCTAssertEqual(
+            viewModel.timelineProjection.visibleTurns.map(\.text),
+            ["最后一段不能丢"]
+        )
     }
 
     func testPrimaryButtonReflectsWorkflowState() throws {
@@ -3191,6 +4029,19 @@ private final class ProgressingDetailAction: SummarizeAndArchiving {
 
 private enum DetailInjectedRepositoryError: Error {
     case forced
+}
+
+private final class MeetingDetailObservationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.withLock { count }
+    }
+
+    func increment() {
+        lock.withLock { count += 1 }
+    }
 }
 
 private final class DetailRepositoryFailureSwitch {

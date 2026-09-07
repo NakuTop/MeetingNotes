@@ -11,7 +11,7 @@ final class CapturePermissionClientTests: XCTestCase {
         XCTAssertEqual(CapturePermissionStatus(.notDetermined), .notDetermined)
     }
 
-    func testOfflineRequestsOnlyMicrophoneWhileOnlineRequiresBoth() async {
+    func testOnlinePreflightDoesNotRequestScreenCaptureForPureAudio() async {
         let offlineSystem = RecordingPermissionSystem()
         let offlineClient = CapturePermissionClient(system: offlineSystem)
 
@@ -26,14 +26,14 @@ final class CapturePermissionClientTests: XCTestCase {
         _ = await onlineClient.requestRequiredPermissions(for: .online)
 
         let onlineRequests = await onlineSystem.requestedPermissions()
-        XCTAssertEqual(onlineRequests, [.microphone, .screenRecording])
+        XCTAssertEqual(onlineRequests, [.microphone])
         XCTAssertEqual(
             CapturePermissionClient.requiredPermissions(for: .offline),
             [.microphone]
         )
         XCTAssertEqual(
             CapturePermissionClient.requiredPermissions(for: .online),
-            [.microphone, .screenRecording]
+            [.microphone]
         )
     }
 
@@ -254,7 +254,7 @@ final class CapturePermissionClientTests: XCTestCase {
         )
     }
 
-    func testEveryOnlineRetryRequestsScreenPermissionAgain() async {
+    func testOnlineRetriesNeverRequestScreenPermission() async {
         let calls = PermissionInvocationRecorder()
         let system = LiveCapturePermissionSystem(
             microphoneStatus: { .authorized },
@@ -277,9 +277,9 @@ final class CapturePermissionClientTests: XCTestCase {
         _ = await client.requestRequiredPermissions(for: .online)
         _ = await client.requestRequiredPermissions(for: .online)
 
-        XCTAssertEqual(calls.screenPreflightCount, 2)
-        XCTAssertEqual(calls.screenRequestCount, 2)
-        XCTAssertEqual(calls.screenProbeCount, 4)
+        XCTAssertEqual(calls.screenPreflightCount, 0)
+        XCTAssertEqual(calls.screenRequestCount, 0)
+        XCTAssertEqual(calls.screenProbeCount, 0)
     }
 
     func testLiveOfflineRequestNeverTouchesScreenPermission() async {

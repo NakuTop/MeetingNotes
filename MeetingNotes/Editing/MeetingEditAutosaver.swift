@@ -41,7 +41,7 @@ final class MeetingEditAutosaver {
         let token = UUID()
         generation = token
         latestSave = save
-        state = .idle
+        publishState(.idle)
         pendingDelayTask?.cancel()
 
         let delay = self.delay
@@ -85,7 +85,7 @@ final class MeetingEditAutosaver {
         pendingDelayTask?.cancel()
         pendingDelayTask = nil
         latestSave = nil
-        state = .idle
+        publishState(.idle)
     }
 
     private func saveIfCurrent(token: UUID) {
@@ -93,17 +93,22 @@ final class MeetingEditAutosaver {
               let save = latestSave else {
             return
         }
-        state = .saving
+        publishState(.saving)
         do {
             try save()
             guard token == generation else { return }
             pendingDelayTask = nil
             latestSave = nil
-            state = .saved
+            publishState(.saved)
         } catch {
             guard token == generation else { return }
             pendingDelayTask = nil
-            state = .failed(message: Self.failureMessage)
+            publishState(.failed(message: Self.failureMessage))
         }
+    }
+
+    private func publishState(_ newState: MeetingLocalSaveState) {
+        guard state != newState else { return }
+        state = newState
     }
 }

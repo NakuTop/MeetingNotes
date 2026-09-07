@@ -71,7 +71,10 @@ struct CapturePermissionClient: Sendable {
         case .offline:
             return [.microphone]
         case .online:
-            return [.microphone, .screenRecording]
+            // Core Audio process taps prompt for system-audio access when
+            // their input starts. There is no public preflight API for that
+            // permission, and screenshot permission must not gate audio.
+            return [.microphone]
         }
     }
 

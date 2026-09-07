@@ -615,6 +615,9 @@ final class LiveCoreAudioMicrophoneSession:
         }
 
         if let slot = ring.acquireWritableSlot() {
+            // AUHAL validates mDataByteSize on entry. frameCapacity allocates
+            // storage but does not set this length; refresh it on every reuse.
+            slot.buffer.frameLength = frames
             let status = api.render(
                 unit: unit,
                 flags: flags,
@@ -631,7 +634,6 @@ final class LiveCoreAudioMicrophoneSession:
                 drainSource.add(data: 1)
                 return status
             }
-            slot.buffer.frameLength = frames
             slot.sampleTime = nextSampleTime
             slot.sampleRate = clientSampleRate
             nextSampleTime += AVAudioFramePosition(frames)
@@ -643,6 +645,7 @@ final class LiveCoreAudioMicrophoneSession:
         guard let scratch = scratchBuffer else {
             return noErr
         }
+        scratch.frameLength = frames
         let status = api.render(
             unit: unit,
             flags: flags,

@@ -106,7 +106,7 @@ enum AudioDiagnosticIssueCode:
         case .microphoneSilent:
             return "请确认麦克风未静音、输入音量足够，并尝试靠近麦克风说话。"
         case .systemAudioNoFrames:
-            return "请确认屏幕录制权限已开启并正在播放系统声音，然后重新运行诊断。"
+            return "Core Audio 纯音频检测未收到有效的系统声音。请确认测试音正在播放、输出设备正常，并检查系统音频录制授权；无需共享桌面。"
         case .captureHealthy:
             return "无需修改音频设备；如果会议仍无声，请检查具体录音文件的保存与回放。"
         case .playbackPipelineSuspected:
@@ -114,11 +114,11 @@ enum AudioDiagnosticIssueCode:
         case .microphoneDiagnosticTimedOut:
             return "麦克风手动测试正常时，可先重新运行智能诊断；若持续超时，可将诊断数据发送给 DeepSeek 分析检测阶段。"
         case .systemAudioDiagnosticTimedOut:
-            return "请确认屏幕录制权限已开启；若扬声器手动测试正常，可将当前诊断数据发送给 DeepSeek 分析 ScreenCaptureKit 检测阶段。"
+            return "Core Audio 纯音频检测未在时限内完成，不代表设备已断开或缺少屏幕权限。可重试诊断，或在确认预览后发送给 DeepSeek 分析。"
         case .microphoneDiagnosticFailed:
             return "可先重新运行智能诊断；若持续失败，可将诊断数据发送给 DeepSeek 分析麦克风检测阶段。"
         case .systemAudioDiagnosticFailed:
-            return "请确认屏幕录制权限已开启；若持续失败，可将诊断数据发送给 DeepSeek 分析系统音频检测阶段。"
+            return "Core Audio 纯音频检测失败，不等同于屏幕权限不足。可重试诊断；若持续失败，可在确认预览后发送给 DeepSeek 分析系统音频阶段。"
         }
     }
 }

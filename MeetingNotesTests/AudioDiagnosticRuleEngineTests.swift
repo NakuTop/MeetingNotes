@@ -2,6 +2,27 @@ import XCTest
 @testable import MeetingNotes
 
 final class AudioDiagnosticRuleEngineTests: XCTestCase {
+    func testSystemAudioSolutionsDescribePureAudioWithoutClaimingScreenPermissionFailure() {
+        for issue: AudioDiagnosticIssueCode in [
+            .systemAudioNoFrames, .systemAudioDiagnosticTimedOut, .systemAudioDiagnosticFailed
+        ] {
+            XCTAssertTrue(issue.localSolution.contains("Core Audio"))
+            XCTAssertFalse(issue.localSolution.contains("ScreenCaptureKit"))
+            XCTAssertFalse(issue.localSolution.contains("屏幕录制权限已开启"))
+        }
+    }
+
+    func testPureAudioSucceededWithoutMetricsCannotBeDeclaredHealthy() {
+        let input = AudioDiagnosticFacts(
+            microphonePermission: .authorized, screenPermission: nil,
+            inputDeviceAvailable: true, outputToneWasScheduled: true,
+            userHeardOutputTone: true, microphoneMetrics: audible(), systemAudioMetrics: nil,
+            historicalPlaybackFailed: false,
+            microphoneTestOutcome: .succeeded, systemAudioTestOutcome: .succeeded
+        )
+        XCTAssertNil(AudioDiagnosticRuleEngine().evaluate(input))
+    }
+
     func testRuleTableUsesStablePrecedenceAndSupportingOrder() throws {
         let cases: [RuleCase] = [
             RuleCase(

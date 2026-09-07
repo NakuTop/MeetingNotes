@@ -368,8 +368,8 @@ private struct FloatingAnnotationTestContext {
 }
 
 private struct FloatingScreenshotCaptureStub: MeetingScreenshotCapturing {
-    func captureDisplayUnderMouse() async throws
-        -> MeetingScreenshotCaptureResult {
+    func captureSelectedWindow() async throws
+        -> MeetingScreenshotCaptureResult? {
         MeetingScreenshotCaptureResult(
             pngData: Data([0x89, 0x50, 0x4E, 0x47]),
             pixelWidth: 100,
@@ -379,8 +379,8 @@ private struct FloatingScreenshotCaptureStub: MeetingScreenshotCapturing {
 }
 
 private struct FloatingFailingScreenshotCapture: MeetingScreenshotCapturing {
-    func captureDisplayUnderMouse() async throws
-        -> MeetingScreenshotCaptureResult {
+    func captureSelectedWindow() async throws
+        -> MeetingScreenshotCaptureResult? {
         throw MeetingScreenshotCaptureError.screenRecordingDenied
     }
 }

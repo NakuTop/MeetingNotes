@@ -756,6 +756,69 @@ final class CoreAudioMicrophoneSPSCRingTests: XCTestCase {
 }
 
 final class CoreAudioMicrophoneLiveSessionTests: XCTestCase {
+    func testRenderReceivesValidByteLengthsOnFirstUseAndReusedStereoSlots() async throws {
+        let api = FakeCoreAudioMicrophoneAudioUnitAPI(channelCount: 2)
+        api.setRenderHandler { _, frames, data in
+            let buffers = UnsafeMutableAudioBufferListPointer(data)
+            XCTAssertEqual(buffers.count, 2)
+            for buffer in buffers {
+                // Match the real AUHAL contract; allocated capacity alone is
+                // insufficient when mDataByteSize is still zero or stale.
+                guard buffer.mDataByteSize == frames * UInt32(MemoryLayout<Float>.size),
+                      let data = buffer.mData else { return kAudio_ParamError }
+                let samples = data.assumingMemoryBound(to: Float.self)
+                for index in 0..<Int(frames) { samples[index] = 0.25 }
+            }
+            return noErr
+        }
+        let session = LiveCoreAudioMicrophoneSession(api: api, ringSlotCount: 2)
+        let pair = AsyncStream<AVAudioFrameCount>.makeStream()
+        try await session.configure(deviceID: 42) { event in
+            if case let .buffer(buffer, _, _) = event {
+                pair.continuation.yield(buffer.frameLength)
+            }
+        }
+        try await session.start()
+        var iterator = pair.stream.makeAsyncIterator()
+        for frames: UInt32 in [512, 128, 1_024, 256] {
+            let status = CoreAudioMicrophoneTestHelper.invokeCapturedCallback(api: api, frames: frames)
+            XCTAssertEqual(status, noErr, "Render must receive the current request's byte length")
+            guard status == noErr else { break }
+            // Delivery proves the consumer released the slot before reuse.
+            let delivered = await iterator.next()
+            XCTAssertEqual(delivered, frames)
+        }
+        await session.stop()
+        pair.continuation.finish()
+    }
+
+    func testOverflowScratchReceivesCurrentByteLengthForEveryRender() async throws {
+        let api = FakeCoreAudioMicrophoneAudioUnitAPI(channelCount: 2)
+        api.setRenderHandler { _, frames, data in
+            for buffer in UnsafeMutableAudioBufferListPointer(data) {
+                guard buffer.mDataByteSize == frames * UInt32(MemoryLayout<Float>.size),
+                      let data = buffer.mData else { return kAudio_ParamError }
+                let samples = data.assumingMemoryBound(to: Float.self)
+                for index in 0..<Int(frames) { samples[index] = 0 }
+            }
+            return noErr
+        }
+        let session = LiveCoreAudioMicrophoneSession(api: api, ringSlotCount: 2)
+        try await session.configure(deviceID: 42, eventHandler: { _ in })
+        try await session.start()
+        session.setDrainSuspendedForTesting(true)
+        // One ring slot, followed deterministically by three scratch renders.
+        for frames: UInt32 in [128, 512, 1_024, 256] {
+            XCTAssertEqual(
+                CoreAudioMicrophoneTestHelper.invokeCapturedCallback(api: api, frames: frames),
+                noErr
+            )
+        }
+        XCTAssertEqual(session.testDroppedInputFrameCount, 1_792)
+        session.setDrainSuspendedForTesting(false)
+        await session.stop()
+    }
+
     func testLiveSessionConfiguresAUHALInputUsingInputCallbackProperty()
         async throws {
         let api = FakeCoreAudioMicrophoneAudioUnitAPI()

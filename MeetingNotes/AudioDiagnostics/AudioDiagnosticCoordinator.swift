@@ -150,7 +150,7 @@ actor AudioDiagnosticCoordinator {
             permissionSnapshot.microphone.isAuthorized
             && inputDeviceAvailable
         let systemAudioShouldRun =
-            permissionSnapshot.screenRecording.isAuthorized
+            permissionSnapshot.screenRecording?.isAuthorized ?? true
 
         var microphoneOutcome: AudioDiagnosticStageOutcome =
             microphoneShouldRun ? .notRun : .skipped

@@ -393,6 +393,9 @@ final class MeetingLibraryViewModel {
         for error: Error,
         operation: Operation
     ) -> String {
+        if let error = error as? SystemAudioCaptureError {
+            return error.localMessage
+        }
         if case MeetingCoordinatorError.capturePipelineFailed = error {
             return "未检测到有效录音。请打开设置并运行“智能诊断”。"
         }

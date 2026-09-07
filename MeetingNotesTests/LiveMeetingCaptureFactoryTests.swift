@@ -5,6 +5,14 @@ import XCTest
 @testable import MeetingNotes
 
 final class LiveMeetingCaptureFactoryTests: XCTestCase {
+    func testProductionOnlineFactoryUsesPureAudioWithoutStartingDevices() async throws {
+        let factory = LiveMeetingCaptureFactory(
+            audioInputDevicePreference: SequencedPreferredAudioInputPreference(values: [.automatic])
+        )
+        let capture = try await factory.makeCapture(for: .online)
+        XCTAssertEqual(String(describing: type(of: capture)), "OnlineAudioCaptureSource")
+    }
+
     func testOfflinePreferenceIsReadAgainForEveryNewCapture() async throws {
         let preference = SequencedPreferredAudioInputPreference(
             values: [.automatic, .automatic]

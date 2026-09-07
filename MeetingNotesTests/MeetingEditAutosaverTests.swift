@@ -1,9 +1,32 @@
 import Foundation
+import Observation
 import XCTest
 @testable import MeetingNotes
 
 @MainActor
 final class MeetingEditAutosaverTests: XCTestCase {
+    func testRepeatedKeystrokesDoNotRepublishUnchangedIdleState() {
+        let delay = ControlledMeetingEditDelay()
+        let autosaver = MeetingEditAutosaver(
+            delay: { duration in
+                try await delay.suspend(for: duration)
+            }
+        )
+        let changes = MeetingEditObservationCounter()
+
+        withObservationTracking {
+            _ = autosaver.state
+        } onChange: {
+            changes.increment()
+        }
+
+        autosaver.schedule {}
+        autosaver.schedule {}
+
+        XCTAssertEqual(changes.value, 0)
+        autosaver.cancel()
+    }
+
     func testRepeatedKeystrokesCoalesceToLatestSnapshot() async throws {
         let delay = ControlledMeetingEditDelay()
         let completion = MeetingEditAutosaverCompletionBarrier()
@@ -187,6 +210,19 @@ final class MeetingEditAutosaverTests: XCTestCase {
         }
 
         barrier.signal()
+    }
+}
+
+private final class MeetingEditObservationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.withLock { count }
+    }
+
+    func increment() {
+        lock.withLock { count += 1 }
     }
 }
 

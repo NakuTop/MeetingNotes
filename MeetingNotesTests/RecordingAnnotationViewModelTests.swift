@@ -78,7 +78,7 @@ final class RecordingAnnotationViewModelTests: XCTestCase {
         await capture.waitUntilEntered()
 
         clock.value = 200
-        await capture.release()
+        capture.release()
         await task.value
 
         let screenshots = try repository.screenshots(meetingID: meetingID)
@@ -119,6 +119,33 @@ final class RecordingAnnotationViewModelTests: XCTestCase {
         await feedbackDelay.waitUntilCompleted()
 
         XCTAssertEqual(viewModel.screenshotState, .idle)
+    }
+
+    func testPickerCancellationReturnsToIdleWithoutSavingARecord()
+        async throws {
+        let repository = try MeetingRepository.inMemory()
+        let meetingID = try repository.createMeeting(
+            mode: .offline,
+            startedAt: Date(timeIntervalSince1970: 1)
+        )
+        let presentation = RecordingSessionPresentationStore()
+        await presentation.start(meetingID: meetingID, monotonicTime: 10)
+        let context = makeFileStoreContext()
+        defer { context.remove() }
+        let viewModel = RecordingAnnotationViewModel(
+            repository: repository,
+            fileStore: context.store,
+            screenshotCapture: CancelledMeetingScreenshotCapture(),
+            presentationStore: presentation,
+            monotonicTime: { 12 }
+        )
+
+        await viewModel.captureScreenshot()
+
+        XCTAssertEqual(viewModel.screenshotState, .idle)
+        XCTAssertTrue(try repository.screenshots(meetingID: meetingID).isEmpty)
+        XCTAssertEqual(presentation.meetingID, meetingID)
+        XCTAssertEqual(presentation.phase, .recording)
     }
 
     func testOldSavedFeedbackCannotClearNewPermissionFailure() async throws {
@@ -187,7 +214,7 @@ final class RecordingAnnotationViewModelTests: XCTestCase {
 
         await presentation.clear(meetingID: oldMeetingID)
         await presentation.start(meetingID: newMeetingID, monotonicTime: 30)
-        await capture.release()
+        capture.release()
         await task.value
 
         XCTAssertTrue(try repository.screenshots(meetingID: oldMeetingID).isEmpty)
@@ -344,13 +371,15 @@ private final class RecordingAnnotationClock {
     }
 }
 
-private actor ControlledMeetingScreenshotCapture: MeetingScreenshotCapturing {
+@MainActor
+private final class ControlledMeetingScreenshotCapture:
+    MeetingScreenshotCapturing {
     private var entered = false
     private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
     private var releaseContinuation: CheckedContinuation<Void, Never>?
 
-    func captureDisplayUnderMouse() async throws
-        -> MeetingScreenshotCaptureResult {
+    func captureSelectedWindow() async throws
+        -> MeetingScreenshotCaptureResult? {
         entered = true
         enteredWaiters.forEach { $0.resume() }
         enteredWaiters.removeAll()
@@ -378,8 +407,8 @@ private actor ControlledMeetingScreenshotCapture: MeetingScreenshotCapturing {
 }
 
 private struct ImmediateMeetingScreenshotCapture: MeetingScreenshotCapturing {
-    func captureDisplayUnderMouse() async throws
-        -> MeetingScreenshotCaptureResult {
+    func captureSelectedWindow() async throws
+        -> MeetingScreenshotCaptureResult? {
         MeetingScreenshotCaptureResult(
             pngData: Data([0x89, 0x50, 0x4E, 0x47]),
             pixelWidth: 1280,
@@ -388,20 +417,30 @@ private struct ImmediateMeetingScreenshotCapture: MeetingScreenshotCapturing {
     }
 }
 
+private struct CancelledMeetingScreenshotCapture:
+    MeetingScreenshotCapturing {
+    func captureSelectedWindow() async throws
+        -> MeetingScreenshotCaptureResult? {
+        nil
+    }
+}
+
 private struct FailingMeetingScreenshotCapture: MeetingScreenshotCapturing {
     let error: MeetingScreenshotCaptureError
 
-    func captureDisplayUnderMouse() async throws
-        -> MeetingScreenshotCaptureResult {
+    func captureSelectedWindow() async throws
+        -> MeetingScreenshotCaptureResult? {
         throw error
     }
 }
 
-private actor SequencedMeetingScreenshotCapture: MeetingScreenshotCapturing {
+@MainActor
+private final class SequencedMeetingScreenshotCapture:
+    MeetingScreenshotCapturing {
     private var callCount = 0
 
-    func captureDisplayUnderMouse() async throws
-        -> MeetingScreenshotCaptureResult {
+    func captureSelectedWindow() async throws
+        -> MeetingScreenshotCaptureResult? {
         defer { callCount += 1 }
         if callCount == 0 {
             return MeetingScreenshotCaptureResult(

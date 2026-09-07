@@ -143,9 +143,6 @@ struct MeetingDetailView: View {
     private func detailContent(_ meeting: MeetingRecord) -> some View {
         let playbackKey = MeetingPlaybackPreparationKey(meeting: meeting)
         let disclosureContext = TranscriptDisclosureContext(meeting: meeting)
-        let transcriptEntries = MeetingDetailTranscriptProjection.entries(
-            for: meeting
-        )
         return ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 AdaptiveGlassCard {
@@ -160,10 +157,7 @@ struct MeetingDetailView: View {
                         isExpanded: transcriptDisclosureBinding
                     ) {
                         TranscriptView(
-                            transcripts: transcriptEntries,
-                            bookmarks: meeting.bookmarks,
-                            notes: meeting.notes,
-                            screenshots: meeting.screenshots,
+                            projection: viewModel.timelineProjection,
                             customSpeakerNames: meeting.speakerDisplayNames,
                             frequentSpeakerNames: viewModel
                                 .frequentSpeakerNames,
@@ -196,8 +190,12 @@ struct MeetingDetailView: View {
                             onFlushEdits: flushMeetingEdits,
                             onRequestExactReplacement:
                                 requestExactReplacement,
-                            transcriptDrafts: viewModel.transcriptDrafts,
-                            noteDrafts: viewModel.noteDrafts,
+                            transcriptText: { target in
+                                viewModel.transcriptDraftText(for: target)
+                            },
+                            noteText: { note in
+                                viewModel.noteDraftText(for: note)
+                            },
                             onChangeNote: { text, note in
                                 viewModel.updateNoteDraft(text, for: note)
                             },

@@ -1,6 +1,20 @@
 import SwiftUI
 
+// Opt-in only in Scripts/test_in_background.sh. No live container, windows,
+// permission probes or updater are created by the unit-test host.
 @main
+enum MeetingNotesEntryPoint {
+    @MainActor
+    static func main() {
+        #if DEBUG && MEETINGNOTES_BACKGROUND_TEST_HOST
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        NSApplication.shared.run()
+        #else
+        MeetingNotesApp.main()
+        #endif
+    }
+}
+
 struct MeetingNotesApp: App {
     private enum StartupState {
         case ready(AppContainer)

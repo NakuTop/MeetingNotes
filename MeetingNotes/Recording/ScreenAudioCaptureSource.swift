@@ -38,6 +38,41 @@ enum ScreenAudioCaptureConfiguration {
     }
 }
 
+enum ScreenAudioCaptureStartup {
+    static func start(
+        isolation: isolated (any Actor)? = #isolation,
+        startSystem: () async throws -> Void,
+        stopSystem: () async -> Void,
+        startMicrophone: () async throws -> AsyncThrowingStream<CapturedAudioPacket, Error>,
+        stopMicrophone: () async -> Void
+    ) async throws -> AsyncThrowingStream<CapturedAudioPacket, Error> {
+        // Mic packets use a source-relative clock. Starting the mic first
+        // queues old PCM while SCStream starts; stamping that backlog at its
+        // eventual delivery time advances the mixer past live system audio.
+        // Keep the relay suspended and finish system startup before the mic.
+        try Task.checkCancellation()
+        do {
+            try await startSystem()
+        } catch {
+            await stopSystem()
+            if error is CancellationError { throw error }
+            throw ScreenAudioCaptureError.streamStartFailed
+        }
+        do {
+            try Task.checkCancellation()
+            let microphone = try await startMicrophone()
+            if Task.isCancelled {
+                await stopMicrophone()
+                throw CancellationError()
+            }
+            return microphone
+        } catch {
+            await stopSystem()
+            throw error
+        }
+    }
+}
+
 enum ScreenAudioPacketDeliveryResult: Equatable, Sendable {
     case enqueued
     case terminated
@@ -649,8 +684,12 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
         let microphoneStream:
             AsyncThrowingStream<CapturedAudioPacket, Error>
         do {
-            microphoneStream =
-                try await microphoneCaptureSource.start()
+            microphoneStream = try await ScreenAudioCaptureStartup.start(
+                startSystem: { try await stream.startCapture() },
+                stopSystem: { try? await stream.stopCapture() },
+                startMicrophone: { try await self.microphoneCaptureSource.start() },
+                stopMicrophone: { await self.microphoneCaptureSource.stop() }
+            )
         } catch {
             removeRegisteredOutputs(from: stream, relay: relay)
             await waitForCallbackQueues()
@@ -662,22 +701,6 @@ actor ScreenAudioCaptureSource: AudioCaptureSource {
             continuation?.finish(throwing: error)
             continuation = nil
             throw error
-        }
-
-        do {
-            try await stream.startCapture()
-        } catch {
-            await microphoneCaptureSource.stop()
-            removeRegisteredOutputs(from: stream, relay: relay)
-            await waitForCallbackQueues()
-            await relay.finishAndWait()
-            resetConverters()
-            frameSynchronizer = nil
-            self.stream = nil
-            self.relay = nil
-            continuation?.finish(throwing: ScreenAudioCaptureError.streamStartFailed)
-            continuation = nil
-            throw ScreenAudioCaptureError.streamStartFailed
         }
 
         let relayReference = relay

@@ -114,6 +114,20 @@ struct MeetingTranscriptEditDraft: Equatable, Sendable {
     let text: String
 }
 
+enum MeetingTranscriptDraftIdentity: Hashable, Sendable {
+    case canonical(UUID)
+    case correction(UUID)
+}
+
+extension MeetingTranscriptEditTarget {
+    var draftIdentity: MeetingTranscriptDraftIdentity {
+        if let correctionID {
+            return .correction(correctionID)
+        }
+        return .canonical(canonicalEntryID)
+    }
+}
+
 struct MeetingNoteEditDraft: Equatable, Sendable {
     let target: MeetingNoteDisplayItem
     let text: String
@@ -135,6 +149,50 @@ enum MeetingEditableDocumentField: Hashable, Sendable {
     case detailedMinutesOpenQuestion(Int)
 }
 
+private struct MeetingDetailLoadedSignature: Equatable {
+    let id: UUID
+    let contentRevision: Int
+    let updatedAt: Date
+    let title: String
+    let state: RecordingState
+    let endedAt: Date?
+    let activeDuration: TimeInterval
+    let speakerProcessingState: SpeakerProcessingState
+    let speakerProcessingErrorCode: String?
+    let notionSyncState: MeetingNotionSyncState
+    let notionSyncErrorCode: String?
+    let transcriptCount: Int
+    let correctionCount: Int
+    let bookmarkCount: Int
+    let noteCount: Int
+    let screenshotCount: Int
+
+    init(meeting: MeetingRecord) {
+        id = meeting.id
+        contentRevision = meeting.contentRevision
+        updatedAt = meeting.updatedAt
+        title = meeting.title
+        state = meeting.state
+        endedAt = meeting.endedAt
+        activeDuration = meeting.activeDuration
+        speakerProcessingState = meeting.speakerProcessingState
+        speakerProcessingErrorCode = meeting.speakerProcessingErrorCode
+        notionSyncState = meeting.notionSyncState
+        notionSyncErrorCode = meeting.notionSyncErrorCode
+        transcriptCount = meeting.transcripts.count
+        correctionCount = meeting.transcriptCorrections.count
+        bookmarkCount = meeting.bookmarks.count
+        noteCount = meeting.notes.count
+        screenshotCount = meeting.screenshots.count
+    }
+}
+
+private struct MeetingDocumentBaselineKey: Equatable {
+    let id: UUID
+    let contentRevision: Int
+    let suggestedTitle: String
+}
+
 @MainActor
 @Observable
 final class MeetingDetailViewModel {
@@ -151,8 +209,24 @@ final class MeetingDetailViewModel {
     private let editAutosaver: MeetingEditAutosaver
     private let exactReplacement: MeetingExactReplacement
     private let fileStore: MeetingFileStore?
+    @ObservationIgnored
+    private let timelineProjectionCache = MeetingTimelineProjectionCache()
+    @ObservationIgnored
+    private var lastLoadedMeetingSignature: MeetingDetailLoadedSignature?
+    @ObservationIgnored
+    private(set) var documentBaselineDecodeCount = 0
+    @ObservationIgnored
+    private var summaryBaseline:
+        (key: MeetingDocumentBaselineKey, value: GeneratedMeetingSummary)?
+    @ObservationIgnored
+    private var minutesBaseline:
+        (key: MeetingDocumentBaselineKey, value: GeneratedDetailedMinutes?)?
+    @ObservationIgnored
+    private var isPersistingEdits = false
 
     private(set) var meeting: MeetingRecord?
+    private(set) var timelineProjection:
+        MeetingTimelineProjectionSnapshot = .empty
     private(set) var summaryDraft: GeneratedMeetingSummary?
     private(set) var detailedMinutesDraft: GeneratedDetailedMinutes?
     private(set) var isPerforming = false
@@ -172,8 +246,17 @@ final class MeetingDetailViewModel {
     private var summaryDocumentErrorMessage: String?
     private var detailedMinutesDocumentErrorMessage: String?
     private var dismissedSpeakerProcessingWarningKey: String?
-    private var pendingTranscriptDrafts: [PendingTranscriptDraft] = []
-    private var pendingNoteDrafts: [PendingNoteDraft] = []
+    @ObservationIgnored
+    private var pendingTranscriptDraftsByIdentity:
+        [MeetingTranscriptDraftIdentity: PendingTranscriptDraft] = [:]
+    @ObservationIgnored
+    private var pendingTranscriptDraftOrder:
+        [MeetingTranscriptDraftIdentity] = []
+    @ObservationIgnored
+    private var pendingNoteDraftsByID: [UUID: PendingNoteDraft] = [:]
+    @ObservationIgnored
+    private var pendingNoteDraftOrder: [UUID] = []
+    private(set) var draftBoundaryRevision = 0
     private var summaryDraftToken: UUID?
     private var detailedMinutesDraftToken: UUID?
 
@@ -205,24 +288,39 @@ final class MeetingDetailViewModel {
             ?? MeetingExactReplacement(repository: repository)
         self.fileStore = fileStore
         meeting = try? repository.meeting(id: meetingID)
+        lastLoadedMeetingSignature = meeting.map(
+            MeetingDetailLoadedSignature.init
+        )
         synchronizeCleanDocumentDrafts()
+        refreshTimelineProjection()
     }
 
     var transcriptDrafts: [MeetingTranscriptEditDraft] {
-        pendingTranscriptDrafts.map(\.draft)
+        _ = draftBoundaryRevision
+        return pendingTranscriptDraftOrder.compactMap {
+            pendingTranscriptDraftsByIdentity[$0]?.draft
+        }
     }
 
     var noteDrafts: [MeetingNoteEditDraft] {
-        pendingNoteDrafts.map(\.draft)
+        _ = draftBoundaryRevision
+        return pendingNoteDraftOrder.compactMap {
+            pendingNoteDraftsByID[$0]?.draft
+        }
     }
 
     var localSaveState: MeetingLocalSaveState {
         editAutosaver.state
     }
 
+    var timelineProjectionBuildCount: Int {
+        timelineProjectionCache.fullRebuildCount
+            + timelineProjectionCache.incrementalAppendCount
+    }
+
     var hasPendingEdits: Bool {
-        !pendingTranscriptDrafts.isEmpty
-            || !pendingNoteDrafts.isEmpty
+        !pendingTranscriptDraftsByIdentity.isEmpty
+            || !pendingNoteDraftsByID.isEmpty
             || summaryDraftToken != nil
             || detailedMinutesDraftToken != nil
     }
@@ -529,10 +627,14 @@ final class MeetingDetailViewModel {
     func transcriptDraftText(
         for target: MeetingTranscriptEditTarget
     ) -> String {
-        pendingTranscriptDrafts.first {
-            $0.draft.target.hasSameDraftIdentity(as: target)
-        }?
+        pendingTranscriptDraftsByIdentity[target.draftIdentity]?
             .draft.text ?? target.originalText
+    }
+
+    func transcriptDraftToken(
+        for target: MeetingTranscriptEditTarget
+    ) -> UUID? {
+        pendingTranscriptDraftsByIdentity[target.draftIdentity]?.token
     }
 
     func updateTranscriptDraft(
@@ -549,38 +651,54 @@ final class MeetingDetailViewModel {
         _ text: String,
         for target: MeetingTranscriptEditTarget
     ) {
-        if text == target.originalText {
-            pendingTranscriptDrafts.removeAll {
-                $0.draft.target.hasSameDraftIdentity(as: target)
-            }
-        } else if let index = pendingTranscriptDrafts.firstIndex(where: {
-            $0.draft.target.hasSameDraftIdentity(as: target)
-        }) {
-            let existingTarget = pendingTranscriptDrafts[index].draft.target
-            pendingTranscriptDrafts[index] = PendingTranscriptDraft(
+        let identity = target.draftIdentity
+        if text == target.originalText,
+           text == persistedTranscriptText(for: target) {
+            removeTranscriptDraft(identity: identity)
+        } else if let existing = pendingTranscriptDraftsByIdentity[identity] {
+            pendingTranscriptDraftsByIdentity[identity] = PendingTranscriptDraft(
                 draft: MeetingTranscriptEditDraft(
-                    target: existingTarget,
+                    target: existing.draft.target,
                     text: text
                 ),
                 token: UUID()
             )
         } else {
-            pendingTranscriptDrafts.append(
-                PendingTranscriptDraft(
-                    draft: MeetingTranscriptEditDraft(
-                        target: target,
-                        text: text
-                    ),
-                    token: UUID()
-                )
+            pendingTranscriptDraftsByIdentity[identity] = PendingTranscriptDraft(
+                draft: MeetingTranscriptEditDraft(
+                    target: target,
+                    text: text
+                ),
+                token: UUID()
             )
+            pendingTranscriptDraftOrder.append(identity)
+            advanceDraftBoundaryRevision()
         }
         reschedulePendingEdits()
     }
 
+    private func persistedTranscriptText(for target: MeetingTranscriptEditTarget) -> String {
+        // Undo can reach an old binding after autosave but before its target is
+        // refreshed. Returning to that target's text is then a new saved edit,
+        // not cancellation of an unsaved draft. Only look up this rare path.
+        timelineProjection.visibleTurns.first {
+            guard $0.source == target.source else { return false }
+            if let correctionID = target.correctionID {
+                // Finalization can rebind transcript IDs without replacing
+                // the manual correction that owns the editor's undo history.
+                return $0.correctionID == correctionID
+            }
+            return $0.transcriptIDs == target.transcriptIDs
+        }?.text ?? target.originalText
+    }
+
     func noteDraftText(for note: MeetingNoteDisplayItem) -> String {
-        pendingNoteDrafts.first { $0.draft.target.id == note.id }?
+        pendingNoteDraftsByID[note.id]?
             .draft.text ?? note.text
+    }
+
+    func noteDraftToken(forID id: UUID) -> UUID? {
+        pendingNoteDraftsByID[id]?.token
     }
 
     func updateNoteDraft(
@@ -589,31 +707,30 @@ final class MeetingDetailViewModel {
     ) {
         timelineErrorMessage = nil
         if text == note.text {
-            pendingNoteDrafts.removeAll { $0.draft.target.id == note.id }
-        } else if let index = pendingNoteDrafts.firstIndex(where: {
-            $0.draft.target.id == note.id
-        }) {
-            let target = pendingNoteDrafts[index].draft.target
-            pendingNoteDrafts[index] = PendingNoteDraft(
-                draft: MeetingNoteEditDraft(target: target, text: text),
+            removeNoteDraft(id: note.id)
+        } else if let existing = pendingNoteDraftsByID[note.id] {
+            pendingNoteDraftsByID[note.id] = PendingNoteDraft(
+                draft: MeetingNoteEditDraft(
+                    target: existing.draft.target,
+                    text: text
+                ),
                 token: UUID()
             )
         } else {
-            pendingNoteDrafts.append(
-                PendingNoteDraft(
-                    draft: MeetingNoteEditDraft(target: note, text: text),
-                    token: UUID()
-                )
+            pendingNoteDraftsByID[note.id] = PendingNoteDraft(
+                draft: MeetingNoteEditDraft(target: note, text: text),
+                token: UUID()
             )
+            pendingNoteDraftOrder.append(note.id)
+            advanceDraftBoundaryRevision()
         }
         reschedulePendingEdits()
     }
 
     func deleteNote(_ note: MeetingNoteDisplayItem) -> Bool {
-        let pending = pendingNoteDrafts.filter {
-            $0.draft.target.id == note.id
-        }
-        pendingNoteDrafts.removeAll { $0.draft.target.id == note.id }
+        let pending = pendingNoteDraftsByID[note.id]
+        let pendingOrderIndex = pendingNoteDraftOrder.firstIndex(of: note.id)
+        removeNoteDraft(id: note.id)
         reschedulePendingEdits()
         timelineErrorMessage = nil
         do {
@@ -621,7 +738,17 @@ final class MeetingDetailViewModel {
             load()
             return true
         } catch {
-            pendingNoteDrafts.append(contentsOf: pending)
+            if let pending {
+                pendingNoteDraftsByID[note.id] = pending
+                pendingNoteDraftOrder.insert(
+                    note.id,
+                    at: min(
+                        pendingOrderIndex ?? pendingNoteDraftOrder.endIndex,
+                        pendingNoteDraftOrder.endIndex
+                    )
+                )
+                advanceDraftBoundaryRevision()
+            }
             reschedulePendingEdits()
             timelineErrorMessage = "无法删除笔记，请稍后重试。"
             return false
@@ -1052,23 +1179,41 @@ final class MeetingDetailViewModel {
 
     func load() {
         do {
-            meeting = try repository.meeting(id: meetingID)
+            let loadedMeeting = try repository.meeting(id: meetingID)
+            let loadedSignature = MeetingDetailLoadedSignature(
+                meeting: loadedMeeting
+            )
+            guard meeting == nil
+                || loadedSignature != lastLoadedMeetingSignature else {
+                return
+            }
+            meeting = loadedMeeting
+            lastLoadedMeetingSignature = loadedSignature
             reconcilePendingTranscriptDrafts()
             reconcilePendingNoteDrafts()
             synchronizeCleanDocumentDrafts()
+            refreshTimelineProjection()
         } catch {
             meeting = nil
+            lastLoadedMeetingSignature = nil
+            timelineProjection = .empty
             errorMessage = "无法加载会议详情。"
         }
     }
 
     func refreshWhileRecording(
-        interval: Duration = .milliseconds(400)
+        interval: Duration = .milliseconds(400),
+        sleep: @Sendable (Duration) async throws -> Void = {
+            try await Task.sleep(for: $0)
+        }
     ) async {
         load()
+        // Finalization changes endedAt and replaces the SwiftUI playback task.
+        // Publish the final persisted snapshot even if that cancels this poll.
+        defer { load() }
         while !Task.isCancelled, isRecordingActive {
             do {
-                try await Task.sleep(for: interval)
+                try await sleep(interval)
             } catch {
                 return
             }
@@ -1167,72 +1312,141 @@ final class MeetingDetailViewModel {
 
     private var isRecordingActive: Bool {
         guard let state = meeting?.state else { return false }
-        return state == .recording || state == .paused
+        // The detail opens from onMeetingCreated, before capture startup ends.
+        // Keep observing until the final queued transcripts have been saved.
+        return state.blocksCaptureSettingsChanges
     }
 
     private var persistedSummaryValue: GeneratedMeetingSummary? {
         guard let meeting,
               let summary = meeting.summary else {
+            summaryBaseline = nil
             return nil
         }
-        return GeneratedMeetingSummary(
-            suggestedTitle: meeting.suggestedTitle ?? "",
+        let key = MeetingDocumentBaselineKey(
+            id: summary.id, contentRevision: summary.contentRevision,
+            suggestedTitle: meeting.suggestedTitle ?? ""
+        )
+        if summaryBaseline?.key == key { return summaryBaseline?.value }
+        documentBaselineDecodeCount += 1
+        let value = GeneratedMeetingSummary(
+            suggestedTitle: key.suggestedTitle,
             overview: summary.overview,
             keyPoints: summary.keyPoints,
             decisions: summary.decisions,
             actionItems: summary.actionItemRecords,
             bookmarkInsights: summary.bookmarkInsights
         )
+        summaryBaseline = (key, value)
+        return value
     }
 
     private var persistedDetailedMinutesValue: GeneratedDetailedMinutes? {
-        guard let minutes = meeting?.detailedMinutes,
-              let sections = try? minutes.sections,
+        guard let minutes = meeting?.detailedMinutes else {
+            minutesBaseline = nil
+            return nil
+        }
+        let key = MeetingDocumentBaselineKey(
+            id: minutes.id, contentRevision: minutes.contentRevision,
+            suggestedTitle: ""
+        )
+        if minutesBaseline?.key == key { return minutesBaseline?.value }
+        documentBaselineDecodeCount += 1
+        guard let sections = try? minutes.sections,
               let decisions = try? minutes.decisions,
               let actionItems = try? minutes.actionItems,
               let openQuestions = try? minutes.openQuestions else {
+            minutesBaseline = (key, nil)
             return nil
         }
-        return GeneratedDetailedMinutes(
+        let value = GeneratedDetailedMinutes(
             overview: minutes.overview,
             sections: sections,
             decisions: decisions,
             actionItems: actionItems,
             openQuestions: openQuestions
         )
+        minutesBaseline = (key, value)
+        return value
     }
 
     private func synchronizeCleanDocumentDrafts() {
         if summaryDraftToken == nil {
-            summaryDraft = persistedSummaryValue
+            let persisted = persistedSummaryValue
+            if summaryDraft != persisted {
+                summaryDraft = persisted
+            }
         }
         if detailedMinutesDraftToken == nil {
-            detailedMinutesDraft = persistedDetailedMinutesValue
+            let persisted = persistedDetailedMinutesValue
+            if detailedMinutesDraft != persisted {
+                detailedMinutesDraft = persisted
+            }
+        }
+    }
+
+    private func refreshTimelineProjection() {
+        // A flush can persist many fields. Publish its final (or partially
+        // saved) projection once, after all successful draft removals.
+        guard !isPersistingEdits else { return }
+        guard let meeting else {
+            if timelineProjection != .empty {
+                timelineProjection = .empty
+            }
+            return
+        }
+        let version = MeetingTimelineProjectionVersion(
+            contentRevision: meeting.contentRevision,
+            draftBoundaryRevision: draftBoundaryRevision
+        )
+        let updated = timelineProjectionCache.snapshot(
+            version: version,
+            transcripts: MeetingDetailTranscriptProjection.entries(
+                for: meeting
+            ),
+            bookmarks: meeting.bookmarks,
+            notes: meeting.notes,
+            screenshots: meeting.screenshots,
+            customSpeakerNames: meeting.speakerDisplayNames,
+            preservingDraftTargets: pendingTranscriptDraftOrder.compactMap {
+                pendingTranscriptDraftsByIdentity[$0]?.draft.target
+            }
+        )
+        if timelineProjection != updated {
+            timelineProjection = updated
         }
     }
 
     private func reconcilePendingTranscriptDrafts() {
-        guard !pendingTranscriptDrafts.isEmpty,
+        guard !pendingTranscriptDraftsByIdentity.isEmpty,
               let canonical = try? repository.canonicalTranscripts(
                   meetingID: meetingID
               ) else {
             return
         }
 
-        for index in pendingTranscriptDrafts.indices {
-            let pending = pendingTranscriptDrafts[index]
+        let correctionsByID = Dictionary(
+            uniqueKeysWithValues: canonical.compactMap { entry in
+                entry.isManuallyEdited ? (entry.id, entry) : nil
+            }
+        )
+        let currentGeneratedIDs = Set(
+            canonical
+                .filter { !$0.isManuallyEdited }
+                .flatMap(\.transcriptIDs)
+        )
+        var didChangeIdentity = false
+
+        for identity in pendingTranscriptDraftOrder {
+            guard let pending = pendingTranscriptDraftsByIdentity[identity]
+            else {
+                continue
+            }
             let target = pending.draft.target
             let currentEntry: CanonicalTranscriptEntry?
             if let correctionID = target.correctionID {
-                currentEntry = canonical.first {
-                    $0.isManuallyEdited && $0.id == correctionID
-                }
+                currentEntry = correctionsByID[correctionID]
             } else {
-                let currentGeneratedIDs = Set(
-                    canonical
-                        .filter { !$0.isManuallyEdited }
-                        .flatMap(\.transcriptIDs)
-                )
                 if !target.transcriptIDs.isEmpty,
                    target.transcriptIDs.allSatisfy(
                        currentGeneratedIDs.contains
@@ -1253,29 +1467,57 @@ final class MeetingDetailViewModel {
                     )
             }
             guard let currentEntry else { continue }
-            pendingTranscriptDrafts[index] = PendingTranscriptDraft(
+            let refreshedTarget = MeetingTranscriptEditTarget(
+                entry: currentEntry
+            )
+            let refreshed = PendingTranscriptDraft(
                 draft: MeetingTranscriptEditDraft(
-                    target: MeetingTranscriptEditTarget(entry: currentEntry),
+                    target: refreshedTarget,
                     text: pending.draft.text
                 ),
                 token: pending.token
             )
+            let refreshedIdentity = refreshedTarget.draftIdentity
+            if refreshedIdentity == identity {
+                pendingTranscriptDraftsByIdentity[identity] = refreshed
+                continue
+            }
+
+            pendingTranscriptDraftsByIdentity.removeValue(forKey: identity)
+            if pendingTranscriptDraftsByIdentity[refreshedIdentity] == nil,
+               let orderIndex = pendingTranscriptDraftOrder.firstIndex(
+                   of: identity
+               ) {
+                pendingTranscriptDraftsByIdentity[refreshedIdentity] = refreshed
+                pendingTranscriptDraftOrder[orderIndex] = refreshedIdentity
+            } else {
+                pendingTranscriptDraftOrder.removeAll { $0 == identity }
+            }
+            didChangeIdentity = true
+        }
+
+        if didChangeIdentity {
+            advanceDraftBoundaryRevision()
         }
     }
 
     private func reconcilePendingNoteDrafts() {
-        guard !pendingNoteDrafts.isEmpty,
+        guard !pendingNoteDraftsByID.isEmpty,
               let notes = try? repository.notes(meetingID: meetingID) else {
             return
         }
         let notesByID = Dictionary(uniqueKeysWithValues: notes.map {
             ($0.id, MeetingNoteDisplayItem(record: $0))
         })
-        pendingNoteDrafts = pendingNoteDrafts.compactMap { pending in
-            guard let current = notesByID[pending.draft.target.id] else {
-                return nil
+        var removedMissingDraft = false
+        for id in pendingNoteDraftOrder {
+            guard let pending = pendingNoteDraftsByID[id] else { continue }
+            guard let current = notesByID[id] else {
+                pendingNoteDraftsByID.removeValue(forKey: id)
+                removedMissingDraft = true
+                continue
             }
-            return PendingNoteDraft(
+            pendingNoteDraftsByID[id] = PendingNoteDraft(
                 draft: MeetingNoteEditDraft(
                     target: current,
                     text: pending.draft.text
@@ -1283,6 +1525,42 @@ final class MeetingDetailViewModel {
                 token: pending.token
             )
         }
+        if removedMissingDraft {
+            pendingNoteDraftOrder.removeAll {
+                pendingNoteDraftsByID[$0] == nil
+            }
+            advanceDraftBoundaryRevision()
+        }
+    }
+
+    @discardableResult
+    private func removeTranscriptDraft(
+        identity: MeetingTranscriptDraftIdentity
+    ) -> PendingTranscriptDraft? {
+        guard let removed = pendingTranscriptDraftsByIdentity.removeValue(
+            forKey: identity
+        ) else {
+            return nil
+        }
+        pendingTranscriptDraftOrder.removeAll { $0 == identity }
+        advanceDraftBoundaryRevision()
+        return removed
+    }
+
+    @discardableResult
+    private func removeNoteDraft(id: UUID) -> PendingNoteDraft? {
+        guard let removed = pendingNoteDraftsByID.removeValue(forKey: id)
+        else {
+            return nil
+        }
+        pendingNoteDraftOrder.removeAll { $0 == id }
+        advanceDraftBoundaryRevision()
+        return removed
+    }
+
+    private func advanceDraftBoundaryRevision() {
+        draftBoundaryRevision &+= 1
+        refreshTimelineProjection()
     }
 
     private func reschedulePendingEdits() {
@@ -1296,8 +1574,24 @@ final class MeetingDetailViewModel {
     }
 
     private func persistPendingEdits() throws {
-        let transcriptSnapshots = pendingTranscriptDrafts
-        let noteSnapshots = pendingNoteDrafts
+        isPersistingEdits = true
+        defer {
+            isPersistingEdits = false
+            if let loadedMeeting = try? repository.meeting(id: meetingID) {
+                meeting = loadedMeeting
+                lastLoadedMeetingSignature = MeetingDetailLoadedSignature(
+                    meeting: loadedMeeting
+                )
+            }
+            synchronizeCleanDocumentDrafts()
+            refreshTimelineProjection()
+        }
+        let transcriptSnapshots = pendingTranscriptDraftOrder.compactMap {
+            pendingTranscriptDraftsByIdentity[$0]
+        }
+        let noteSnapshots = pendingNoteDraftOrder.compactMap {
+            pendingNoteDraftsByID[$0]
+        }
         let summarySnapshot = summaryDraftToken.flatMap { token in
             summaryDraft.map { (token: token, value: $0) }
         }
@@ -1308,9 +1602,9 @@ final class MeetingDetailViewModel {
 
         for snapshot in transcriptSnapshots {
             let target = snapshot.draft.target
-            guard pendingTranscriptDrafts.contains(where: {
-                $0.token == snapshot.token
-            }) else {
+            let identity = target.draftIdentity
+            guard pendingTranscriptDraftsByIdentity[identity]?.token
+                    == snapshot.token else {
                 continue
             }
             if let correctionID = target.correctionID {
@@ -1330,18 +1624,18 @@ final class MeetingDetailViewModel {
                     replacementText: snapshot.draft.text
                 )
             }
-            pendingTranscriptDrafts.removeAll {
-                $0.token == snapshot.token
+            if pendingTranscriptDraftsByIdentity[identity]?.token
+                == snapshot.token {
+                removeTranscriptDraft(identity: identity)
             }
         }
 
         for snapshot in noteSnapshots {
-            guard pendingNoteDrafts.contains(where: {
-                $0.token == snapshot.token
-            }) else {
+            let target = snapshot.draft.target
+            guard pendingNoteDraftsByID[target.id]?.token == snapshot.token
+            else {
                 continue
             }
-            let target = snapshot.draft.target
             try repository.upsertNote(
                 meetingID: meetingID,
                 id: target.id,
@@ -1349,7 +1643,9 @@ final class MeetingDetailViewModel {
                 text: snapshot.draft.text,
                 sequenceIndex: target.sequenceIndex
             )
-            pendingNoteDrafts.removeAll { $0.token == snapshot.token }
+            if pendingNoteDraftsByID[target.id]?.token == snapshot.token {
+                removeNoteDraft(id: target.id)
+            }
         }
 
         if let summarySnapshot,
@@ -1374,8 +1670,6 @@ final class MeetingDetailViewModel {
             }
         }
 
-        meeting = try? repository.meeting(id: meetingID)
-        synchronizeCleanDocumentDrafts()
     }
 
     private struct PendingTranscriptDraft {

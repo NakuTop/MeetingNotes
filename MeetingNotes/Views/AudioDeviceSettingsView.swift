@@ -227,7 +227,7 @@ struct AudioDeviceSettingsView: View {
                     "settings.audio.microphonePrivacy"
                 )
 
-                Button("打开屏幕录制权限") {
+                Button("打开屏幕与系统音频权限") {
                     openPrivacySettings(.screenRecording)
                 }
                 .accessibilityIdentifier(
@@ -235,6 +235,10 @@ struct AudioDeviceSettingsView: View {
                 )
             }
             .adaptiveSecondaryButtonStyle()
+
+            Text("在线会议与智能诊断只捕获系统音频，无需共享桌面；截图仍需屏幕录制权限。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             if let privacySettingsError {
                 Text(privacySettingsError)
@@ -251,7 +255,7 @@ struct AudioDeviceSettingsView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("智能诊断")
                         .font(.subheadline.weight(.semibold))
-                    Text("先在本机检测；只有点击发送后，才会把下方预览内容交给 DeepSeek。")
+                    Text("使用与在线会议相同的 Core Audio 纯音频链路在本机检测；只有点击发送后，才会把下方预览内容交给 DeepSeek。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -554,7 +558,7 @@ struct AudioDeviceSettingsView: View {
         case .checkingPermissions: "正在检查权限与设备…"
         case .playingOutputTone: "正在播放输出测试音…"
         case .testingMicrophone: "正在检测麦克风信号…"
-        case .testingSystemAudio: "正在检测系统音频…"
+        case .testingSystemAudio: "正在检测系统音频（Core Audio）…"
         }
     }
 

@@ -5,6 +5,167 @@ import XCTest
 @testable import MeetingNotes
 
 final class ScreenAudioCaptureConfigurationTests: XCTestCase {
+    func testSlowSystemStartupPreservesSystemSamplesThroughActualMixer() async throws {
+        let source = ScreenAudioStartupBufferedSource()
+        _ = try await ScreenAudioCaptureStartup.start(
+            startSystem: { await source.finishSlowSystemStartup() },
+            stopSystem: {},
+            startMicrophone: { await source.startMicrophone() },
+            stopMicrophone: {}
+        )
+        let startupPackets = await source.bufferedFrames
+        var synchronizer = ScreenAudioFrameSynchronizer(sessionStartedAt: 100)
+        let mixer = RealtimeAudioMixer()
+        var output: [CapturedAudioPacket] = []
+        // Buffered mic PCM is delivered only after SCStream.startCapture returns.
+        // Both clocks are production clocks; no decoder or mixer is mocked.
+        for frame in startupPackets {
+            let normalized = synchronizer.ingest(frame, source: .microphone, receivedAt: 100)
+            for frame in normalized {
+                output += try await mixer.ingest(frame, source: .microphone)
+            }
+        }
+        let backlogDuration = Double(startupPackets.count) * 0.02
+        for index in 0..<20 {
+            let now = 100 + Double(index) * 0.02
+            let mic = CapturedAudioFrame(
+                timestamp: backlogDuration + Double(index) * 0.02,
+                sampleRate: 48_000, channelCount: 1,
+                samples: Array(repeating: 0.01, count: 960)
+            )
+            let system = CapturedAudioFrame(
+                timestamp: 5_000 + Double(index) * 0.02,
+                sampleRate: 48_000, channelCount: 1,
+                samples: Array(repeating: 0.4, count: 960)
+            )
+            for (frame, kind) in [(mic, RealtimeAudioSource.microphone), (system, .system)] {
+                for normalized in synchronizer.ingest(frame, source: kind, receivedAt: now) {
+                    output += try await mixer.ingest(normalized, source: kind)
+                }
+            }
+        }
+        output += await mixer.flush()
+        let samples = output.flatMap { $0.sourceFrames[.system]?.samples ?? [] }
+        XCTAssertEqual(samples.filter { abs($0 - 0.4) < 0.0001 }.count, 20 * 960)
+        XCTAssertEqual(samples.count, 20 * 960)
+    }
+
+    func testSystemStartupCompletesBeforeMicrophoneCanAccumulateBacklog() async throws {
+        let order = ScreenAudioStartupOrder()
+        _ = try await ScreenAudioCaptureStartup.start(
+            startSystem: { await order.add("system-ready") },
+            stopSystem: { await order.add("system-stop") },
+            startMicrophone: {
+                await order.add("microphone-start")
+                return AsyncThrowingStream { $0.finish() }
+            },
+            stopMicrophone: { await order.add("microphone-stop") }
+        )
+        let values = await order.values
+        XCTAssertEqual(values, ["system-ready", "microphone-start"])
+    }
+
+    func testSystemStartupFailureNeverStartsMicrophone() async {
+        let order = ScreenAudioStartupOrder()
+        do {
+            _ = try await ScreenAudioCaptureStartup.start(
+                startSystem: { throw ScreenAudioCaptureError.streamStopped },
+                stopSystem: { await order.add("system-stop") },
+                startMicrophone: {
+                    await order.add("microphone-start")
+                    return AsyncThrowingStream { $0.finish() }
+                },
+                stopMicrophone: { await order.add("microphone-stop") }
+            )
+            XCTFail("Expected startup failure")
+        } catch {
+            XCTAssertEqual(error as? ScreenAudioCaptureError, .streamStartFailed)
+        }
+        let values = await order.values
+        XCTAssertEqual(values, ["system-stop"])
+    }
+
+    func testCancellationAfterSystemStartsCleansUpWithoutStartingMicrophone() async {
+        let order = ScreenAudioStartupOrder()
+        let cancelled = await Task {
+            do {
+                _ = try await ScreenAudioCaptureStartup.start(
+                    startSystem: { withUnsafeCurrentTask { $0?.cancel() } },
+                    stopSystem: { await order.add("system-stop") },
+                    startMicrophone: {
+                        await order.add("microphone-start")
+                        return AsyncThrowingStream { $0.finish() }
+                    },
+                    stopMicrophone: { await order.add("microphone-stop") }
+                )
+                return false
+            } catch { return error is CancellationError }
+        }.value
+        XCTAssertTrue(cancelled)
+        let values = await order.values
+        XCTAssertEqual(values, ["system-stop"])
+    }
+
+    func testCancellationAfterMicrophoneStartsStopsBothSourcesExactlyOnce() async {
+        let order = ScreenAudioStartupOrder()
+        let cancelled = await Task {
+            do {
+                _ = try await ScreenAudioCaptureStartup.start(
+                    startSystem: {},
+                    stopSystem: { await order.add("system-stop") },
+                    startMicrophone: {
+                        withUnsafeCurrentTask { $0?.cancel() }
+                        return AsyncThrowingStream { $0.finish() }
+                    },
+                    stopMicrophone: { await order.add("microphone-stop") }
+                )
+                return false
+            } catch { return error is CancellationError }
+        }.value
+        XCTAssertTrue(cancelled)
+        let values = await order.values
+        XCTAssertEqual(values, ["microphone-stop", "system-stop"])
+    }
+
+    func testPreCancelledOnlineStartupDoesNotStartEitherSource() async {
+        let order = ScreenAudioStartupOrder()
+        let cancelled = await Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            do {
+                _ = try await ScreenAudioCaptureStartup.start(
+                    startSystem: { await order.add("system-start") },
+                    stopSystem: { await order.add("system-stop") },
+                    startMicrophone: {
+                        await order.add("microphone-start")
+                        return AsyncThrowingStream { $0.finish() }
+                    },
+                    stopMicrophone: { await order.add("microphone-stop") }
+                )
+                return false
+            } catch { return error is CancellationError }
+        }.value
+        XCTAssertTrue(cancelled)
+        let values = await order.values
+        XCTAssertEqual(values, [])
+    }
+
+    func testMicrophoneStartupFailureStopsAlreadyStartedSystem() async {
+        let order = ScreenAudioStartupOrder()
+        do {
+            _ = try await ScreenAudioCaptureStartup.start(
+                startSystem: { await order.add("system-ready") },
+                stopSystem: { await order.add("system-stop") },
+                startMicrophone: { throw MicrophoneCaptureError.noUsableInputDevice },
+                stopMicrophone: { await order.add("microphone-stop") }
+            )
+            XCTFail("Expected microphone failure")
+        } catch {
+            XCTAssertEqual(error as? MicrophoneCaptureError, .noUsableInputDevice)
+        }
+        let values = await order.values
+        XCTAssertEqual(values, ["system-ready", "system-stop"])
+    }
+
     func testScreenCaptureKitCapturesSystemAudioOnly() {
         let configuration =
             ScreenAudioCaptureConfiguration.makeStreamConfiguration()
@@ -727,6 +888,33 @@ final class ScreenAudioCaptureConfigurationTests: XCTestCase {
             noErr
         )
         return try XCTUnwrap(sampleBuffer)
+    }
+}
+
+private actor ScreenAudioStartupOrder {
+    private(set) var values: [String] = []
+    func add(_ value: String) { values.append(value) }
+}
+
+private actor ScreenAudioStartupBufferedSource {
+    private var microphoneStarted = false
+    private(set) var bufferedFrames: [CapturedAudioFrame] = []
+
+    func startMicrophone() -> AsyncThrowingStream<CapturedAudioPacket, Error> {
+        microphoneStarted = true
+        return AsyncThrowingStream { $0.finish() }
+    }
+
+    func finishSlowSystemStartup() {
+        guard microphoneStarted else { return }
+        // One second of microphone capture while ScreenCaptureKit is starting.
+        bufferedFrames = (0..<50).map { index in
+            CapturedAudioFrame(
+                timestamp: Double(index) * 0.02,
+                sampleRate: 48_000, channelCount: 1,
+                samples: Array(repeating: 0.01, count: 960)
+            )
+        }
     }
 }
 

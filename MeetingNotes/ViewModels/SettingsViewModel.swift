@@ -1399,7 +1399,7 @@ final class SettingsViewModel {
             case .microphone:
                 "麦克风智能检测未在预期时间内完成。手动测试正常时，可能是诊断启动阶段耗时较长。"
             case .systemAudio:
-                "系统音频智能检测未在预期时间内完成。手动扬声器正常不代表 ScreenCaptureKit 系统音频检测已完成。"
+                "Core Audio 纯音频智能检测未在预期时间内完成。手动扬声器正常不代表系统音频采集正常，无需共享桌面。"
             }
         case .insufficientEvidence:
             "没有获得足够的音频证据，请重新运行诊断。"

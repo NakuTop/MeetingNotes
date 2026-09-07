@@ -347,7 +347,7 @@ struct LiveMeetingCaptureFactory: MeetingCaptureSourceFactory {
             },
         screenFactory:
             @escaping ScreenFactory = { microphoneCaptureSource in
-                ScreenAudioCaptureSource(
+                OnlineAudioCaptureSource(
                     microphoneCaptureSource:
                         microphoneCaptureSource
                 )

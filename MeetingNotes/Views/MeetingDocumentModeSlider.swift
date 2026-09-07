@@ -5,6 +5,33 @@ struct MeetingDocumentModeSliderDragUpdate: Equatable {
     let dragOffset: CGFloat
 }
 
+enum MeetingDocumentModeSliderTapPolicy {
+    static func selection(
+        currentSelection: MeetingDocumentKind,
+        locationX: CGFloat,
+        width: CGFloat,
+        isDisabled: Bool
+    ) -> MeetingDocumentKind {
+        guard !isDisabled,
+              width > 0,
+              width.isFinite,
+              locationX.isFinite,
+              locationX >= 0,
+              locationX <= width else {
+            return currentSelection
+        }
+
+        let midpoint = width / 2
+        if locationX < midpoint {
+            return .summary
+        }
+        if locationX > midpoint {
+            return .detailedMinutes
+        }
+        return currentSelection
+    }
+}
+
 enum MeetingDocumentModeSliderDragPolicy {
     static func update(
         startingSelection: MeetingDocumentKind,
@@ -76,7 +103,8 @@ struct MeetingDocumentModeSlider: View {
             }
             .padding(3)
             .background(.quaternary.opacity(0.55), in: Capsule())
-            .contentShape(Capsule())
+            .contentShape(Rectangle())
+            .simultaneousGesture(tapGesture(width: geometry.size.width))
             .simultaneousGesture(dragGesture(width: geometry.size.width))
         }
         .frame(height: 40)
@@ -98,6 +126,7 @@ struct MeetingDocumentModeSlider: View {
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(selection == kind ? .primary : .secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
                 .background {
                     if selection == kind {
                         Capsule()
@@ -116,6 +145,7 @@ struct MeetingDocumentModeSlider: View {
                 }
         }
         .buttonStyle(.plain)
+        .contentShape(Rectangle())
         .accessibilityIdentifier(identifier)
         .accessibilityAddTraits(selection == kind ? .isSelected : [])
     }
@@ -146,6 +176,19 @@ struct MeetingDocumentModeSlider: View {
                     dragOffset = 0
                 }
                 dragStartingSelection = nil
+            }
+    }
+
+    private func tapGesture(width: CGFloat) -> some Gesture {
+        SpatialTapGesture()
+            .onEnded { value in
+                let nextSelection = MeetingDocumentModeSliderTapPolicy.selection(
+                    currentSelection: selection,
+                    locationX: value.location.x,
+                    width: width,
+                    isDisabled: isDisabled
+                )
+                select(nextSelection)
             }
     }
 
