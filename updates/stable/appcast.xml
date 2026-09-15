@@ -3,6 +3,29 @@
     <channel>
         <title>MeetingNotes</title>
         <item>
+            <title>1.3.2</title>
+            <pubDate>Tue, 15 Sep 2026 15:28:11 +0800</pubDate>
+            <sparkle:version>27</sparkle:version>
+            <sparkle:shortVersionString>1.3.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# MeetingNotes 1.3.2（27）
+
+> 免费自签名正式版，未经 Apple Developer ID 签名或公证。首次安装可能需要在 macOS 中手动允许；请仅从 NakuTop/MeetingNotes 官方 GitHub 下载。支持 Apple Silicon Mac，macOS 15 或更新版本。
+
+- 修复在线长会议结束后长时间停留在“分离说话人”的问题：对已有转录直接标注说话人，不再先对整场麦克风和系统分轨重复转录。
+- 录制期间自动分批更新说话人标签，结束后再进行整场校准；后台标注不会阻塞文字转录。
+- 说话人标注保留已编辑的文字，实时标注不替换文字行；最终校准按时间重叠证据保留可确定对应的自定义说话人名称。
+- 重新分离任务不再因详情界面消失而被取消，并提供明确的“取消分离”操作。
+- 保持录音、截图、撤销重做、Whisper 模型、Notion 手动同步和 DeepSeek 数据边界不变。
+
+首次使用实时说话人标注时，会下载对应的本地模型；音频不上传。实时标签有短暂延迟，最终以整场校准结果为准。旧会议可在更新后使用“重新分离说话人”。
+
+本次后台单元测试 1,399 通过、0 失败；4 项需显式开启的本地音频探针在常规套件中跳过，其中真实录音整场标注及与高精度转录并行的 2 项专项已另行通过。未运行 UI 自动化或两个交互浮窗测试。实际应用中的更新安装与说话人准确率由用户复测，不以自动化结果替代人工验收。
+]]></description>
+            <enclosure url="https://github.com/NakuTop/MeetingNotes/releases/download/v1.3.2/MeetingNotes.dmg" length="9762784" type="application/octet-stream" sparkle:edSignature="a65M1Q8r7SfCtC+DJKXFjiNf3vGuqDHtRhUR1+EbbIOUvRS6Gj8xgP9FAMPXhgDc4ljXiZGH8I1tX2yUWaP9BQ=="/>
+        </item>
+        <item>
             <title>1.3.1</title>
             <pubDate>Mon, 07 Sep 2026 17:19:00 +0800</pubDate>
             <sparkle:version>26</sparkle:version>
