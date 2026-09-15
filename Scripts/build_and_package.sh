@@ -104,8 +104,8 @@ if [[ "$CONFIGURATION" == "Beta" ]]; then
 else
     EXPECTED_BUNDLE_ID="com.shenminghao.MeetingNotes"
     EXPECTED_DISPLAY_NAME="会议记录"
-    EXPECTED_VERSION="1.3.1"
-    EXPECTED_BUILD="26"
+    EXPECTED_VERSION="1.3.2"
+    EXPECTED_BUILD="27"
 fi
 
 fail_metadata() {

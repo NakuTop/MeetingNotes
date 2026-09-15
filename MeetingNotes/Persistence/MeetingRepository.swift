@@ -44,6 +44,7 @@ final class MeetingRepository {
     private let contextSaver: @MainActor (ModelContext) throws -> Void
     private let detailedMinutesEncoder:
         (GeneratedDetailedMinutes) throws -> EncodedDetailedMinutes
+    private var liveSpeakerHistory: [UUID: (source: TranscriptAudioSource, intervals: [SpeakerInterval], through: TimeInterval)] = [:]
 
     private static var schema: Schema {
         Schema([
@@ -1077,6 +1078,12 @@ final class MeetingRepository {
             sourceRevision: sourceRevision,
             meeting: meeting
         )
+        if let history = liveSpeakerHistory[meetingID] {
+            transcript.source = history.source
+            if end <= history.through {
+                transcript.speakerID = Self.overlappingSpeaker(start: start, end: end, intervals: history.intervals)
+            }
+        }
         context.insert(transcript)
         meeting.updatedAt = .now
         do {
@@ -1102,6 +1109,7 @@ final class MeetingRepository {
             in: replacementContext
         )
         let previousTranscripts = meeting.transcripts
+        let previousSpeakerNames = meeting.speakerNames
         let previousUpdatedAt = meeting.updatedAt
         let contentSnapshot = try beginContentMutation(for: meeting)
         let replacements = drafts.enumerated().map { sequenceIndex, draft in
@@ -1123,6 +1131,25 @@ final class MeetingRepository {
         )
 
         replacements.forEach(replacementContext.insert)
+        if !previousSpeakerNames.isEmpty {
+            let evidence = previousSpeakerNames.map { name in
+                SpeakerNameEvidence(speakerID: name.speakerID, displayName: name.displayName,
+                    intervals: previousTranscripts.filter { $0.speakerID == name.speakerID }.map {
+                        SpeakerNameEvidenceInterval(startTime: $0.startTime, endTime: $0.endTime, source: $0.source)
+                    })
+            }
+            let names = SpeakerNameRemapper().remap(oldNamedSpeakers: evidence, newDrafts: drafts)
+            let renamed = names.compactMap { speakerID, displayName -> SpeakerNameRecord? in
+                let matching = drafts.filter { $0.speakerID == speakerID }
+                guard let start = matching.map(\.transcript.startTime).min(),
+                      let end = matching.map(\.transcript.endTime).max() else { return nil }
+                return SpeakerNameRecord(speakerID: speakerID, displayName: displayName,
+                    evidenceStartTime: start, evidenceEndTime: end, createdAt: .now, updatedAt: .now)
+            }
+            renamed.forEach(replacementContext.insert)
+            meeting.speakerNames = renamed
+            previousSpeakerNames.forEach(replacementContext.delete)
+        }
         meeting.transcripts = replacements
         meeting.updatedAt = .now
         previousTranscripts.forEach(replacementContext.delete)
@@ -1133,10 +1160,86 @@ final class MeetingRepository {
             replacementContext.rollback()
             correctionRebinds.forEach { $0.restore() }
             meeting.transcripts = previousTranscripts
+            meeting.speakerNames = previousSpeakerNames
             meeting.updatedAt = previousUpdatedAt
             contentSnapshot.restore(meeting)
             throw error
         }
+    }
+
+    // Only metadata changes. Row IDs, timestamps, text and manual corrections
+    // stay intact, including when Whisper delivers text after the speaker pass.
+    func applyLiveSpeakerBatch(meetingID: UUID, batch: LiveSpeakerBatch) throws {
+        let meeting = try meeting(id: meetingID)
+        guard meeting.speakerDiarizationRequested,
+              meeting.state == .recording || meeting.state == .paused else { return }
+        if let errorCode = batch.failureCode {
+            let oldState = meeting.speakerProcessingState
+            let oldError = meeting.speakerProcessingErrorCode
+            let oldUpdatedAt = meeting.updatedAt
+            meeting.speakerProcessingState = .degraded
+            meeting.speakerProcessingErrorCode = errorCode
+            meeting.updatedAt = .now
+            do { try saveContext() } catch {
+                meeting.speakerProcessingState = oldState
+                meeting.speakerProcessingErrorCode = oldError
+                meeting.updatedAt = oldUpdatedAt
+                throw error
+            }
+            return
+        }
+        var history = liveSpeakerHistory[meetingID]
+            ?? (source: batch.source, intervals: [], through: 0)
+        guard batch.startTime >= history.through, batch.endTime > batch.startTime else { return }
+        history.intervals.append(contentsOf: batch.intervals)
+        history.through = batch.endTime
+        let changes = meeting.transcripts.compactMap { record -> (TranscriptRecord, String?, String?, String)? in
+            guard record.isFinal, record.endTime <= batch.endTime,
+                  record.endTime > batch.startTime,
+                  let speaker = Self.overlappingSpeaker(start: record.startTime, end: record.endTime, intervals: history.intervals),
+                  record.speakerID != speaker || record.source != batch.source else { return nil }
+            return (record, record.speakerID, record.sourceRawValue, speaker)
+        }
+        if !changes.isEmpty {
+            let previousUpdatedAt = meeting.updatedAt
+            let snapshot = try beginContentMutation(for: meeting)
+            for (record, _, _, speaker) in changes {
+                record.speakerID = speaker
+                record.source = batch.source
+            }
+            meeting.updatedAt = .now
+            do { try saveContext() } catch {
+                for (record, speaker, source, _) in changes {
+                    record.speakerID = speaker
+                    record.sourceRawValue = source
+                }
+                meeting.updatedAt = previousUpdatedAt
+                snapshot.restore(meeting)
+                throw error
+            }
+        }
+        liveSpeakerHistory[meetingID] = history
+    }
+
+    func beginLiveSpeakerAttribution(meetingID: UUID, mode: MeetingMode) {
+        liveSpeakerHistory[meetingID] = (source: mode == .online ? .mixed : .room, intervals: [], through: 0)
+    }
+
+    func endLiveSpeakerAttribution(meetingID: UUID) {
+        liveSpeakerHistory.removeValue(forKey: meetingID)
+    }
+
+    private static func overlappingSpeaker(start: TimeInterval, end: TimeInterval, intervals: [SpeakerInterval]) -> String? {
+        var best: String?
+        var greatestOverlap: TimeInterval = 0
+        for interval in intervals {
+            let overlap = min(end, interval.endTime) - max(start, interval.startTime)
+            if overlap > greatestOverlap {
+                greatestOverlap = overlap
+                best = interval.rawSpeakerID
+            }
+        }
+        return best
     }
 
     func speakerDisplayNames(meetingID: UUID) throws -> [String: String] {

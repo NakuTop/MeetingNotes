@@ -134,8 +134,9 @@ final class SpeakerDiarizationRetryUseCase:
             switch meeting.mode {
             case .offline:
                 replacement = RetryReplacement(
-                    drafts: try await retryOffline(
+                    drafts: try await reattributeMasterTranscripts(
                         meetingID: meetingID,
+                        mode: .offline,
                         transcripts: finalTranscripts
                     ),
                     degradationErrorCode: nil
@@ -189,8 +190,9 @@ final class SpeakerDiarizationRetryUseCase:
         }
     }
 
-    private func retryOffline(
+    private func reattributeMasterTranscripts(
         meetingID: UUID,
+        mode: MeetingMode,
         transcripts: [TranscriptRecord]
     ) async throws -> [AttributedTranscriptDraft] {
         let source: MeetingAudioSource
@@ -214,8 +216,8 @@ final class SpeakerDiarizationRetryUseCase:
             intervalAssigner.assign(
                 drafts,
                 intervals: intervals,
-                speakerPrefix: "room",
-                source: .room
+                speakerPrefix: mode == .online ? "speaker" : "room",
+                source: mode == .online ? .mixed : .room
             )
         )
     }
@@ -241,6 +243,20 @@ final class SpeakerDiarizationRetryUseCase:
                 drafts: try await reattributeTaggedOnlineTranscripts(
                     meetingID: meetingID,
                     tagged: tagged
+                ),
+                degradationErrorCode: nil
+            )
+        }
+
+        if !transcripts.isEmpty {
+            // Untagged live transcripts were recognized from the master mix.
+            // Speaker-only retry must preserve those words (and corrections),
+            // not silently run hours of source-track Whisper decoding again.
+            return RetryReplacement(
+                drafts: try await reattributeMasterTranscripts(
+                    meetingID: meetingID,
+                    mode: .online,
+                    transcripts: transcripts
                 ),
                 degradationErrorCode: nil
             )

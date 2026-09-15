@@ -2,6 +2,21 @@ import XCTest
 @testable import MeetingNotes
 
 final class MeetingCoordinatorTests: XCTestCase {
+    func testLiveSpeakersReceiveTheSameChunksWhileRecordingAndAreCancelledOnStop() async throws {
+        let session = CoordinatorLiveSpeakerSpy()
+        let fixture = makeFixture(packets: [makeOnlinePacket(index: 0)],
+            transcriptionChunkSampleCount: 1, speakerDiarizationEnabled: true,
+            liveSpeakerFactory: CoordinatorLiveSpeakerFactory(session: session))
+        _ = try await fixture.coordinator.start(mode: .online)
+        await session.waitForChunk()
+        let state = await fixture.coordinator.snapshot().state
+        XCTAssertEqual(state, .recording)
+        try await fixture.coordinator.stop()
+        let snapshot = await session.snapshot()
+        XCTAssertGreaterThan(snapshot.chunks, 0)
+        XCTAssertTrue(snapshot.cancelled)
+    }
+
     func testUnexpectedCaptureFailureFinalizesSavedContentAndReportsUser()
         async throws {
         let fixture = makeFixture(
@@ -2197,6 +2212,7 @@ final class MeetingCoordinatorTests: XCTestCase {
         captureSuspendsPause: Bool = false,
         speakerDiarizationEnabled: Bool = false,
         speakerFinalizationOutcome: SpeakerFinalizationOutcome? = nil,
+        liveSpeakerFactory: (any LiveSpeakerSessionCreating)? = nil,
         blockingTranscriptionFactoryOutcome:
             BlockingCoordinatorTranscriptionFactory.Outcome? = nil,
         clockSuspendsNextDateRead: Bool = false,
@@ -2295,6 +2311,7 @@ final class MeetingCoordinatorTests: XCTestCase {
             repository: repository,
             speakerDiarizationPreference: speakerDiarizationPreference,
             speakerFinalizer: speakerFinalizer,
+            liveSpeakerFactory: liveSpeakerFactory,
             panel: panel,
             clock: clock,
             captureHealthScheduler: healthScheduler,
@@ -2530,6 +2547,35 @@ private actor CoordinatorModeLog {
     func values() -> [MeetingMode] {
         modes
     }
+}
+
+private struct CoordinatorLiveSpeakerFactory: LiveSpeakerSessionCreating {
+    let session: CoordinatorLiveSpeakerSpy
+    func makeSession(mode: MeetingMode) -> any LiveSpeakerSession { session }
+}
+
+private actor CoordinatorLiveSpeakerSpy: LiveSpeakerSession {
+    private var continuation: AsyncStream<LiveSpeakerBatch>.Continuation?
+    private var chunks = 0
+    private var cancelled = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func updates() -> AsyncStream<LiveSpeakerBatch> {
+        let pair = AsyncStream<LiveSpeakerBatch>.makeStream()
+        continuation = pair.continuation
+        return pair.stream
+    }
+    func enqueue(samples: [Float], startingAt: TimeInterval) {
+        guard !cancelled else { return }
+        chunks += 1
+        waiters.forEach { $0.resume() }
+        waiters.removeAll()
+    }
+    func cancel() { cancelled = true; continuation?.finish(); continuation = nil }
+    func waitForChunk() async {
+        if chunks > 0 { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func snapshot() -> (chunks: Int, cancelled: Bool) { (chunks, cancelled) }
 }
 
 private actor CoordinatorWriterRequestLog {

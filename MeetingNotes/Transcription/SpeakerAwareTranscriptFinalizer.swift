@@ -272,9 +272,11 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
         diarizationRequested: Bool,
         provisional: [TranscriptDraft]
     ) async -> SpeakerFinalizationOutcome {
-        guard mode == .online else {
-            return await finalizeOffline(
+        guard mode == .online,
+              !diarizationRequested || provisional.isEmpty else {
+            return await finalizeExistingTranscript(
                 meetingID: meetingID,
+                mode: mode,
                 diarizationRequested: diarizationRequested,
                 provisional: provisional
             )
@@ -300,9 +302,11 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
         provisional: [TranscriptDraft],
         transcriptionService: any TranscriptionService
     ) async -> SpeakerFinalizationOutcome {
-        guard mode == .online else {
-            return await finalizeOffline(
+        guard mode == .online,
+              !diarizationRequested || provisional.isEmpty else {
+            return await finalizeExistingTranscript(
                 meetingID: meetingID,
+                mode: mode,
                 diarizationRequested: diarizationRequested,
                 provisional: provisional
             )
@@ -314,8 +318,9 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
         )
     }
 
-    private func finalizeOffline(
+    private func finalizeExistingTranscript(
         meetingID: UUID,
+        mode: MeetingMode,
         diarizationRequested: Bool,
         provisional: [TranscriptDraft]
     ) async -> SpeakerFinalizationOutcome {
@@ -356,8 +361,12 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
                     intervalAssigner.assign(
                         provisional,
                         intervals: intervals,
-                        speakerPrefix: "room",
-                        source: .room
+                        // Live online text comes from the mixed master. Use
+                        // that same audio to attribute it without re-running
+                        // Whisper over both full-length source tracks. Do not
+                        // pretend a mixed sentence is definitely local/remote.
+                        speakerPrefix: mode == .online ? "speaker" : "room",
+                        source: mode == .online ? .mixed : .room
                     )
                 ),
                 sourceRevision: Self.coarseSourceRevision

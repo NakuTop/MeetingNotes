@@ -213,7 +213,13 @@ final class AppContainer {
             transcriptionModelController: transcriptionModelController,
             transcriptionQualityPreference:
                 transcriptionQualityPreference,
-            speakerDiarizer: speakerDiarizer
+            speakerDiarizer: speakerDiarizer,
+            liveSpeakerFactory: FluidAudioLiveSpeakerSessionFactory(
+                modelsDirectory: Self.fluidAudioModelsFolder
+                    .deletingLastPathComponent()
+                    .appendingPathComponent("LiveFluidAudioModels", isDirectory: true)
+                    .appendingPathComponent("speaker-diarization-coreml", isDirectory: true)
+            )
         )
         let coordinator = MeetingCoordinator(
             dependencies: dependencies

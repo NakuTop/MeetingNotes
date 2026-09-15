@@ -81,6 +81,8 @@ actor MeetingCoordinator {
     private var timeline: ActiveRecordingTimeline?
     private var streamTask: Task<Void, Never>?
     private var transcriptPersistenceTask: Task<Bool, Never>?
+    private var liveSpeakerSession: (any LiveSpeakerSession)?
+    private var liveSpeakerPersistenceTask: Task<Void, Never>?
     private var preferredEncounteredSourceDegradation:
         SourceDegradationReason?
     private var pendingSourceDegradationPersistence:
@@ -285,6 +287,21 @@ actor MeetingCoordinator {
             totalSampleCount = 0
             let transcriptUpdates = await createdTranscriber.updates()
             let repository = dependencies.repository
+            if speakerDiarizationRequested, let factory = dependencies.liveSpeakerFactory {
+                let session = factory.makeSession(mode: mode)
+                liveSpeakerSession = session
+                let updates = await session.updates()
+                await repository.beginLiveSpeakerAttribution(meetingID: createdID, mode: mode)
+                try throwIfDiscardRequested(for: createdID)
+                liveSpeakerPersistenceTask = Task {
+                    for await batch in updates {
+                        guard !Task.isCancelled else { break }
+                        try? await repository.applyLiveSpeakerBatch(meetingID: createdID, batch: batch)
+                    }
+                    await session.cancel()
+                    await repository.endLiveSpeakerAttribution(meetingID: createdID)
+                }
+            }
             transcriptPersistenceTask = Task {
                 var allWritesSucceeded = true
                 for await draft in transcriptUpdates {
@@ -309,6 +326,7 @@ actor MeetingCoordinator {
             try throwIfDiscardRequested(for: createdID)
             return createdID
         } catch {
+            await stopLiveSpeakerAttribution()
             let discarded = newMeetingID.map {
                 discardRequestedMeetingIDs.contains($0)
             } ?? false
@@ -468,6 +486,7 @@ actor MeetingCoordinator {
             state: .finalizing
         )
         stateMachine = finalizingMachine
+        await stopLiveSpeakerAttribution()
         await dependencies.recordingPresentation.finish(
             meetingID: meetingID,
             activeDuration: activeDuration
@@ -664,6 +683,7 @@ actor MeetingCoordinator {
                 / AudioSegmentManifest.transcriptionSampleRate
             nextTranscriptionSampleOffset += chunk.count
             await transcriber.enqueue(samples: chunk, startingAt: startingAt)
+            await liveSpeakerSession?.enqueue(samples: chunk, startingAt: startingAt)
         }
     }
 
@@ -1119,6 +1139,7 @@ actor MeetingCoordinator {
     }
 
     private func discardActiveMeeting(id: UUID) async {
+        await stopLiveSpeakerAttribution()
         invalidateCaptureHealthMonitoring()
         let captureTask = streamTask
         if let capture {
@@ -1147,6 +1168,9 @@ actor MeetingCoordinator {
     }
 
     private func resetAfterFailedStart() {
+        liveSpeakerPersistenceTask?.cancel()
+        liveSpeakerPersistenceTask = nil
+        liveSpeakerSession = nil
         stateMachine = RecordingStateMachine()
         meetingID = nil
         mode = nil
@@ -1208,6 +1232,9 @@ actor MeetingCoordinator {
     }
 
     private func releaseActiveResources() {
+        liveSpeakerPersistenceTask?.cancel()
+        liveSpeakerPersistenceTask = nil
+        liveSpeakerSession = nil
         capture = nil
         masterWriter = nil
         sourceWriters.removeAll(keepingCapacity: true)
@@ -1221,6 +1248,18 @@ actor MeetingCoordinator {
         totalSampleCount = 0
         captureHealthMonitors.removeAll(keepingCapacity: true)
         invalidateCaptureHealthMonitoring()
+    }
+
+    private func stopLiveSpeakerAttribution() async {
+        let id = meetingID
+        let session = liveSpeakerSession
+        let persistence = liveSpeakerPersistenceTask
+        liveSpeakerSession = nil
+        liveSpeakerPersistenceTask = nil
+        await session?.cancel()
+        persistence?.cancel()
+        await persistence?.value
+        if let id { await dependencies.repository.endLiveSpeakerAttribution(meetingID: id) }
     }
 }
 

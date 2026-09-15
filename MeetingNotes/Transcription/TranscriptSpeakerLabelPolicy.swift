@@ -30,7 +30,13 @@ enum TranscriptSpeakerLabelPolicy {
                 prefix: "room",
                 labelPrefix: "说话人"
             )
-        case (_, .microphone), (_, .mixed):
+        case (_, .mixed):
+            return numberedLabel(
+                speakerID: speakerID,
+                prefix: "speaker",
+                labelPrefix: "说话人"
+            )
+        case (_, .microphone):
             return nil
         }
     }

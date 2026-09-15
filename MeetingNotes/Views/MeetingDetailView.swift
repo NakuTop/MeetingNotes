@@ -57,7 +57,6 @@ struct MeetingDetailView: View {
     @State private var titleDraft = ""
     @State private var renameTask: Task<Void, Never>?
     @State private var documentOperationTask: Task<Void, Never>?
-    @State private var speakerDiarizationTask: Task<Void, Never>?
     @State private var renameGeneration = 0
     @State private var transcriptMeetingID: UUID?
     @State private var transcriptIsExpanded = true
@@ -111,7 +110,6 @@ struct MeetingDetailView: View {
         .onDisappear {
             invalidateRenameTask()
             invalidateDocumentOperationTask()
-            invalidateSpeakerDiarizationTask()
             flushMeetingEdits()
         }
         .sheet(
@@ -862,11 +860,6 @@ struct MeetingDetailView: View {
         documentOperationTask = nil
     }
 
-    private func invalidateSpeakerDiarizationTask() {
-        speakerDiarizationTask?.cancel()
-        speakerDiarizationTask = nil
-    }
-
     private func hasSelectedDocument(_ meeting: MeetingRecord) -> Bool {
         switch viewModel.selectedDocumentKind {
         case .summary: meeting.summary != nil
@@ -894,6 +887,10 @@ struct MeetingDetailView: View {
                 Text(statusMessage)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                if viewModel.isRetryingSpeakerDiarization {
+                    Button("取消分离") { viewModel.cancelSpeakerDiarizationRetry() }
+                        .buttonStyle(.borderless)
+                }
             }
             .accessibilityIdentifier("meeting.speakerProcessingStatus")
         }
@@ -908,10 +905,7 @@ struct MeetingDetailView: View {
                 Spacer()
                 if viewModel.shouldShowSpeakerDiarizationRetryAction {
                     Button("重新分离说话人") {
-                        invalidateSpeakerDiarizationTask()
-                        speakerDiarizationTask = Task { @MainActor [viewModel] in
-                            await viewModel.retrySpeakerDiarization()
-                        }
+                        viewModel.startSpeakerDiarizationRetry()
                     }
                     .buttonStyle(.bordered)
                     .disabled(

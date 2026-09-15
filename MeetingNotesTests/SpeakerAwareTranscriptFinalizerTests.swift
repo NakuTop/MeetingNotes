@@ -2,6 +2,35 @@ import XCTest
 @testable import MeetingNotes
 
 final class SpeakerAwareTranscriptFinalizerTests: XCTestCase {
+    func testOnlineSpeakerOnlyFinalizationUsesMasterAndNeverRetranscribesExistingWords() async {
+        let id = UUID()
+        let service = FakeSpeakerFinalizationTranscriptionService(responses: [:])
+        let diarizer = FakeSpeakerDiarizer(result: .success([
+            .init(rawSpeakerID: "a", startTime: 0, endTime: 1),
+            .init(rawSpeakerID: "b", startTime: 1, endTime: 2),
+        ]))
+        let source = makeSpeakerFinalizationSource(meetingID: id)
+        let finalizer = SpeakerAwareTranscriptFinalizer(
+            reader: FakeMeetingTrackAudioReader(chunksByTrack: [:]),
+            sourceLoader: FakeSpeakerAudioSourceLoader(sources: [.master: source]),
+            diarizer: diarizer
+        )
+        let original = [
+            TranscriptDraft(startTime: 0, endTime: 1, text: "原文一"),
+            TranscriptDraft(startTime: 1, endTime: 2, text: "原文二"),
+        ]
+        let result = await finalizer.finalize(meetingID: id, mode: .online,
+            diarizationRequested: true, provisional: original, transcriptionService: service)
+        guard case let .replacement(drafts, _) = result else { return XCTFail("Expected labels") }
+        XCTAssertEqual(drafts.map(\.transcript), original)
+        XCTAssertEqual(drafts.map(\.source), [.mixed, .mixed])
+        XCTAssertEqual(drafts.map(\.speakerID), ["speaker-1", "speaker-2"])
+        let transcribed = await service.recordedStarts()
+        let sources = await diarizer.recordedSources()
+        XCTAssertTrue(transcribed.isEmpty)
+        XCTAssertEqual(sources, [source])
+    }
+
     func testOnlineFinalizationDelegatesTrackReconstruction() async {
         let meetingID = UUID()
         let expected = SpeakerFinalizationOutcome.replacement(

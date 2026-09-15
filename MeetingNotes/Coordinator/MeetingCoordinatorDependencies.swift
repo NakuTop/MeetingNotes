@@ -203,6 +203,9 @@ protocol MeetingLifecycleRepository: Sendable {
     func updateState(meetingID: UUID, state: RecordingState) async throws
     func appendBookmark(meetingID: UUID, timestamp: TimeInterval) async throws
     func appendTranscript(meetingID: UUID, draft: TranscriptDraft) async throws
+    func applyLiveSpeakerBatch(meetingID: UUID, batch: LiveSpeakerBatch) async throws
+    func beginLiveSpeakerAttribution(meetingID: UUID, mode: MeetingMode) async
+    func endLiveSpeakerAttribution(meetingID: UUID) async
     func replaceTranscripts(
         meetingID: UUID,
         drafts: [AttributedTranscriptDraft],
@@ -226,6 +229,12 @@ protocol MeetingLifecycleRepository: Sendable {
         lastErrorCode: String
     ) async throws
     func deleteMeeting(meetingID: UUID) async throws
+}
+
+extension MeetingLifecycleRepository {
+    func beginLiveSpeakerAttribution(meetingID: UUID, mode: MeetingMode) async {}
+    func applyLiveSpeakerBatch(meetingID: UUID, batch: LiveSpeakerBatch) async throws {}
+    func endLiveSpeakerAttribution(meetingID: UUID) async {}
 }
 
 protocol RecordingPanelPresenting: Sendable {
@@ -258,6 +267,7 @@ struct MeetingCoordinatorDependencies: Sendable {
     let speakerDiarizationPreference:
         any SpeakerDiarizationPreferenceReading
     let speakerFinalizer: any MeetingSpeakerFinalizing
+    let liveSpeakerFactory: (any LiveSpeakerSessionCreating)?
     let panel: any RecordingPanelPresenting
     let clock: any MeetingClock
     let captureHealthScheduler: any CaptureHealthCheckScheduling
@@ -276,6 +286,7 @@ struct MeetingCoordinatorDependencies: Sendable {
             any SpeakerDiarizationPreferenceReading,
         speakerFinalizer: any MeetingSpeakerFinalizing =
             UnchangedMeetingSpeakerFinalizer(),
+        liveSpeakerFactory: (any LiveSpeakerSessionCreating)? = nil,
         panel: any RecordingPanelPresenting,
         clock: any MeetingClock,
         captureHealthScheduler: any CaptureHealthCheckScheduling =
@@ -294,6 +305,7 @@ struct MeetingCoordinatorDependencies: Sendable {
         self.repository = repository
         self.speakerDiarizationPreference = speakerDiarizationPreference
         self.speakerFinalizer = speakerFinalizer
+        self.liveSpeakerFactory = liveSpeakerFactory
         self.panel = panel
         self.clock = clock
         self.captureHealthScheduler = captureHealthScheduler
@@ -532,6 +544,18 @@ final class MeetingRepositoryLifecycleAdapter: MeetingLifecycleRepository {
         )
     }
 
+    func applyLiveSpeakerBatch(meetingID: UUID, batch: LiveSpeakerBatch) async throws {
+        try repository.applyLiveSpeakerBatch(meetingID: meetingID, batch: batch)
+    }
+
+    func beginLiveSpeakerAttribution(meetingID: UUID, mode: MeetingMode) async {
+        repository.beginLiveSpeakerAttribution(meetingID: meetingID, mode: mode)
+    }
+
+    func endLiveSpeakerAttribution(meetingID: UUID) async {
+        repository.endLiveSpeakerAttribution(meetingID: meetingID)
+    }
+
     func markSpeakerProcessingStarted(meetingID: UUID) async throws {
         try repository.markSpeakerProcessingStarted(meetingID: meetingID)
     }
@@ -630,7 +654,8 @@ extension MeetingCoordinatorDependencies {
         transcriptionModelController: any TranscriptionModelControlling,
         transcriptionQualityPreference:
             any TranscriptionQualityPreferenceReading,
-        speakerDiarizer: any SpeakerDiarizing
+        speakerDiarizer: any SpeakerDiarizing,
+        liveSpeakerFactory: (any LiveSpeakerSessionCreating)? = nil
     ) -> MeetingCoordinatorDependencies {
         let sourceLoader = sourceLoader
             ?? MeetingAudioSourceLoader(fileStore: fileStore)
@@ -654,6 +679,7 @@ extension MeetingCoordinatorDependencies {
                 sourceLoader: sourceLoader,
                 diarizer: speakerDiarizer
             ),
+            liveSpeakerFactory: liveSpeakerFactory,
             panel: panel,
             clock: SystemMeetingClock(),
             recordingPresentation: recordingPresentation,

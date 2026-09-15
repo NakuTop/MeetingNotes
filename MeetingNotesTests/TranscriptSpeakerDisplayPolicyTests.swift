@@ -2,6 +2,11 @@ import XCTest
 @testable import MeetingNotes
 
 final class TranscriptSpeakerDisplayPolicyTests: XCTestCase {
+    func testMixedMasterSpeakersGetNeutralLabelsWithoutClaimingLocalOrRemote() {
+        XCTAssertEqual(TranscriptSpeakerLabelPolicy.label(speakerID: "speaker-2", source: .mixed), "说话人 2")
+        XCTAssertNil(TranscriptSpeakerLabelPolicy.label(speakerID: "me", source: .mixed))
+        XCTAssertNil(TranscriptSpeakerLabelPolicy.label(speakerID: "remote-1", source: .mixed))
+    }
     func testSemanticLabelPolicyExactlyMatchesEverySupportedCurrentRule() {
         XCTAssertEqual(
             TranscriptSpeakerLabelPolicy.label(

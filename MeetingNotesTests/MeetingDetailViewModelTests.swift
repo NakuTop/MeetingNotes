@@ -1572,6 +1572,32 @@ final class MeetingDetailViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.canRetrySpeakerDiarization)
     }
 
+    func testViewIndependentSpeakerRetryOwnsTaskUntilCompletion() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let id = try repository.createMeeting(mode: .online, startedAt: .now, speakerDiarizationRequested: true)
+        let meeting = try repository.meeting(id: id)
+        meeting.speakerProcessingState = .degraded
+        try repository.updateMeetingState(id: id, state: .ready)
+        let retryer = BlockingDetailSpeakerRetryer {
+            meeting.speakerProcessingState = .completed
+            try repository.updateMeetingState(id: id, state: .ready)
+        }
+        let viewModel = MeetingDetailViewModel(meetingID: id, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy(), speakerDiarizationRetryer: retryer)
+        viewModel.startSpeakerDiarizationRetry()
+        await retryer.waitUntilStarted()
+        // Reloading/revisiting the cached model must neither cancel nor restart.
+        viewModel.load()
+        viewModel.startSpeakerDiarizationRetry()
+        XCTAssertEqual(retryer.requests, [id])
+        XCTAssertTrue(viewModel.isRetryingSpeakerDiarization)
+        retryer.finish()
+        await viewModel.waitForSpeakerDiarizationRetry()
+        XCTAssertFalse(viewModel.isRetryingSpeakerDiarization)
+        XCTAssertEqual(viewModel.speakerProcessingState, .completed)
+    }
+
     func testArchiveFailureReloadsSummaryReadyAndShowsRetryMessage() async throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(

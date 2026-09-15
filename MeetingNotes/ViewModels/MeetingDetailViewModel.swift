@@ -235,6 +235,8 @@ final class MeetingDetailViewModel {
     private(set) var isRenaming = false
     private(set) var renameErrorMessage: String?
     private(set) var isRetryingSpeakerDiarization = false
+    @ObservationIgnored
+    private var speakerRetryTask: Task<Void, Never>?
     private(set) var speakerDiarizationRetryErrorMessage: String?
     private(set) var speakerNameErrorMessage: String?
     private(set) var replacementPreview: MeetingExactReplacementPreview?
@@ -1080,6 +1082,10 @@ final class MeetingDetailViewModel {
         if isInterruptedSpeakerDiarizationRetry {
             return nil
         }
+        if speakerProcessingState == .pending,
+           meeting?.state == .recording || meeting?.state == .paused {
+            return "录制中自动分批标注说话人，结束后校准…"
+        }
         return switch speakerProcessingState {
         case .pending:
             "正在准备说话人区分…"
@@ -1098,6 +1104,9 @@ final class MeetingDetailViewModel {
             return nil
         }
         let errorCode = meeting?.speakerProcessingErrorCode
+        if errorCode == "speaker_live_preview_failed" {
+            return "实时说话人标记暂不可用，录音与转录会继续，结束后再分离。"
+        }
         if errorCode == SpeakerDiarizationRetryUseCase.sourceUnavailableCode {
             if meeting?.mode == .online {
                 return "原始分轨录音仍可用于重建，请重新分离说话人。"
@@ -1155,6 +1164,7 @@ final class MeetingDetailViewModel {
 
     var shouldShowSpeakerDiarizationRetryAction: Bool {
         guard speakerDiarizationRetryer != nil,
+              meeting?.state.allowsInterruptedSpeakerDiarizationRetryRecovery == true,
               !isRetryingSpeakerDiarization else {
             return false
         }
@@ -1308,6 +1318,24 @@ final class MeetingDetailViewModel {
                 "说话人分离重试失败，原有转录已保留。"
         }
         load()
+    }
+
+    // AppContainer retains this model across navigation; the view must not
+    // cancel a long-running local operation merely because it disappears.
+    func startSpeakerDiarizationRetry() {
+        guard speakerRetryTask == nil, canRetrySpeakerDiarization else { return }
+        speakerRetryTask = Task { [weak self] in
+            await self?.retrySpeakerDiarization()
+            self?.speakerRetryTask = nil
+        }
+    }
+
+    func cancelSpeakerDiarizationRetry() {
+        speakerRetryTask?.cancel()
+    }
+
+    func waitForSpeakerDiarizationRetry() async {
+        await speakerRetryTask?.value
     }
 
     private var isRecordingActive: Bool {
