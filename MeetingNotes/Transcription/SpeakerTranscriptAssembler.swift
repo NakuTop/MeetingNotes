@@ -19,10 +19,17 @@ struct SpeakerTranscriptAssembler: Sendable {
                     transcript: TranscriptDraft(
                         startTime: draft.transcript.startTime,
                         endTime: draft.transcript.endTime,
-                        text: text
+                        text: text,
+                        words: TranscriptWordAlignment.retainingWords(
+                            draft.transcript.words, for: text,
+                            startTime: draft.transcript.startTime, endTime: draft.transcript.endTime
+                        )
                     ),
                     speakerID: draft.speakerID,
-                    source: draft.source
+                    source: draft.source,
+                    attributionStatus: draft.attributionStatus,
+                    sourceEvidence: draft.sourceEvidence,
+                    attributionOrigin: draft.attributionOrigin
                 )
             )
         }

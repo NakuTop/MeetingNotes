@@ -528,7 +528,8 @@ final class MeetingRepositoryLifecycleAdapter: MeetingLifecycleRepository {
             meetingID: meetingID,
             start: draft.startTime,
             end: draft.endTime,
-            text: draft.text
+            text: draft.text,
+            words: draft.words
         )
     }
 
@@ -677,7 +678,8 @@ extension MeetingCoordinatorDependencies {
                     sourceLoader: sourceLoader
                 ),
                 sourceLoader: sourceLoader,
-                diarizer: speakerDiarizer
+                diarizer: speakerDiarizer,
+                sourceReviewer: OnlineSpeakerSourceReviewer(reader: MeetingTrackAudioReader(sourceLoader: sourceLoader))
             ),
             liveSpeakerFactory: liveSpeakerFactory,
             panel: panel,

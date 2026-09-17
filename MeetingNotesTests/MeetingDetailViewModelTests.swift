@@ -1544,7 +1544,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.speakerProcessingWarningMessage)
     }
 
-    func testSpeakerRetryIsOnlyAvailableForDegradedMeetingWithRetryService()
+    func testSpeakerCalibrationIsAvailableForCompletedAndDegradedMeetings()
         throws {
         let repository = try MeetingRepository.inMemory()
         let meetingID = try repository.createMeeting(
@@ -1568,6 +1568,10 @@ final class MeetingDetailViewModelTests: XCTestCase {
 
         meeting.speakerProcessingState = .completed
         try repository.updateMeetingState(id: meetingID, state: .ready)
+        viewModel.load()
+        XCTAssertTrue(viewModel.canRetrySpeakerDiarization)
+        XCTAssertTrue(viewModel.canRecalibrateCompletedSpeakers)
+        try repository.updateMeetingState(id: meetingID, state: .recording)
         viewModel.load()
         XCTAssertFalse(viewModel.canRetrySpeakerDiarization)
     }

@@ -1150,6 +1150,9 @@ final class MeetingDetailViewModel {
         if errorCode == SpeakerDiarizationRetryUseCase.cancelledCode {
             return "说话人分离已取消，原有转录已保留。"
         }
+        if errorCode == SpeakerDiarizationRetryUseCase.speakerCountMismatchCode {
+            return "识别到的说话人数与指定人数不一致，已保留有依据的标记，请核对待确认片段。"
+        }
         if errorCode?.hasPrefix("source_track_") == true {
             return "部分分轨处理失败，已使用可用录音和转录，不影响播放、总结与同步。"
         }
@@ -1181,11 +1184,20 @@ final class MeetingDetailViewModel {
     }
 
     var canRetrySpeakerDiarization: Bool {
-        shouldShowSpeakerDiarizationRetryAction
+        (shouldShowSpeakerDiarizationRetryAction || canRecalibrateCompletedSpeakers)
             && !isPerforming
             && !isRenaming
             && documentOperation == .idle
     }
+
+    var canRecalibrateCompletedSpeakers: Bool {
+        speakerDiarizationRetryer != nil
+            && meeting?.state.allowsInterruptedSpeakerDiarizationRetryRecovery == true
+            && speakerProcessingState == .completed
+            && !isRetryingSpeakerDiarization
+    }
+
+    var speakerCountLabel: String { meeting?.speakerCountConstraint.label ?? "自动判断" }
 
     func load() {
         do {
@@ -1297,7 +1309,7 @@ final class MeetingDetailViewModel {
         dismissedSpeakerProcessingWarningKey = speakerProcessingWarningKey
     }
 
-    func retrySpeakerDiarization() async {
+    func retrySpeakerDiarization(speakerCount: SpeakerCountConstraint? = nil) async {
         guard canRetrySpeakerDiarization,
               let speakerDiarizationRetryer else {
             return
@@ -1308,7 +1320,11 @@ final class MeetingDetailViewModel {
         defer { isRetryingSpeakerDiarization = false }
 
         do {
-            try await speakerDiarizationRetryer.retry(meetingID: meetingID)
+            if let speakerCount {
+                try await speakerDiarizationRetryer.retry(meetingID: meetingID, speakerCount: speakerCount)
+            } else {
+                try await speakerDiarizationRetryer.retry(meetingID: meetingID)
+            }
         } catch is CancellationError {
             // Cancellation is reflected by the persisted speaker state.
         } catch let error as SpeakerDiarizationRetryError {
@@ -1322,10 +1338,10 @@ final class MeetingDetailViewModel {
 
     // AppContainer retains this model across navigation; the view must not
     // cancel a long-running local operation merely because it disappears.
-    func startSpeakerDiarizationRetry() {
+    func startSpeakerDiarizationRetry(speakerCount: SpeakerCountConstraint? = nil) {
         guard speakerRetryTask == nil, canRetrySpeakerDiarization else { return }
         speakerRetryTask = Task { [weak self] in
-            await self?.retrySpeakerDiarization()
+            await self?.retrySpeakerDiarization(speakerCount: speakerCount)
             self?.speakerRetryTask = nil
         }
     }

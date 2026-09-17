@@ -99,13 +99,13 @@ EXPECTED_MICROPHONE_USAGE_DESCRIPTION="用于录制并转录会议中的麦克�
 if [[ "$CONFIGURATION" == "Beta" ]]; then
     EXPECTED_BUNDLE_ID="com.shenminghao.MeetingNotes.beta"
     EXPECTED_DISPLAY_NAME="会议记录 Beta"
-    EXPECTED_VERSION="1.3.1"
-    EXPECTED_BUILD="25"
+    EXPECTED_VERSION="1.3.3"
+    EXPECTED_BUILD="28"
 else
     EXPECTED_BUNDLE_ID="com.shenminghao.MeetingNotes"
     EXPECTED_DISPLAY_NAME="会议记录"
-    EXPECTED_VERSION="1.3.2"
-    EXPECTED_BUILD="27"
+    EXPECTED_VERSION="1.3.3"
+    EXPECTED_BUILD="28"
 fi
 
 fail_metadata() {

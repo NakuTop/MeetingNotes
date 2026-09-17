@@ -2,6 +2,22 @@ import XCTest
 @testable import MeetingNotes
 
 final class TranscriptSpeakerDisplayPolicyTests: XCTestCase {
+    @MainActor
+    func testUncertainAndOverlapBadgesSurviveStoredAndEditedPresentation() {
+        let transcript = TranscriptRecord(startTime: 0, endTime: 2, text: "需要核对的发言", isFinal: true,
+                                          sourceRawValue: TranscriptAudioSource.room.rawValue,
+                                          attributionStatus: .overlapping, sourceEvidence: .possibleEcho)
+        let entries = TranscriptDisplayPolicy.entries(from: [transcript])
+        XCTAssertEqual(entries.first?.attributionStatus, .overlapping)
+        XCTAssertEqual(entries.first?.sourceEvidence, .possibleEcho)
+        let turns = TranscriptDisplayPolicy.turns(from: [transcript], bookmarks: [])
+        XCTAssertEqual(turns.first?.attributionStatus, .overlapping)
+        XCTAssertEqual(turns.first?.sourceEvidence, .possibleEcho)
+        XCTAssertEqual(TranscriptSpeakerDisplayPolicy.badge(speakerID: nil, source: .room,
+                                                           attributionStatus: .overlapping)?.label, "重叠发言")
+        XCTAssertEqual(TranscriptSpeakerDisplayPolicy.badge(speakerID: nil, source: .room,
+                                                           attributionStatus: .uncertain)?.label, "说话人待确认")
+    }
     func testMixedMasterSpeakersGetNeutralLabelsWithoutClaimingLocalOrRemote() {
         XCTAssertEqual(TranscriptSpeakerLabelPolicy.label(speakerID: "speaker-2", source: .mixed), "说话人 2")
         XCTAssertNil(TranscriptSpeakerLabelPolicy.label(speakerID: "me", source: .mixed))

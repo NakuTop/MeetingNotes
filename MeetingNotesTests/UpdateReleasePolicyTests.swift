@@ -486,7 +486,7 @@ final class UpdateReleasePolicyTests: XCTestCase {
         )
     }
 
-    func testStableReleaseIdentityIs132Build27() throws {
+    func testStableReleaseIdentityIs133Build28() throws {
         let projectYAML = try repositoryText("project.yml")
         let project = try repositoryText(
             "MeetingNotes.xcodeproj/project.pbxproj"
@@ -500,8 +500,8 @@ final class UpdateReleasePolicyTests: XCTestCase {
             endingBefore: "packages:"
         )
 
-        XCTAssertTrue(baseSettings.contains("CURRENT_PROJECT_VERSION: 27"))
-        XCTAssertTrue(baseSettings.contains("MARKETING_VERSION: 1.3.2"))
+        XCTAssertTrue(baseSettings.contains("CURRENT_PROJECT_VERSION: 28"))
+        XCTAssertTrue(baseSettings.contains("MARKETING_VERSION: 1.3.3"))
         XCTAssertTrue(baseSettings.contains("MEETINGNOTES_DISPLAY_NAME: 会议记录"))
         XCTAssertTrue(
             projectYAML.contains(
@@ -510,17 +510,17 @@ final class UpdateReleasePolicyTests: XCTestCase {
         )
         XCTAssertNotNil(
             project.range(
-                of: #"/\* Release \*/ = \{isa = XCBuildConfiguration;[\s\S]*?CURRENT_PROJECT_VERSION = 27;[\s\S]*?MARKETING_VERSION = 1\.3\.2;[\s\S]*?MEETINGNOTES_DISPLAY_NAME = \"会议记录\";[\s\S]*?PRODUCT_BUNDLE_IDENTIFIER = com\.shenminghao\.MeetingNotes;"#,
+                of: #"/\* Release \*/ = \{isa = XCBuildConfiguration;[\s\S]*?CURRENT_PROJECT_VERSION = 28;[\s\S]*?MARKETING_VERSION = 1\.3\.3;[\s\S]*?MEETINGNOTES_DISPLAY_NAME = \"会议记录\";[\s\S]*?PRODUCT_BUNDLE_IDENTIFIER = com\.shenminghao\.MeetingNotes;"#,
                 options: .regularExpression
             )
         )
         XCTAssertTrue(
-            packager.contains("EXPECTED_VERSION=\"1.3.2\"")
+            packager.contains("EXPECTED_VERSION=\"1.3.3\"")
         )
-        XCTAssertTrue(packager.contains("EXPECTED_BUILD=\"27\""))
+        XCTAssertTrue(packager.contains("EXPECTED_BUILD=\"28\""))
     }
 
-    func testBetaReleaseIdentityIs131Build25() throws {
+    func testBetaReleaseIdentityIs133Build28() throws {
         let projectYAML = try repositoryText("project.yml")
         let project = try repositoryText(
             "MeetingNotes.xcodeproj/project.pbxproj"
@@ -544,8 +544,8 @@ final class UpdateReleasePolicyTests: XCTestCase {
             endingBefore: "fi\n\nfail_metadata"
         )
 
-        XCTAssertTrue(betaYAML.contains("MARKETING_VERSION: 1.3.1"))
-        XCTAssertTrue(betaYAML.contains("CURRENT_PROJECT_VERSION: 25"))
+        XCTAssertTrue(betaYAML.contains("MARKETING_VERSION: 1.3.3"))
+        XCTAssertTrue(betaYAML.contains("CURRENT_PROJECT_VERSION: 28"))
         XCTAssertTrue(
             betaYAML.contains(
                 "PRODUCT_BUNDLE_IDENTIFIER: com.shenminghao.MeetingNotes.beta"
@@ -556,14 +556,14 @@ final class UpdateReleasePolicyTests: XCTestCase {
         )
         XCTAssertNotNil(
             project.range(
-                of: #"/\* Beta \*/ = \{isa = XCBuildConfiguration;[\s\S]*?CURRENT_PROJECT_VERSION = 25;[\s\S]*?MARKETING_VERSION = 1\.3\.1;[\s\S]*?MEETINGNOTES_DISPLAY_NAME = "会议记录 Beta";[\s\S]*?PRODUCT_BUNDLE_IDENTIFIER = com\.shenminghao\.MeetingNotes\.beta;"#,
+                of: #"/\* Beta \*/ = \{isa = XCBuildConfiguration;[\s\S]*?CURRENT_PROJECT_VERSION = 28;[\s\S]*?MARKETING_VERSION = 1\.3\.3;[\s\S]*?MEETINGNOTES_DISPLAY_NAME = "会议记录 Beta";[\s\S]*?PRODUCT_BUNDLE_IDENTIFIER = com\.shenminghao\.MeetingNotes\.beta;"#,
                 options: .regularExpression
             )
         )
-        XCTAssertTrue(betaPackager.contains("EXPECTED_VERSION=\"1.3.1\""))
-        XCTAssertTrue(betaPackager.contains("EXPECTED_BUILD=\"25\""))
-        XCTAssertTrue(stablePackager.contains("EXPECTED_VERSION=\"1.3.2\""))
-        XCTAssertTrue(stablePackager.contains("EXPECTED_BUILD=\"27\""))
+        XCTAssertTrue(betaPackager.contains("EXPECTED_VERSION=\"1.3.3\""))
+        XCTAssertTrue(betaPackager.contains("EXPECTED_BUILD=\"28\""))
+        XCTAssertTrue(stablePackager.contains("EXPECTED_VERSION=\"1.3.3\""))
+        XCTAssertTrue(stablePackager.contains("EXPECTED_BUILD=\"28\""))
     }
 
     func testPackagerExpandsAndVerifiesFinalSparkleEntitlements()

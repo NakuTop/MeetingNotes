@@ -40,6 +40,17 @@ final class MeetingRecord {
     var speakerDiarizationRequestedBacking: Bool?
     var speakerProcessingStateRawValue: String?
     var speakerProcessingErrorCode: String?
+    var speakerCountConstraintData: Data?
+
+    var speakerCountConstraint: SpeakerCountConstraint {
+        get {
+            guard let data = speakerCountConstraintData,
+                  let value = try? JSONDecoder().decode(SpeakerCountConstraint.self, from: data),
+                  value.isValid else { return .automatic }
+            return value
+        }
+        set { speakerCountConstraintData = try? JSONEncoder().encode(newValue) }
+    }
 
     @Relationship(deleteRule: .cascade, inverse: \TranscriptRecord.meeting)
     var transcripts: [TranscriptRecord] = []

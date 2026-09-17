@@ -4,6 +4,47 @@ import SwiftData
 
 @MainActor
 final class SpeakerDiarizationRetryUseCaseTests: XCTestCase {
+    func testFourAndFiveSpeakerConstraintsArePerMeetingAndReachDiarizer() async throws {
+        for count in [4, 5] {
+            let repository = try makeRetryableMeeting(mode: .offline)
+            let meeting = try XCTUnwrap(repository.meetings().first)
+            let intervals = (0..<count).map {
+                SpeakerInterval(rawSpeakerID: "s\($0)", startTime: Double($0), endTime: Double($0 + 1))
+            }
+            for interval in intervals {
+                try repository.appendTranscript(meetingID: meeting.id, start: interval.startTime,
+                                                end: interval.endTime, text: "保留文字")
+            }
+            let other = try repository.createMeeting(mode: .offline, startedAt: .now)
+            let diarizer = RetrySpeakerDiarizer(result: .success(intervals))
+            let useCase = SpeakerDiarizationRetryUseCase(repository: repository,
+                sourceLoader: RetryAudioSourceLoader(meetingID: meeting.id), diarizer: diarizer, operationGate: MeetingOperationGate())
+            try await useCase.retry(meetingID: meeting.id, speakerCount: .exact(count))
+            let recorded = await diarizer.requestedCounts()
+            XCTAssertEqual(recorded, [.exact(count)])
+            XCTAssertEqual(try repository.meeting(id: meeting.id).speakerCountConstraint, .exact(count))
+            XCTAssertEqual(try repository.meeting(id: other).speakerCountConstraint, .automatic)
+            XCTAssertEqual(try repository.meeting(id: meeting.id).speakerProcessingState, .completed)
+            try await useCase.retry(meetingID: meeting.id, speakerCount: .automatic)
+            let reset = await diarizer.requestedCounts()
+            XCTAssertEqual(reset, [.exact(count), .automatic])
+        }
+    }
+
+    func testUnmetSpeakerCountWarnsInsteadOfInventingPeople() async throws {
+        let repository = try makeRetryableMeeting(mode: .offline)
+        let id = try XCTUnwrap(repository.meetings().first).id
+        try repository.appendTranscript(meetingID: id, start: 0, end: 1, text: "唯一可靠发言")
+        let useCase = SpeakerDiarizationRetryUseCase(repository: repository, sourceLoader: RetryAudioSourceLoader(meetingID: id),
+            diarizer: RetrySpeakerDiarizer(result: .success([.init(rawSpeakerID: "one", startTime: 0, endTime: 1)])),
+            operationGate: MeetingOperationGate())
+        try await useCase.retry(meetingID: id, speakerCount: .exact(4))
+        let meeting = try repository.meeting(id: id)
+        XCTAssertEqual(meeting.speakerProcessingState, .degraded)
+        XCTAssertEqual(meeting.speakerProcessingErrorCode, SpeakerDiarizationRetryUseCase.speakerCountMismatchCode)
+        XCTAssertEqual(try repository.transcripts(meetingID: id).map(\.text), ["唯一可靠发言"])
+        XCTAssertEqual(Set(try repository.transcripts(meetingID: id).compactMap(\.speakerID)).count, 1)
+    }
     func testOfflineRetryUsesMasterAudioAndOnlyReattributesExistingFinalText()
         async throws {
         let repository = try makeRetryableMeeting(mode: .offline)
@@ -872,6 +913,7 @@ private actor RetryAudioSourceLoader: MeetingTrackAudioSourceLoading {
 private actor RetrySpeakerDiarizer: SpeakerDiarizing {
     private let result: Result<[SpeakerInterval], Error>
     private var calls = 0
+    private var counts: [SpeakerCountConstraint] = []
 
     init(result: Result<[SpeakerInterval], Error>) {
         self.result = result
@@ -885,6 +927,11 @@ private actor RetrySpeakerDiarizer: SpeakerDiarizing {
     }
 
     func callCount() -> Int { calls }
+    func diarize(source: MeetingAudioSource, speakerCount: SpeakerCountConstraint) async throws -> [SpeakerInterval] {
+        counts.append(speakerCount)
+        return try await diarize(source: source)
+    }
+    func requestedCounts() -> [SpeakerCountConstraint] { counts }
 }
 
 private actor BlockingRetrySpeakerDiarizer: SpeakerDiarizing {

@@ -212,6 +212,7 @@ struct OnlineMeetingTranscriptRebuilder:
 }
 
 struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
+    private let sourceReviewer: (any OnlineSpeakerSourceReviewing)?
     static let coarseSourceRevision = 1
     static let diarizationUnavailableCode =
         "speaker_diarization_unavailable"
@@ -248,9 +249,11 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
         intervalAssigner: SpeakerIntervalAssigner =
             SpeakerIntervalAssigner(),
         onlineRebuilder:
-            (any OnlineMeetingTranscriptRebuilding)? = nil
+            (any OnlineMeetingTranscriptRebuilding)? = nil,
+        sourceReviewer: (any OnlineSpeakerSourceReviewing)? = nil
     ) {
         self.transcriptionService = transcriptionService
+        self.sourceReviewer = sourceReviewer
         self.sourceLoader = sourceLoader
         self.diarizer = diarizer
         self.assembler = assembler
@@ -356,8 +359,7 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
             guard !intervals.isEmpty else {
                 throw SpeakerDiarizationError.resultValidationFailed
             }
-            return .replacement(
-                assembler.assemble(
+            let attributed = assembler.assemble(
                     intervalAssigner.assign(
                         provisional,
                         intervals: intervals,
@@ -368,9 +370,12 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
                         speakerPrefix: mode == .online ? "speaker" : "room",
                         source: mode == .online ? .mixed : .room
                     )
-                ),
-                sourceRevision: Self.coarseSourceRevision
             )
+            let reviewed: [AttributedTranscriptDraft]
+            if mode == .online, let sourceReviewer {
+                reviewed = try await sourceReviewer.review(meetingID: meetingID, drafts: attributed)
+            } else { reviewed = attributed }
+            return .replacement(reviewed, sourceRevision: Self.coarseSourceRevision)
         } catch {
             return .degraded(
                 replacement: nil,

@@ -10,6 +10,8 @@ struct TranscriptDisplayEntry: Identifiable, Equatable {
     let text: String
     let speakerID: String?
     let source: TranscriptAudioSource
+    var attributionStatus: SpeakerAttributionStatus? = nil
+    var sourceEvidence: SpeakerSourceEvidence? = nil
 }
 
 struct TranscriptDisplayTurn: Identifiable, Equatable {
@@ -22,6 +24,8 @@ struct TranscriptDisplayTurn: Identifiable, Equatable {
     let speakerID: String?
     let source: TranscriptAudioSource
     let isHighlighted: Bool
+    var attributionStatus: SpeakerAttributionStatus? = nil
+    var sourceEvidence: SpeakerSourceEvidence? = nil
 
     var id: UUID {
         transcriptIDs[0]
@@ -40,12 +44,14 @@ enum TranscriptSpeakerDisplayPolicy {
     static func badge(
         speakerID: String?,
         source: TranscriptAudioSource,
-        customNames: [String: String] = [:]
+        customNames: [String: String] = [:],
+        attributionStatus: SpeakerAttributionStatus? = nil
     ) -> TranscriptSpeakerBadge? {
         guard let label = TranscriptSpeakerLabelPolicy.label(
             speakerID: speakerID,
             source: source,
-            customNames: customNames
+            customNames: customNames,
+            attributionStatus: attributionStatus
         ) else { return nil }
         return TranscriptSpeakerBadge(
             label: label,
@@ -106,7 +112,9 @@ enum TranscriptDisplayPolicy {
                     endTime: transcript.endTime,
                     text: text ?? "",
                     speakerID: transcript.speakerID,
-                    source: transcript.source
+                    source: transcript.source,
+                    attributionStatus: transcript.attributionStatus,
+                    sourceEvidence: transcript.sourceEvidence
                 )
             }
     }
@@ -203,6 +211,8 @@ enum TranscriptDisplayPolicy {
         let source: TranscriptAudioSource
         let isHighlighted: Bool
         let draftMembership: [Bool]
+        let attributionStatus: SpeakerAttributionStatus?
+        let sourceEvidence: SpeakerSourceEvidence?
 
         init(
             entry: TranscriptDisplayEntry,
@@ -219,6 +229,8 @@ enum TranscriptDisplayPolicy {
             source = entry.source
             isHighlighted = highlighted
             self.draftMembership = draftMembership
+            attributionStatus = entry.attributionStatus
+            sourceEvidence = entry.sourceEvidence
         }
 
         init(turn: TranscriptDisplayTurn, draftMembership: [Bool]) {
@@ -232,6 +244,8 @@ enum TranscriptDisplayPolicy {
             source = turn.source
             isHighlighted = turn.isHighlighted
             self.draftMembership = draftMembership
+            attributionStatus = turn.attributionStatus
+            sourceEvidence = turn.sourceEvidence
         }
 
         func canAppend(
@@ -247,6 +261,8 @@ enum TranscriptDisplayPolicy {
             }
             let maximumGap = maximumTurnGap
             return source == entry.source
+                && attributionStatus == entry.attributionStatus
+                && sourceEvidence == entry.sourceEvidence
                 && entry.startTime <= endTime + maximumGap
                 && isHighlighted == highlighted
                 && self.draftMembership == draftMembership
@@ -268,7 +284,9 @@ enum TranscriptDisplayPolicy {
                 text: textParts.joined(separator: " "),
                 speakerID: speakerID,
                 source: source,
-                isHighlighted: isHighlighted
+                isHighlighted: isHighlighted,
+                attributionStatus: attributionStatus,
+                sourceEvidence: sourceEvidence
             )
         }
     }
@@ -407,7 +425,8 @@ struct TranscriptView: View {
         let speakerBadge = TranscriptSpeakerDisplayPolicy.badge(
             speakerID: turn.speakerID,
             source: turn.source,
-            customNames: customSpeakerNames
+            customNames: customSpeakerNames,
+            attributionStatus: turn.attributionStatus
         )
         let editTarget = MeetingTranscriptEditTarget(turn: turn)
         let displayedText = transcriptText(editTarget)
@@ -417,14 +436,28 @@ struct TranscriptView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 52, alignment: .leading)
-            if let speakerBadge,
-               let speakerID = turn.speakerID {
-                speakerButton(
-                    speakerID: speakerID,
-                    badge: speakerBadge,
-                    accessibilityIdentifier:
-                        "meeting.transcripts.turnSpeaker.\(speakerID)"
-                )
+            if let speakerBadge {
+                if let speakerID = turn.speakerID, turn.attributionStatus != .uncertain,
+                   turn.attributionStatus != .overlapping {
+                    speakerButton(
+                        speakerID: speakerID,
+                        badge: speakerBadge,
+                        accessibilityIdentifier:
+                            "meeting.transcripts.turnSpeaker.\(speakerID)"
+                    )
+                } else {
+                    Text(speakerBadge.label)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .help("音频证据不足或存在重叠发言，没有强行指定某一位说话人。")
+                }
+            }
+            if let evidence = turn.sourceEvidence {
+                Image(systemName: evidence == .possibleEcho ? "waveform.badge.exclamationmark" : "waveform")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help(evidence.explanation)
+                    .accessibilityLabel(evidence.explanation)
             }
             InlineEditableMeetingText(
                 text: Binding(

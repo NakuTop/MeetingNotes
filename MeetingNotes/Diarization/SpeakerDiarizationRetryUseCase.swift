@@ -12,6 +12,14 @@ enum SpeakerDiarizationRetryError: Error, Equatable, Sendable {
 @MainActor
 protocol MeetingSpeakerDiarizationRetrying: AnyObject {
     func retry(meetingID: UUID) async throws
+    func retry(meetingID: UUID, speakerCount: SpeakerCountConstraint) async throws
+}
+
+extension MeetingSpeakerDiarizationRetrying {
+    func retry(meetingID: UUID, speakerCount: SpeakerCountConstraint) async throws {
+        guard speakerCount == .automatic else { throw SpeakerDiarizationError.unsupportedSpeakerCount }
+        try await retry(meetingID: meetingID)
+    }
 }
 
 protocol PreferredTranscriptionServiceProviding: Sendable {
@@ -48,6 +56,7 @@ final class SpeakerDiarizationRetryUseCase:
     static let cancelledCode = "speaker_diarization_cancelled"
     static let transcriptReplacementFailedCode =
         "speaker_transcript_replacement_failed"
+    static let speakerCountMismatchCode = "speaker_diarization_count_not_confirmed"
 
     private let repository: MeetingRepository
     private let sourceLoader: any MeetingTrackAudioSourceLoading
@@ -56,6 +65,7 @@ final class SpeakerDiarizationRetryUseCase:
     private let intervalAssigner: SpeakerIntervalAssigner
     private let assembler: SpeakerTranscriptAssembler
     private let nameRemapper: SpeakerNameRemapper
+    private let sourceReviewer: (any OnlineSpeakerSourceReviewing)?
     private let onlineRebuilder:
         (any OnlineMeetingTranscriptRebuilding)?
     private let transcriptionServiceProvider:
@@ -72,7 +82,8 @@ final class SpeakerDiarizationRetryUseCase:
         onlineRebuilder:
             (any OnlineMeetingTranscriptRebuilding)? = nil,
         transcriptionServiceProvider:
-            (any PreferredTranscriptionServiceProviding)? = nil
+            (any PreferredTranscriptionServiceProviding)? = nil,
+        sourceReviewer: (any OnlineSpeakerSourceReviewing)? = nil
     ) {
         self.repository = repository
         self.sourceLoader = sourceLoader
@@ -81,11 +92,20 @@ final class SpeakerDiarizationRetryUseCase:
         self.intervalAssigner = intervalAssigner
         self.assembler = assembler
         self.nameRemapper = nameRemapper
+        self.sourceReviewer = sourceReviewer
         self.onlineRebuilder = onlineRebuilder
         self.transcriptionServiceProvider = transcriptionServiceProvider
     }
 
     func retry(meetingID: UUID) async throws {
+        try await performRetry(meetingID: meetingID, speakerCount: nil)
+    }
+
+    func retry(meetingID: UUID, speakerCount: SpeakerCountConstraint) async throws {
+        try await performRetry(meetingID: meetingID, speakerCount: speakerCount)
+    }
+
+    private func performRetry(meetingID: UUID, speakerCount: SpeakerCountConstraint?) async throws {
         guard operationGate.acquire(
             .speakerDiarizationRetry,
             for: meetingID
@@ -102,7 +122,8 @@ final class SpeakerDiarizationRetryUseCase:
         try Task.checkCancellation()
         do {
             try repository.beginSpeakerDiarizationRetry(
-                meetingID: meetingID
+                meetingID: meetingID,
+                speakerCount: speakerCount
             )
         } catch let error as MeetingRepositoryError {
             switch error {
@@ -117,6 +138,7 @@ final class SpeakerDiarizationRetryUseCase:
 
         do {
             let meeting = try repository.meeting(id: meetingID)
+            let requestedCount = meeting.speakerCountConstraint
             let finalTranscripts = try repository.transcripts(
                 meetingID: meetingID
             ).filter(\.isFinal)
@@ -148,18 +170,24 @@ final class SpeakerDiarizationRetryUseCase:
                 )
             }
             try Task.checkCancellation()
+            let reviewed: [AttributedTranscriptDraft]
+            if meeting.mode == .online, let sourceReviewer {
+                reviewed = try await sourceReviewer.review(meetingID: meetingID, drafts: replacement.drafts)
+            } else { reviewed = replacement.drafts }
+            try Task.checkCancellation()
             let remappedNames = nameRemapper.remap(
                 oldNamedSpeakers: nameEvidence,
-                newDrafts: replacement.drafts
+                newDrafts: reviewed
             )
             do {
                 try repository.completeSpeakerDiarizationRetry(
                     meetingID: meetingID,
-                    drafts: replacement.drafts,
+                    drafts: reviewed,
                     sourceRevision: sourceRevision,
                     speakerDisplayNames: remappedNames,
-                    degradationErrorCode:
-                        replacement.degradationErrorCode
+                    degradationErrorCode: replacement.degradationErrorCode
+                        ?? (requestedCount.accepts(observedCount: Set(replacement.drafts.compactMap(\.speakerID)).count)
+                            ? nil : Self.speakerCountMismatchCode)
                 )
             } catch {
                 throw SpeakerDiarizationRetryError.failed(
@@ -207,12 +235,13 @@ final class SpeakerDiarizationRetryUseCase:
             throw SpeakerDiarizationError.invalidSource
         }
         try Task.checkCancellation()
-        let intervals = try await diarizer.diarize(source: source)
+        let count = try repository.meeting(id: meetingID).speakerCountConstraint
+        let intervals = try await diarizer.diarize(source: source, speakerCount: count)
         guard !intervals.isEmpty else {
             throw SpeakerDiarizationError.resultValidationFailed
         }
         let drafts = transcripts.map(Self.transcriptDraft)
-        return assembler.assemble(
+        let attributed = assembler.assemble(
             intervalAssigner.assign(
                 drafts,
                 intervals: intervals,
@@ -220,6 +249,18 @@ final class SpeakerDiarizationRetryUseCase:
                 source: mode == .online ? .mixed : .room
             )
         )
+        guard mode == .online else { return attributed }
+        // Retain proven physical-track provenance on legacy tagged rows, even
+        // when a whole-meeting count calls for one global master analysis.
+        let sources = Dictionary(grouping: transcripts) {
+            TranscriptAttributionOrigin(startTime: $0.startTime, endTime: $0.endTime, text: $0.text)
+        }
+        return attributed.map { draft in
+            guard let origin = draft.attributionOrigin, let records = sources[origin], records.count == 1,
+                  let source = records.first?.source, source == .microphone || source == .system else { return draft }
+            return AttributedTranscriptDraft(transcript: draft.transcript, speakerID: draft.speakerID, source: source,
+                                             attributionStatus: draft.attributionStatus, attributionOrigin: origin)
+        }
     }
 
     private func retryOnline(
@@ -237,7 +278,8 @@ final class SpeakerDiarizationRetryUseCase:
             }
             return (transcript, source)
         }
-        if tagged.count == transcripts.count,
+        if try repository.meeting(id: meetingID).speakerCountConstraint == .automatic,
+           tagged.count == transcripts.count,
            tagged.contains(where: { $0.1 == .system }) {
             return RetryReplacement(
                 drafts: try await reattributeTaggedOnlineTranscripts(
@@ -431,7 +473,8 @@ final class SpeakerDiarizationRetryUseCase:
         TranscriptDraft(
             startTime: transcript.startTime,
             endTime: transcript.endTime,
-            text: transcript.text
+            text: transcript.text,
+            words: transcript.words
         )
     }
 

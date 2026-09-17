@@ -10,6 +10,17 @@ protocol DiarizationEngine: Sendable {
         audioSource: DiarizationDiskAudioSource,
         audioLoadingSeconds: TimeInterval
     ) async throws -> [SpeakerInterval]
+
+    func process(audioSource: DiarizationDiskAudioSource, audioLoadingSeconds: TimeInterval,
+                 speakerCount: SpeakerCountConstraint) async throws -> [SpeakerInterval]
+}
+
+extension DiarizationEngine {
+    func process(audioSource: DiarizationDiskAudioSource, audioLoadingSeconds: TimeInterval,
+                 speakerCount: SpeakerCountConstraint) async throws -> [SpeakerInterval] {
+        guard speakerCount == .automatic else { throw SpeakerDiarizationError.unsupportedSpeakerCount }
+        return try await process(audioSource: audioSource, audioLoadingSeconds: audioLoadingSeconds)
+    }
 }
 
 protocol DiarizationAudioConverting: Sendable {
@@ -136,6 +147,11 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
     func diarize(
         source: MeetingAudioSource
     ) async throws -> [SpeakerInterval] {
+        try await diarize(source: source, speakerCount: .automatic)
+    }
+
+    func diarize(source: MeetingAudioSource, speakerCount: SpeakerCountConstraint) async throws -> [SpeakerInterval] {
+        guard speakerCount.isValid else { throw SpeakerDiarizationError.invalidSpeakerCount }
         try await acquireExclusiveOperation()
         defer { releaseExclusiveOperation() }
         try Task.checkCancellation()
@@ -191,7 +207,8 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
         do {
             intervals = try await engine.process(
                 audioSource: diskSource,
-                audioLoadingSeconds: loadDuration
+                audioLoadingSeconds: loadDuration,
+                speakerCount: speakerCount
             )
         } catch is CancellationError {
             throw CancellationError()
@@ -771,35 +788,53 @@ private struct DiarizationTimelineSegmentPlan: Sendable {
     let frameCount: Int64
 }
 
-final class OfflineFluidAudioDiarizationEngine:
-    DiarizationEngine,
-    @unchecked Sendable {
-    static let productionConfig = OfflineDiarizerConfig(
-        clusteringThreshold: 0.7045655
-    )
-
-    nonisolated(unsafe) private let manager: OfflineDiarizerManager
-
-    init(
-        manager: OfflineDiarizerManager = OfflineDiarizerManager(
-            config: OfflineFluidAudioDiarizationEngine.productionConfig
-        )
-    ) {
-        self.manager = manager
+actor OfflineFluidAudioDiarizationEngine: DiarizationEngine {
+    static var productionConfig: OfflineDiarizerConfig {
+        var config = OfflineDiarizerConfig(clusteringThreshold: 0.7045655)
+        // Keep actual overlap evidence instead of trimming one speaker away.
+        // Overlap is still excluded from clean speaker embedding extraction.
+        config.postProcessing.exclusiveSegments = false
+        return config
     }
 
+    static func configuration(for speakerCount: SpeakerCountConstraint) throws -> OfflineDiarizerConfig {
+        guard speakerCount.isValid else { throw SpeakerDiarizationError.invalidSpeakerCount }
+        switch speakerCount {
+        case .automatic: return productionConfig
+        case let .exact(count): return productionConfig.withSpeakers(exactly: count)
+        case let .range(minimum, maximum): return productionConfig.withSpeakers(min: minimum, max: maximum)
+        }
+    }
+
+    private var models: OfflineDiarizerModels?
+
     func prepareModels(directory: URL) async throws {
-        try await manager.prepareModels(directory: directory)
+        guard models == nil else { return }
+        let loaded = try await OfflineDiarizerModels.load(from: directory)
+        try Task.checkCancellation()
+        models = loaded
     }
 
     func process(
         audioSource: DiarizationDiskAudioSource,
         audioLoadingSeconds: TimeInterval
     ) async throws -> [SpeakerInterval] {
+        try await process(audioSource: audioSource, audioLoadingSeconds: audioLoadingSeconds, speakerCount: .automatic)
+    }
+
+    func process(audioSource: DiarizationDiskAudioSource, audioLoadingSeconds: TimeInterval,
+                 speakerCount: SpeakerCountConstraint) async throws -> [SpeakerInterval] {
+        try Task.checkCancellation()
+        guard let models else { throw SpeakerDiarizationError.modelPreparationFailed }
+        // A fresh manager owns this request's immutable count constraint;
+        // expensive Core ML models are reused, not re-downloaded per meeting.
+        let manager = OfflineDiarizerManager(config: try Self.configuration(for: speakerCount))
+        manager.initialize(models: models)
         let result = try await manager.process(
             audioSource: audioSource,
             audioLoadingSeconds: audioLoadingSeconds
         )
+        try Task.checkCancellation()
         return result.segments.map {
             SpeakerInterval(
                 rawSpeakerID: $0.speakerId,

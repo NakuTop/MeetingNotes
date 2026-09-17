@@ -3,6 +3,26 @@ import XCTest
 
 final class FluidAudioSpeakerDiarizerResourceTests:
     DiarizationAdapterTestCase {
+    func testSpeakerCountConstraintsReachSDKWithoutLeakingBetweenRequests() throws {
+        for count in [4, 5] {
+            let config = try OfflineFluidAudioDiarizationEngine.configuration(for: .exact(count))
+            XCTAssertEqual(config.clustering.numSpeakers, count)
+            XCTAssertEqual(config.clustering.threshold, 0.7045655, accuracy: 0.0000001)
+        }
+        let range = try OfflineFluidAudioDiarizationEngine.configuration(for: .range(4, 5))
+        XCTAssertEqual(range.clustering.minSpeakers, 4)
+        XCTAssertEqual(range.clustering.maxSpeakers, 5)
+        XCTAssertNil(range.clustering.numSpeakers)
+        let automatic = try OfflineFluidAudioDiarizationEngine.configuration(for: .automatic)
+        XCTAssertNil(automatic.clustering.numSpeakers)
+        XCTAssertNil(automatic.clustering.minSpeakers)
+        XCTAssertNil(automatic.clustering.maxSpeakers)
+        XCTAssertFalse(automatic.postProcessing.exclusiveSegments)
+        XCTAssertTrue(automatic.embedding.excludeOverlap)
+        for invalid in [SpeakerCountConstraint.exact(0), .exact(21), .range(5, 4), .range(0, 2)] {
+            XCTAssertThrowsError(try OfflineFluidAudioDiarizationEngine.configuration(for: invalid))
+        }
+    }
     func testProductionOfflineDiarizerUsesVerifiedClusteringThreshold() {
         let config = OfflineFluidAudioDiarizationEngine.productionConfig
 

@@ -880,6 +880,40 @@ struct MeetingDetailView: View {
 
     @ViewBuilder
     private var speakerProcessingSection: some View {
+        if viewModel.canRecalibrateCompletedSpeakers || viewModel.shouldShowSpeakerDiarizationRetryAction {
+            HStack(spacing: 8) {
+                Menu {
+                    Button("自动判断并重新校准") {
+                        viewModel.startSpeakerDiarizationRetry(speakerCount: .automatic)
+                    }
+                    Menu("指定实际发言人数") {
+                        ForEach(1...20, id: \.self) { count in
+                            Button("\(count) 位") {
+                                viewModel.startSpeakerDiarizationRetry(speakerCount: .exact(count))
+                            }
+                        }
+                    }
+                    Menu("大致人数") {
+                        ForEach([2, 4, 6, 9, 13], id: \.self) { minimum in
+                            let maximum = minimum == 13 ? 20 : minimum + (minimum == 9 ? 3 : 2)
+                            Button("\(minimum)–\(maximum) 位") {
+                                viewModel.startSpeakerDiarizationRetry(speakerCount: .range(minimum, maximum))
+                            }
+                        }
+                    }
+                } label: {
+                    Label("校准说话人", systemImage: "person.2.wave.2")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(!viewModel.canRetrySpeakerDiarization || isEditingTitle)
+                .help("仅校准当前会议；人数指真正发过言的人。保留手工编辑，不重新转录文字。")
+                .accessibilityIdentifier("meeting.speakerDiarization.calibrate")
+                Text(viewModel.speakerCountLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
         if let statusMessage = viewModel.speakerProcessingStatusMessage {
             HStack(spacing: 8) {
                 ProgressView()

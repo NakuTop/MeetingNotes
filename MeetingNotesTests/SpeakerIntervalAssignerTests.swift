@@ -30,7 +30,7 @@ final class SpeakerIntervalAssignerTests: XCTestCase {
         XCTAssertEqual(assigned.map(\.source), [.system])
     }
 
-    func testBreaksEqualOverlapTiesByIntervalTimelineThenRawID() {
+    func testEqualOverlapDoesNotClaimAConfidentSpeaker() {
         let draft = TranscriptDraft(
             startTime: 2,
             endTime: 4,
@@ -61,17 +61,17 @@ final class SpeakerIntervalAssignerTests: XCTestCase {
             source: .system
         )
 
-        XCTAssertEqual(assigned.map(\.speakerID), ["remote-1"])
+        XCTAssertEqual(assigned.map(\.speakerID), [nil])
         XCTAssertEqual(
             SpeakerIntervalAssigner().assignedRawSpeakerIDs(
                 [draft],
                 intervals: intervals
             ),
-            ["alpha"]
+            [nil]
         )
     }
 
-    func testNoOverlapFallsBackToNearestInterval() {
+    func testNoOverlapRemainsUnassigned() {
         let drafts = [
             TranscriptDraft(startTime: 10, endTime: 11, text: "间隔"),
         ]
@@ -93,7 +93,7 @@ final class SpeakerIntervalAssignerTests: XCTestCase {
             intervals: intervals
         )
 
-        XCTAssertEqual(rawIDs, ["near"])
+        XCTAssertEqual(rawIDs, [nil])
     }
 
     func testNumbersRawSpeakersByFirstTranscriptAppearance() {

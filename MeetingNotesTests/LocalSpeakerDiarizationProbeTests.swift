@@ -5,11 +5,55 @@ import XCTest
 // Explicit opt-in only. No real meeting paths, identifiers, audio or text are
 // checked into the repository; normal test runs skip this local diagnostic.
 final class LocalSpeakerDiarizationProbeTests: XCTestCase {
+    func testLocalWordTimingAvailabilityOnCachedModel() async throws {
+        guard let path = ProcessInfo.processInfo.environment["MEETINGNOTES_DIARIZATION_PROBE_CONFIG"] else {
+            throw XCTSkip("Local audio probe requires explicit opt-in")
+        }
+        let input = try JSONDecoder().decode(Input.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        guard let model = input.whisperModel, let id = input.meetings.first else { throw XCTSkip("No local input") }
+        let service = WhisperKitTranscriptionService(persistentModelFolder: model, download: false)
+        try await service.prepare()
+        let reader = MeetingTrackAudioReader(sourceLoader: MeetingAudioSourceLoader(fileStore: MeetingFileStore(rootURL: input.recordingsRoot)))
+        let chunks = try await reader.chunks(meetingID: id, track: .master)
+        var tested = 0, wordCount = 0, aligned = 0, multiword = 0
+        for try await chunk in chunks {
+            guard chunk.startingAt >= (input.startAt ?? 0), chunk.samples.count >= 16_000 else { continue }
+            let started = ContinuousClock.now
+            let drafts = try await service.transcribe(samples: chunk.samples, startingAt: chunk.startingAt)
+            wordCount += drafts.reduce(0) { $0 + $1.words.count }
+            aligned += drafts.filter { TranscriptWordAlignment.units(in: $0) != nil }.count
+            multiword += drafts.filter { $0.words.count > 1 }.count
+            print("LOCAL_WORD_ALIGNMENT chunk=\(tested) audio_seconds=\(Double(chunk.samples.count) / 16000) elapsed=\(ContinuousClock.now - started) drafts=\(drafts.count) words=\(drafts.reduce(0) { $0 + $1.words.count })")
+            tested += 1
+            if tested == 8 || (tested >= 3 && aligned > 0) { break }
+        }
+        XCTAssertGreaterThan(wordCount, 0)
+        XCTAssertGreaterThan(aligned, 0)
+        XCTAssertGreaterThan(multiword, 0)
+    }
+
+    func testLocalWholeMeetingSpeakerCountRange() async throws {
+        guard let path = ProcessInfo.processInfo.environment["MEETINGNOTES_DIARIZATION_PROBE_CONFIG"] else {
+            throw XCTSkip("Local audio probe requires explicit opt-in")
+        }
+        let input = try JSONDecoder().decode(Input.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        let loader = MeetingAudioSourceLoader(fileStore: MeetingFileStore(rootURL: input.recordingsRoot))
+        let diarizer = FluidAudioSpeakerDiarizer(modelsDirectory: input.modelsCopy, sourceLoader: loader)
+        for (index, id) in input.meetings.enumerated() {
+            let source = try await loader.load(meetingID: id, track: .master)
+            let start = ContinuousClock.now
+            let result = try await diarizer.diarize(source: source, speakerCount: .range(4, 5))
+            let count = Set(result.map(\.rawSpeakerID)).count
+            print("LOCAL_COUNT_CONSTRAINT case=\(index) audio_seconds=\(source.duration) elapsed=\(ContinuousClock.now - start) speakers=\(count) intervals=\(result.count)")
+            XCTAssertTrue((4...5).contains(count))
+        }
+    }
     private struct Input: Decodable {
         let recordingsRoot: URL
         let modelsCopy: URL
         let whisperModel: URL?
         let meetings: [UUID]
+        let startAt: TimeInterval?
     }
 
     func testLocalSourceTrackRetranscriptionCost() async throws {
@@ -115,7 +159,8 @@ final class LocalSpeakerDiarizationProbeTests: XCTestCase {
         let loader = MeetingAudioSourceLoader(fileStore: MeetingFileStore(rootURL: input.recordingsRoot))
         let finalizer = SpeakerAwareTranscriptFinalizer(
             reader: MeetingTrackAudioReader(sourceLoader: loader), sourceLoader: loader,
-            diarizer: FluidAudioSpeakerDiarizer(modelsDirectory: input.modelsCopy, sourceLoader: loader))
+            diarizer: FluidAudioSpeakerDiarizer(modelsDirectory: input.modelsCopy, sourceLoader: loader),
+            sourceReviewer: OnlineSpeakerSourceReviewer(reader: MeetingTrackAudioReader(sourceLoader: loader)))
         for (index, id) in input.meetings.enumerated() {
             let source = try await loader.load(meetingID: id, track: .master)
             // Real audio, synthetic text anchors: no private transcript needs
@@ -128,8 +173,10 @@ final class LocalSpeakerDiarizationProbeTests: XCTestCase {
                 transcriptionService: service)
             guard case let .replacement(attributed, _) = result else { return XCTFail("Real master did not finalize") }
             XCTAssertEqual(attributed.map(\.transcript), drafts)
-            XCTAssertTrue(attributed.allSatisfy { $0.speakerID != nil && $0.source == .mixed })
-            print("LOCAL_FIXED_FINALIZATION case=\(index) stage=completed elapsed=\(Date().timeIntervalSince(started)) labels=\(attributed.count)")
+            XCTAssertTrue(attributed.allSatisfy { $0.attributionStatus != nil && $0.source == .mixed })
+            XCTAssertTrue(attributed.contains { $0.speakerID != nil })
+            XCTAssertTrue(attributed.contains { $0.sourceEvidence != nil })
+            print("LOCAL_FIXED_FINALIZATION case=\(index) stage=completed elapsed=\(Date().timeIntervalSince(started)) labels=\(attributed.count) source_hints=\(attributed.filter { $0.sourceEvidence != nil }.count)")
         }
     }
 }

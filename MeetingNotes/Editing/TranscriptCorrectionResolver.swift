@@ -9,6 +9,8 @@ struct CanonicalTranscriptEntry: Identifiable, Equatable, Sendable {
     let speakerID: String?
     let source: TranscriptAudioSource
     let isManuallyEdited: Bool
+    var attributionStatus: SpeakerAttributionStatus? = nil
+    var sourceEvidence: SpeakerSourceEvidence? = nil
 }
 
 @MainActor
@@ -96,7 +98,9 @@ enum TranscriptCorrectionResolver {
                         text: transcript.text,
                         speakerID: transcript.speakerID,
                         source: transcript.source,
-                        isManuallyEdited: false
+                        isManuallyEdited: false,
+                        attributionStatus: transcript.attributionStatus,
+                        sourceEvidence: transcript.sourceEvidence
                     ),
                     sequenceIndex: transcript.sequenceIndex
                 )
@@ -276,7 +280,11 @@ enum TranscriptCorrectionResolver {
             text: correction.replacementText,
             speakerID: speakerID,
             source: source,
-            isManuallyEdited: true
+            isManuallyEdited: true,
+            attributionStatus: matchedTranscripts.contains { $0.attributionStatus == .overlapping }
+                ? .overlapping : (speakerIDs.count > 1 ? .uncertain : matchedTranscripts.first?.attributionStatus),
+            sourceEvidence: Set(matchedTranscripts.map(\.sourceEvidence)).count == 1
+                ? matchedTranscripts.first?.sourceEvidence : .mixed
         )
     }
 

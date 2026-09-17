@@ -1064,7 +1064,8 @@ final class MeetingRepository {
         text: String,
         isFinal: Bool = true,
         speakerID: String? = nil,
-        sourceRevision: Int = 0
+        sourceRevision: Int = 0,
+        words: [TranscriptWordTiming] = []
     ) throws {
         let meeting = try meeting(id: meetingID)
         let previousUpdatedAt = meeting.updatedAt
@@ -1076,6 +1077,7 @@ final class MeetingRepository {
             isFinal: isFinal,
             speakerID: speakerID,
             sourceRevision: sourceRevision,
+            words: words,
             meeting: meeting
         )
         if let history = liveSpeakerHistory[meetingID] {
@@ -1112,7 +1114,10 @@ final class MeetingRepository {
         let previousSpeakerNames = meeting.speakerNames
         let previousUpdatedAt = meeting.updatedAt
         let contentSnapshot = try beginContentMutation(for: meeting)
-        let replacements = drafts.enumerated().map { sequenceIndex, draft in
+        let protectedDrafts = SpeakerReplacementEditProtection.preserveEditedRows(
+            in: drafts, originals: previousTranscripts, corrections: meeting.transcriptCorrections
+        )
+        let replacements = protectedDrafts.enumerated().map { sequenceIndex, draft in
             TranscriptRecord(
                 startTime: draft.transcript.startTime,
                 endTime: draft.transcript.endTime,
@@ -1121,7 +1126,10 @@ final class MeetingRepository {
                 speakerID: draft.speakerID,
                 sourceRawValue: draft.source.rawValue,
                 sourceRevision: sourceRevision,
-                sequenceIndex: sequenceIndex
+                sequenceIndex: sequenceIndex,
+                words: draft.transcript.words,
+                attributionStatus: draft.attributionStatus,
+                sourceEvidence: draft.sourceEvidence
             )
         }
 
@@ -2437,7 +2445,8 @@ final class MeetingRepository {
         }
     }
 
-    func beginSpeakerDiarizationRetry(meetingID: UUID) throws {
+    func beginSpeakerDiarizationRetry(meetingID: UUID, speakerCount: SpeakerCountConstraint? = nil) throws {
+        if let speakerCount, !speakerCount.isValid { throw SpeakerDiarizationError.invalidSpeakerCount }
         let meeting = try meeting(id: meetingID)
         let previousState = meeting.speakerProcessingState
         let isInterruptedRetry = previousState == .processing
@@ -2450,10 +2459,12 @@ final class MeetingRepository {
         }
 
         let previousRequested = meeting.speakerDiarizationRequestedBacking
+        let previousCount = meeting.speakerCountConstraintData
         let previousStateRawValue = meeting.speakerProcessingStateRawValue
         let previousErrorCode = meeting.speakerProcessingErrorCode
         let previousUpdatedAt = meeting.updatedAt
         meeting.speakerDiarizationRequested = true
+        if let speakerCount { meeting.speakerCountConstraint = speakerCount }
         meeting.speakerProcessingState = .processing
         meeting.speakerProcessingErrorCode = nil
         meeting.updatedAt = .now
@@ -2461,6 +2472,7 @@ final class MeetingRepository {
             try saveContext()
         } catch {
             meeting.speakerDiarizationRequestedBacking = previousRequested
+            meeting.speakerCountConstraintData = previousCount
             meeting.speakerProcessingStateRawValue = previousStateRawValue
             meeting.speakerProcessingErrorCode = previousErrorCode
             meeting.updatedAt = previousUpdatedAt
@@ -2490,7 +2502,10 @@ final class MeetingRepository {
         let previousErrorCode = meeting.speakerProcessingErrorCode
         let previousUpdatedAt = meeting.updatedAt
         let contentSnapshot = try beginContentMutation(for: meeting)
-        let replacements = drafts.enumerated().map { sequenceIndex, draft in
+        let protectedDrafts = SpeakerReplacementEditProtection.preserveEditedRows(
+            in: drafts, originals: previousTranscripts, corrections: meeting.transcriptCorrections
+        )
+        let replacements = protectedDrafts.enumerated().map { sequenceIndex, draft in
             TranscriptRecord(
                 startTime: draft.transcript.startTime,
                 endTime: draft.transcript.endTime,
@@ -2499,7 +2514,10 @@ final class MeetingRepository {
                 speakerID: draft.speakerID,
                 sourceRawValue: draft.source.rawValue,
                 sourceRevision: sourceRevision,
-                sequenceIndex: sequenceIndex
+                sequenceIndex: sequenceIndex,
+                words: draft.transcript.words,
+                attributionStatus: draft.attributionStatus,
+                sourceEvidence: draft.sourceEvidence
             )
         }
         let now = Date.now

@@ -7,7 +7,8 @@ enum WhisperDecodingPolicy {
             task: .transcribe,
             language: nil,
             detectLanguage: true,
-            skipSpecialTokens: true
+            skipSpecialTokens: true,
+            wordTimestamps: true
         )
     }
 }
@@ -24,6 +25,7 @@ struct WhisperTranscriptSegment: Equatable, Sendable {
     let start: TimeInterval
     let end: TimeInterval
     let text: String
+    var words: [TranscriptWordTiming] = []
 }
 
 enum WhisperTranscriptDraftBuilder {
@@ -59,7 +61,13 @@ enum WhisperTranscriptDraftBuilder {
             return TranscriptDraft(
                 startTime: startingAt + segment.start,
                 endTime: startingAt + segment.end,
-                text: text
+                text: text,
+                words: TranscriptWordAlignment.retainingWords(
+                    segment.words.map {
+                        TranscriptWordTiming(text: $0.text, startTime: startingAt + $0.startTime,
+                                             endTime: startingAt + $0.endTime)
+                    }, for: text, startTime: startingAt + segment.start, endTime: startingAt + segment.end
+                )
             )
         }
     }
@@ -138,6 +146,9 @@ actor WhisperKitTranscriptionService:
                     )
                 }
             }
+            if let tokenizer = whisperKit?.tokenizer {
+                whisperKit?.tokenizer = WhisperWordTimingTokenizer(base: tokenizer)
+            }
             finishPreparation(with: .success(()))
         } catch {
             finishPreparation(with: .failure(error))
@@ -170,7 +181,10 @@ actor WhisperKitTranscriptionService:
                         WhisperTranscriptSegment(
                             start: Double($0.start),
                             end: Double($0.end),
-                            text: $0.text
+                            text: $0.text,
+                            words: ($0.words ?? []).map {
+                                TranscriptWordTiming(text: $0.word, startTime: Double($0.start), endTime: Double($0.end))
+                            }
                         )
                     },
                     sampleCount: samples.count,

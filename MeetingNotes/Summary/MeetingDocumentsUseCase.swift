@@ -842,7 +842,8 @@ enum MeetingDocumentInputBuilder {
                 speakerLabel: TranscriptSpeakerLabelPolicy.label(
                     speakerID: transcript.speakerID,
                     source: transcript.source,
-                    customNames: customSpeakerNames
+                    customNames: customSpeakerNames,
+                    attributionStatus: transcript.attributionStatus
                 )
             )
         }

@@ -37,7 +37,11 @@ struct TranscriptMerger: Sendable {
                 TranscriptDraft(
                     startTime: draft.startTime,
                     endTime: draft.endTime,
-                    text: cleaned
+                    text: cleaned,
+                    words: TranscriptWordAlignment.retainingWords(
+                        draft.words, for: cleaned, startTime: draft.startTime, endTime: draft.endTime,
+                        removingPrefixFrom: text
+                    )
                 )
             )
         }

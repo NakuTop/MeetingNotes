@@ -244,7 +244,8 @@ final class AppContainer {
                 PreferredTranscriptionServiceProvider(
                     controller: transcriptionModelController,
                     preference: transcriptionQualityPreference
-                )
+                ),
+            sourceReviewer: OnlineSpeakerSourceReviewer(reader: MeetingTrackAudioReader(sourceLoader: sourceLoader))
         )
         self.speakerDiarizationRetryer = speakerDiarizationRetryer
         let titleUpdater = MeetingTitleUpdateUseCase(

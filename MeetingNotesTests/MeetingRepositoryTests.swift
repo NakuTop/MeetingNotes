@@ -3927,6 +3927,10 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(transcript.id, transcriptID)
         XCTAssertEqual(transcript.text, "旧版转录仍需保留")
         XCTAssertEqual(transcript.source, .microphone)
+        XCTAssertEqual(transcript.words, [])
+        XCTAssertNil(transcript.attributionStatus)
+        XCTAssertNil(transcript.sourceEvidence)
+        XCTAssertEqual(meeting.speakerCountConstraint, .automatic)
     }
 
     func testMissingMeetingWritesFailWithoutCreatingOrphans() throws {
