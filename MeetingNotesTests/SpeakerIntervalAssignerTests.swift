@@ -61,7 +61,8 @@ final class SpeakerIntervalAssignerTests: XCTestCase {
             source: .system
         )
 
-        XCTAssertEqual(assigned.map(\.speakerID), [nil])
+        XCTAssertEqual(assigned.map(\.speakerID), ["remote-1"])
+        XCTAssertEqual(assigned.first?.attributionStatus, .overlapping)
         XCTAssertEqual(
             SpeakerIntervalAssigner().assignedRawSpeakerIDs(
                 [draft],

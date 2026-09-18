@@ -3,7 +3,7 @@ import FluidAudio
 import Foundation
 import os
 
-protocol DiarizationEngine: Sendable {
+protocol DiarizationEngine: VoiceprintExtracting {
     func prepareModels(directory: URL) async throws
 
     func process(
@@ -13,9 +13,19 @@ protocol DiarizationEngine: Sendable {
 
     func process(audioSource: DiarizationDiskAudioSource, audioLoadingSeconds: TimeInterval,
                  speakerCount: SpeakerCountConstraint) async throws -> [SpeakerInterval]
+    func analyze(audioSource: DiarizationDiskAudioSource, audioLoadingSeconds: TimeInterval,
+                 speakerCount: SpeakerCountConstraint, reviewSpans: [SpeakerReviewSpan]) async throws -> SpeakerDiarizationAnalysis
 }
 
 extension DiarizationEngine {
+    func analyze(audioSource: DiarizationDiskAudioSource, audioLoadingSeconds: TimeInterval,
+                 speakerCount: SpeakerCountConstraint, reviewSpans: [SpeakerReviewSpan]) async throws -> SpeakerDiarizationAnalysis {
+        .init(intervals: try await process(audioSource: audioSource, audioLoadingSeconds: audioLoadingSeconds,
+                                          speakerCount: speakerCount))
+    }
+    func extractVoiceprint(samples: [Float]) async throws -> VoiceprintEmbedding {
+        throw VoiceprintError.invalidEmbedding
+    }
     func process(audioSource: DiarizationDiskAudioSource, audioLoadingSeconds: TimeInterval,
                  speakerCount: SpeakerCountConstraint) async throws -> [SpeakerInterval] {
         guard speakerCount == .automatic else { throw SpeakerDiarizationError.unsupportedSpeakerCount }
@@ -90,7 +100,7 @@ struct DiarizationDiskAudioSource: StreamingAudioSampleSource {
     }
 }
 
-actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
+actor FluidAudioSpeakerDiarizer: SpeakerDiarizing, VoiceprintExtracting {
     private static let logger = Logger(
         subsystem: "MeetingNotes",
         category: "SpeakerDiarization"
@@ -150,7 +160,23 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
         try await diarize(source: source, speakerCount: .automatic)
     }
 
+    func extractVoiceprint(samples: [Float]) async throws -> VoiceprintEmbedding {
+        try VoiceprintQuality.validate(samples: samples)
+        try await acquireExclusiveOperation()
+        defer { releaseExclusiveOperation() }
+        try Task.checkCancellation()
+        try await prepareModelsIfNeeded()
+        let result = try await engine.extractVoiceprint(samples: samples)
+        try Task.checkCancellation()
+        return result
+    }
+
     func diarize(source: MeetingAudioSource, speakerCount: SpeakerCountConstraint) async throws -> [SpeakerInterval] {
+        try await analyze(source: source, speakerCount: speakerCount, reviewSpans: []).intervals
+    }
+
+    func analyze(source: MeetingAudioSource, speakerCount: SpeakerCountConstraint,
+                 reviewSpans: [SpeakerReviewSpan]) async throws -> SpeakerDiarizationAnalysis {
         guard speakerCount.isValid else { throw SpeakerDiarizationError.invalidSpeakerCount }
         try await acquireExclusiveOperation()
         defer { releaseExclusiveOperation() }
@@ -203,12 +229,13 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
         }
         defer { diskSource.cleanup() }
 
-        let intervals: [SpeakerInterval]
+        let analysis: SpeakerDiarizationAnalysis
         do {
-            intervals = try await engine.process(
+            analysis = try await engine.analyze(
                 audioSource: diskSource,
                 audioLoadingSeconds: loadDuration,
-                speakerCount: speakerCount
+                speakerCount: speakerCount,
+                reviewSpans: reviewSpans
             )
         } catch is CancellationError {
             throw CancellationError()
@@ -224,11 +251,21 @@ actor FluidAudioSpeakerDiarizer: SpeakerDiarizing {
             throw SpeakerDiarizationError.inferenceFailed
         }
 
+        let intervals = analysis.intervals
         do {
-            return try validatedIntervals(
-                intervals,
-                timelineDuration: timelineAudio.duration
-            )
+            let validated = try validatedIntervals(intervals, timelineDuration: timelineAudio.duration)
+            let refinements = try analysis.refinements.map { region in
+                try Task.checkCancellation()
+                guard region.span.start.isFinite, region.span.end.isFinite,
+                      region.span.start >= 0, region.span.end <= timelineAudio.duration + Self.modelFrameEndTolerance,
+                      region.span.end > region.span.start, region.span.end - region.span.start <= 20.001 else {
+                    throw SpeakerDiarizationError.resultValidationFailed
+                }
+                return SpeakerRefinedRegion(span: region.span,
+                    intervals: try validatedIntervals(region.intervals, timelineDuration: timelineAudio.duration),
+                    matches: region.matches)
+            }
+            return .init(intervals: validated, refinements: refinements)
         } catch is CancellationError {
             throw CancellationError()
         } catch SpeakerDiarizationError.resultValidationFailed {
@@ -808,6 +845,35 @@ actor OfflineFluidAudioDiarizationEngine: DiarizationEngine {
 
     private var models: OfflineDiarizerModels?
 
+    func extractVoiceprint(samples: [Float]) async throws -> VoiceprintEmbedding {
+        try VoiceprintQuality.validate(samples: samples)
+        try Task.checkCancellation()
+        guard let models else { throw SpeakerDiarizationError.modelPreparationFailed }
+        // Do not force a single-speaker count: that would conceal mixed speech.
+        let manager = OfflineDiarizerManager(config: Self.productionConfig)
+        manager.initialize(models: models)
+        let result = try await manager.process(audio: samples)
+        try Task.checkCancellation()
+        let speakers = Set(result.segments.map(\.speakerId))
+        guard speakers.count == 1 else { throw VoiceprintError.multipleSpeakers }
+        let duration = Double(samples.count) / 16_000
+        var previousEnd: Double = 0
+        var speech: Double = 0
+        for segment in result.segments.sorted(by: { $0.startTimeSeconds < $1.startTimeSeconds }) {
+            guard segment.startTimeSeconds.isFinite, segment.endTimeSeconds.isFinite,
+                  segment.qualityScore.isFinite else { throw VoiceprintError.poorAudio }
+            let start = max(0, Double(segment.startTimeSeconds))
+            let end = min(duration, Double(segment.endTimeSeconds))
+            if segment.qualityScore >= 0.5 { speech += max(0, end - max(start, previousEnd)) }
+            previousEnd = max(previousEnd, end)
+        }
+        guard speech >= max(4, duration * 0.6),
+              let id = speakers.first, let embedding = result.speakerDatabase?[id] else {
+            throw VoiceprintError.poorAudio
+        }
+        return VoiceprintEmbedding(values: try VoiceprintQuality.normalized(embedding), speechSeconds: speech)
+    }
+
     func prepareModels(directory: URL) async throws {
         guard models == nil else { return }
         let loaded = try await OfflineDiarizerModels.load(from: directory)
@@ -824,6 +890,12 @@ actor OfflineFluidAudioDiarizationEngine: DiarizationEngine {
 
     func process(audioSource: DiarizationDiskAudioSource, audioLoadingSeconds: TimeInterval,
                  speakerCount: SpeakerCountConstraint) async throws -> [SpeakerInterval] {
+        try await analyze(audioSource: audioSource, audioLoadingSeconds: audioLoadingSeconds,
+                          speakerCount: speakerCount, reviewSpans: []).intervals
+    }
+
+    func analyze(audioSource: DiarizationDiskAudioSource, audioLoadingSeconds: TimeInterval,
+                 speakerCount: SpeakerCountConstraint, reviewSpans: [SpeakerReviewSpan]) async throws -> SpeakerDiarizationAnalysis {
         try Task.checkCancellation()
         guard let models else { throw SpeakerDiarizationError.modelPreparationFailed }
         // A fresh manager owns this request's immutable count constraint;
@@ -835,13 +907,63 @@ actor OfflineFluidAudioDiarizationEngine: DiarizationEngine {
             audioLoadingSeconds: audioLoadingSeconds
         )
         try Task.checkCancellation()
-        return result.segments.map {
+        let intervals = result.segments.map {
             SpeakerInterval(
                 rawSpeakerID: $0.speakerId,
                 startTime: TimeInterval($0.startTimeSeconds),
                 endTime: TimeInterval($0.endTimeSeconds)
             )
         }
+        guard !reviewSpans.isEmpty else { return .init(intervals: intervals) }
+        let eligible = MeetingSpeakerReferencePolicy.eligibleIDs(result.segments.map {
+            .init(interval: .init(rawSpeakerID: $0.speakerId, startTime: Double($0.startTimeSeconds),
+                                  endTime: Double($0.endTimeSeconds)), quality: $0.qualityScore)
+        })
+        let references = (result.speakerDatabase ?? [:]).filter { eligible.contains($0.key) }
+        guard !references.isEmpty else { return .init(intervals: intervals) }
+        let windows = SpeakerReviewWindowPlanner.windows(spans: reviewSpans, intervals: intervals,
+                                                         duration: Double(audioSource.sampleCount) / 16_000)
+        var refined: [SpeakerRefinedRegion] = []
+        for window in windows {
+            try Task.checkCancellation()
+            let start = Int((window.start * 16_000).rounded(.down))
+            let end = min(audioSource.sampleCount, Int((window.end * 16_000).rounded(.down)))
+            guard end > start else { continue }
+            var samples = [Float](repeating: 0, count: end - start)
+            try samples.withUnsafeMutableBufferPointer {
+                try audioSource.copySamples(into: $0.baseAddress!, offset: start, count: $0.count)
+            }
+            guard samples.allSatisfy(\.isFinite) else { continue }
+            do {
+                // Short windows use automatic speaker count, never the whole
+                // meeting's count. They reuse the existing in-memory models.
+                let local = OfflineDiarizerManager(config: Self.productionConfig)
+                local.initialize(models: models)
+                let detail = try await local.process(audio: samples)
+                try Task.checkCancellation()
+                var matches: [String: SpeakerReferenceMatch] = [:]
+                for (id, embedding) in detail.speakerDatabase ?? [:] {
+                    matches[id] = MeetingSpeakerReferenceMatcher.match(embedding, against: references)
+                }
+                let offset = Double(start) / 16_000
+                let limit = Double(end) / 16_000
+                let localIntervals = detail.segments.compactMap { segment -> SpeakerInterval? in
+                    let lower = offset + Double(segment.startTimeSeconds)
+                    let upper = min(limit, offset + Double(segment.endTimeSeconds))
+                    guard lower.isFinite, upper.isFinite, lower >= offset, upper > lower else { return nil }
+                    return .init(rawSpeakerID: segment.speakerId, startTime: lower, endTime: upper)
+                }
+                if !localIntervals.isEmpty {
+                    refined.append(.init(span: .init(start: offset, end: limit), intervals: localIntervals, matches: matches))
+                }
+            } catch is CancellationError { throw CancellationError() }
+            catch {
+                // Optional refinement must not discard a successful global
+                // pass. No raw audio, embeddings or transcripts are logged.
+                try Task.checkCancellation()
+            }
+        }
+        return .init(intervals: intervals, refinements: refined)
     }
 }
 

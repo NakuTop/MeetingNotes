@@ -69,7 +69,7 @@ final class AppSettingsStoreTests: XCTestCase {
         XCTAssertTrue(isEnabled)
     }
 
-    func testSpeakerDiarizationDefaultsToDisabledWhenPreferenceIsMissing() throws {
+    func testSpeakerDiarizationDefaultsToAutomaticWhenPreferenceIsMissing() throws {
         let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer {
@@ -78,7 +78,18 @@ final class AppSettingsStoreTests: XCTestCase {
 
         let store = AppSettingsStore(defaults: defaults)
 
-        XCTAssertFalse(store.isSpeakerDiarizationEnabled)
+        XCTAssertTrue(store.isSpeakerDiarizationEnabled)
+        XCTAssertFalse(store.localVoiceprintsEnabled, "Automatic diarization must not opt into identity matching")
+    }
+
+    func testExplicitlyDisabledSpeakerDiarizationSurvivesReload() throws {
+        let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AppSettingsStore(defaults: defaults)
+        store.isSpeakerDiarizationEnabled = false
+
+        XCTAssertFalse(AppSettingsStore(defaults: defaults).isSpeakerDiarizationEnabled)
     }
 
     func testEnabledSpeakerDiarizationPersistsAcrossStoreInstances() throws {
@@ -112,7 +123,7 @@ final class AppSettingsStoreTests: XCTestCase {
             changeObserved.fulfill()
         }
 
-        store.isSpeakerDiarizationEnabled = true
+        store.isSpeakerDiarizationEnabled = false
 
         wait(for: [changeObserved], timeout: 0.1)
     }

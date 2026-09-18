@@ -221,7 +221,7 @@ final class SettingsViewModel {
     var selectedModel = AppSettingsStore.defaultDeepSeekModel
     var notionParentPageURL = ""
     var isNotionArchivingEnabled = true
-    var isSpeakerDiarizationEnabled = false
+    var isSpeakerDiarizationEnabled = true
     var frequentSpeakerNames: [String] = []
     var newSpeakerName = ""
     var selectedTranscriptionQualityMode: TranscriptionQualityMode = .balanced

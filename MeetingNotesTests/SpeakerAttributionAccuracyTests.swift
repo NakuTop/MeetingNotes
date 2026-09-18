@@ -77,12 +77,12 @@ final class SpeakerAttributionAccuracyTests: XCTestCase {
                 .init(rawSpeakerID: "A", startTime: 0, endTime: 1),
                 .init(rawSpeakerID: "B", startTime: 0.4, endTime: 0.9),
             ], speakerPrefix: "room", source: .room)
-        XCTAssertNil(result.first?.speakerID)
+        XCTAssertEqual(result.first?.speakerID, "room-1")
         XCTAssertEqual(result.first?.attributionStatus, .overlapping)
         XCTAssertEqual(
             TranscriptSpeakerLabelPolicy.label(
-                speakerID: nil, source: .room,
-                attributionStatus: .overlapping), "重叠发言")
+                speakerID: result.first?.speakerID, source: .room,
+                attributionStatus: .overlapping), "说话人 1")
     }
 
     func testBadOrMissingWordTimingNeverInventsACharacterBoundary() {
@@ -99,8 +99,8 @@ final class SpeakerAttributionAccuracyTests: XCTestCase {
                 ], speakerPrefix: "room", source: .room)
             XCTAssertEqual(result.count, 1)
             XCTAssertEqual(result.first?.transcript.text, original.text)
-            XCTAssertEqual(result.first?.attributionStatus, .uncertain)
-            XCTAssertNil(result.first?.speakerID)
+            XCTAssertEqual(result.first?.attributionStatus, .inferred)
+            XCTAssertEqual(result.first?.speakerID, "room-1")
         }
     }
 
@@ -182,8 +182,8 @@ final class SpeakerAttributionAccuracyTests: XCTestCase {
             let canonical = try repository.canonicalTranscripts(meetingID: id)
             XCTAssertEqual(canonical.map(\.text), ["我手工修正的内容"])
             XCTAssertTrue(try XCTUnwrap(canonical.first).isManuallyEdited)
-            XCTAssertNil(canonical.first?.speakerID)
-            XCTAssertEqual(canonical.first?.attributionStatus, .uncertain)
+            XCTAssertEqual(canonical.first?.speakerID, "room-1")
+            XCTAssertEqual(canonical.first?.attributionStatus, .inferred)
             XCTAssertEqual(try repository.transcripts(meetingID: id).first?.words, original.words)
         }
     }

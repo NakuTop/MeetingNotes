@@ -29,12 +29,15 @@ struct SpeakerTranscriptAssembler: Sendable {
                     source: draft.source,
                     attributionStatus: draft.attributionStatus,
                     sourceEvidence: draft.sourceEvidence,
-                    attributionOrigin: draft.attributionOrigin
+                    attributionOrigin: draft.attributionOrigin,
+                    automaticSpeakerID: draft.automaticSpeakerID,
+                    automaticAttributionStatus: draft.automaticAttributionStatus,
+                    reviewHint: draft.reviewHint
                 )
             )
         }
 
-        return sanitized.sorted { lhs, rhs in
+        return AutomaticSpeakerAttribution.complete(sanitized.sorted { lhs, rhs in
             if lhs.draft.transcript.startTime
                 != rhs.draft.transcript.startTime {
                 return lhs.draft.transcript.startTime
@@ -42,6 +45,6 @@ struct SpeakerTranscriptAssembler: Sendable {
             }
             return lhs.offset < rhs.offset
         }
-        .map(\.draft)
+        .map(\.draft))
     }
 }

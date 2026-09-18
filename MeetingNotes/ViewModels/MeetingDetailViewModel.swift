@@ -193,6 +193,13 @@ private struct MeetingDocumentBaselineKey: Equatable {
     let suggestedTitle: String
 }
 
+private struct MeetingTranscriptProjectionKey: Equatable {
+    let meetingID: UUID
+    let contentRevision: Int
+    let transcriptCount: Int
+    let correctionCount: Int
+}
+
 @MainActor
 @Observable
 final class MeetingDetailViewModel {
@@ -209,8 +216,14 @@ final class MeetingDetailViewModel {
     private let editAutosaver: MeetingEditAutosaver
     private let exactReplacement: MeetingExactReplacement
     private let fileStore: MeetingFileStore?
+    private let voiceprintLibrary: LocalVoiceprintLibrary?
+    private let voiceprintReader: VoiceprintClipReader?
     @ObservationIgnored
     private let timelineProjectionCache = MeetingTimelineProjectionCache()
+    @ObservationIgnored
+    private var canonicalProjection: (key: MeetingTranscriptProjectionKey, entries: [CanonicalTranscriptEntry])?
+    @ObservationIgnored
+    private(set) var canonicalProjectionBuildCount = 0
     @ObservationIgnored
     private var lastLoadedMeetingSignature: MeetingDetailLoadedSignature?
     @ObservationIgnored
@@ -239,6 +252,8 @@ final class MeetingDetailViewModel {
     private var speakerRetryTask: Task<Void, Never>?
     private(set) var speakerDiarizationRetryErrorMessage: String?
     private(set) var speakerNameErrorMessage: String?
+    private(set) var speakerReviewErrorMessage: String?
+    private var lastSpeakerBatchReceipt: SpeakerBatchAssignmentReceipt?
     private(set) var replacementPreview: MeetingExactReplacementPreview?
     private(set) var replacementErrorMessage: String?
     private(set) var notionSyncErrorMessage: String?
@@ -275,7 +290,9 @@ final class MeetingDetailViewModel {
             RecordingSessionPresentationStore? = nil,
         editAutosaver: MeetingEditAutosaver? = nil,
         exactReplacement: MeetingExactReplacement? = nil,
-        fileStore: MeetingFileStore? = nil
+        fileStore: MeetingFileStore? = nil,
+        voiceprintLibrary: LocalVoiceprintLibrary? = nil,
+        voiceprintReader: VoiceprintClipReader? = nil
     ) {
         self.meetingID = meetingID
         self.repository = repository
@@ -289,6 +306,8 @@ final class MeetingDetailViewModel {
         self.exactReplacement = exactReplacement
             ?? MeetingExactReplacement(repository: repository)
         self.fileStore = fileStore
+        self.voiceprintLibrary = voiceprintLibrary
+        self.voiceprintReader = voiceprintReader
         meeting = try? repository.meeting(id: meetingID)
         lastLoadedMeetingSignature = meeting.map(
             MeetingDetailLoadedSignature.init
@@ -619,6 +638,111 @@ final class MeetingDetailViewModel {
     func dismissSpeakerNameError() {
         speakerNameErrorMessage = nil
     }
+
+    var supportsVoiceprints: Bool { voiceprintLibrary != nil && voiceprintReader != nil }
+
+    func voiceprintPanel(for target: MeetingTranscriptEditTarget? = nil) -> VoiceprintPanelModel? {
+        guard let voiceprintLibrary, let voiceprintReader else { return nil }
+        var selection: VoiceprintSelection?
+        if let target, let meeting, meeting.endedAt != nil, !meeting.state.blocksCaptureSettingsChanges {
+            let ids = Set(target.transcriptIDs)
+            let rows = meeting.transcripts.filter { ids.contains($0.id) }
+            if !ids.isEmpty, rows.count == ids.count, rows.allSatisfy(\.isFinal) {
+                let clean = rows.allSatisfy {
+                    $0.attributionStatus != .overlapping &&
+                    $0.automaticSpeakerStatusRawValue != SpeakerAttributionStatus.overlapping.rawValue &&
+                    $0.sourceEvidence != .possibleEcho
+                }
+                let speakers = Set(rows.compactMap(\.speakerID))
+                selection = .init(meetingID: meetingID,
+                    start: rows.map(\.startTime).min()!, end: rows.map(\.endTime).max()!,
+                    canEnroll: clean && speakers.count == 1 && rows.allSatisfy {
+                        $0.speakerID != nil && ($0.attributionStatus == .attributed || $0.attributionStatus == .manuallyAssigned)
+                    }, canMatch: clean)
+            }
+        }
+        return VoiceprintPanelModel(library: voiceprintLibrary, reader: voiceprintReader,
+            settings: settingsStore, selection: selection) { [weak self] name in
+                guard let self, let target else { return false }
+                return self.confirmVoiceprintName(name, for: target)
+            }
+    }
+
+    // Only this explicit confirmation path applies an identity suggestion.
+    // Reuse a name only if unambiguous, without renaming an unrelated speaker.
+    private func confirmVoiceprintName(_ name: String, for target: MeetingTranscriptEditTarget) -> Bool {
+        do {
+            let meeting = try repository.meeting(id: meetingID)
+            let matches = meeting.speakerNames.filter { record in
+                record.displayName == name && meeting.transcripts.contains { $0.speakerID == record.speakerID }
+            }
+            let existingID = matches.count == 1 ? matches.first?.speakerID : nil
+            try repository.assignSpeaker(meetingID: meetingID, transcriptIDs: target.transcriptIDs,
+                speakerID: existingID, createNew: existingID == nil, displayName: name)
+            load()
+            return true
+        } catch {
+            load()
+            return false
+        }
+    }
+
+    @discardableResult
+    func assignSpeaker(to target: MeetingTranscriptEditTarget, speakerID: String?, createNew: Bool = false) -> Bool {
+        speakerNameErrorMessage = nil
+        do {
+            try repository.assignSpeaker(meetingID: meetingID, transcriptIDs: target.transcriptIDs,
+                                         speakerID: speakerID, createNew: createNew)
+            load()
+            return true
+        } catch {
+            speakerNameErrorMessage = "无法保存这段的说话人；转录可能已更新，请重新选择。原文字未改变。"
+            load()
+            return false
+        }
+    }
+
+    // Built only when opening/refreshing the review sheet, not on every
+    // keystroke or live waveform update in a long meeting.
+    func speakerReviewCatalog() -> MeetingSpeakerReviewCatalog? {
+        guard let meeting else { return nil }
+        return MeetingSpeakerReviewCatalog.make(meeting: meeting)
+    }
+
+    var canUndoSpeakerReview: Bool {
+        // Constant-time button state. Undo itself validates every row again.
+        lastSpeakerBatchReceipt.map { repository.isLatestSpeakerBatch($0) } ?? false
+    }
+
+    func confirmSpeakerReview(_ rows: [SpeakerReviewRowSnapshot], speakerID: String) -> Bool {
+        speakerReviewErrorMessage = nil
+        do {
+            lastSpeakerBatchReceipt = try repository.assignSpeakerBatch(meetingID: meetingID, preview: rows, speakerID: speakerID)
+            load()
+            return true
+        } catch {
+            speakerReviewErrorMessage = "未应用：所选片段已变化或保存失败。请刷新预览再选择，原文字与其他标注不受影响。"
+            load()
+            return false
+        }
+    }
+
+    func undoSpeakerReview() -> Bool {
+        speakerReviewErrorMessage = nil
+        guard let receipt = lastSpeakerBatchReceipt else { return false }
+        do {
+            try repository.undoSpeakerBatch(receipt)
+            lastSpeakerBatchReceipt = nil
+            load()
+            return true
+        } catch {
+            speakerReviewErrorMessage = "无法撤销：这些片段随后已有新标注或保存失败。不会覆盖后来的修改。"
+            load()
+            return false
+        }
+    }
+
+    func dismissSpeakerReviewError() { speakerReviewErrorMessage = nil }
 
     func transcriptDraftText(
         for entry: CanonicalTranscriptEntry
@@ -1151,7 +1275,7 @@ final class MeetingDetailViewModel {
             return "说话人分离已取消，原有转录已保留。"
         }
         if errorCode == SpeakerDiarizationRetryUseCase.speakerCountMismatchCode {
-            return "识别到的说话人数与指定人数不一致，已保留有依据的标记，请核对待确认片段。"
+            return "识别到的说话人数与指定人数不一致，已自动标注最可能的说话人；如有错误，可点击标签修改。"
         }
         if errorCode?.hasPrefix("source_track_") == true {
             return "部分分轨处理失败，已使用可用录音和转录，不影响播放、总结与同步。"
@@ -1218,6 +1342,7 @@ final class MeetingDetailViewModel {
         } catch {
             meeting = nil
             lastLoadedMeetingSignature = nil
+            canonicalProjection = nil
             timelineProjection = .empty
             errorMessage = "无法加载会议详情。"
         }
@@ -1434,6 +1559,7 @@ final class MeetingDetailViewModel {
         // saved) projection once, after all successful draft removals.
         guard !isPersistingEdits else { return }
         guard let meeting else {
+            canonicalProjection = nil
             if timelineProjection != .empty {
                 timelineProjection = .empty
             }
@@ -1443,11 +1569,19 @@ final class MeetingDetailViewModel {
             contentRevision: meeting.contentRevision,
             draftBoundaryRevision: draftBoundaryRevision
         )
+        let key = MeetingTranscriptProjectionKey(meetingID: meeting.id,
+            contentRevision: meeting.contentRevision, transcriptCount: meeting.transcripts.count,
+            correctionCount: meeting.transcriptCorrections.count)
+        // Editor scope changes are not content changes. Avoid decoding hints,
+        // resolving every correction and sorting a 3,000-row meeting on the
+        // first keystroke in each field, or on an unrelated status refresh.
+        if canonicalProjection?.key != key {
+            canonicalProjection = (key, MeetingDetailTranscriptProjection.entries(for: meeting))
+            canonicalProjectionBuildCount += 1
+        }
         let updated = timelineProjectionCache.snapshot(
             version: version,
-            transcripts: MeetingDetailTranscriptProjection.entries(
-                for: meeting
-            ),
+            transcripts: canonicalProjection?.entries ?? [],
             bookmarks: meeting.bookmarks,
             notes: meeting.notes,
             screenshots: meeting.screenshots,

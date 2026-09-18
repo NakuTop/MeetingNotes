@@ -236,17 +236,19 @@ final class SpeakerDiarizationRetryUseCase:
         }
         try Task.checkCancellation()
         let count = try repository.meeting(id: meetingID).speakerCountConstraint
-        let intervals = try await diarizer.diarize(source: source, speakerCount: count)
-        guard !intervals.isEmpty else {
+        let drafts = transcripts.map(Self.transcriptDraft)
+        let analysis = try await diarizer.analyze(source: source, speakerCount: count,
+                                                 reviewSpans: SpeakerReviewSpan.measured(in: drafts))
+        guard !analysis.intervals.isEmpty else {
             throw SpeakerDiarizationError.resultValidationFailed
         }
-        let drafts = transcripts.map(Self.transcriptDraft)
         let attributed = assembler.assemble(
             intervalAssigner.assign(
                 drafts,
-                intervals: intervals,
+                intervals: analysis.intervals,
                 speakerPrefix: mode == .online ? "speaker" : "room",
-                source: mode == .online ? .mixed : .room
+                source: mode == .online ? .mixed : .room,
+                refinements: analysis.refinements
             )
         )
         guard mode == .online else { return attributed }
@@ -259,7 +261,8 @@ final class SpeakerDiarizationRetryUseCase:
             guard let origin = draft.attributionOrigin, let records = sources[origin], records.count == 1,
                   let source = records.first?.source, source == .microphone || source == .system else { return draft }
             return AttributedTranscriptDraft(transcript: draft.transcript, speakerID: draft.speakerID, source: source,
-                                             attributionStatus: draft.attributionStatus, attributionOrigin: origin)
+                                             attributionStatus: draft.attributionStatus, attributionOrigin: origin,
+                                             reviewHint: draft.reviewHint)
         }
     }
 

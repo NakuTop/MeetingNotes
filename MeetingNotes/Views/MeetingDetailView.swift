@@ -44,10 +44,10 @@ enum MeetingDetailTranscriptProjection {
     static func entries(
         for meeting: MeetingRecord
     ) -> [CanonicalTranscriptEntry] {
-        TranscriptCorrectionResolver.resolve(
+        AutomaticSpeakerAttribution.complete(TranscriptCorrectionResolver.resolve(
             transcripts: meeting.transcripts,
             corrections: meeting.transcriptCorrections
-        )
+        ))
     }
 }
 
@@ -176,6 +176,11 @@ struct MeetingDetailView: View {
                                 let succeeded = viewModel.clearSpeakerName(
                                     speakerID
                                 )
+                                if succeeded { onMeetingChanged() }
+                                return succeeded
+                            },
+                            onAssignSpeaker: { target, speakerID, createNew in
+                                let succeeded = viewModel.assignSpeaker(to: target, speakerID: speakerID, createNew: createNew)
                                 if succeeded { onMeetingChanged() }
                                 return succeeded
                             },
@@ -881,38 +886,13 @@ struct MeetingDetailView: View {
     @ViewBuilder
     private var speakerProcessingSection: some View {
         if viewModel.canRecalibrateCompletedSpeakers || viewModel.shouldShowSpeakerDiarizationRetryAction {
-            HStack(spacing: 8) {
-                Menu {
-                    Button("自动判断并重新校准") {
-                        viewModel.startSpeakerDiarizationRetry(speakerCount: .automatic)
-                    }
-                    Menu("指定实际发言人数") {
-                        ForEach(1...20, id: \.self) { count in
-                            Button("\(count) 位") {
-                                viewModel.startSpeakerDiarizationRetry(speakerCount: .exact(count))
-                            }
-                        }
-                    }
-                    Menu("大致人数") {
-                        ForEach([2, 4, 6, 9, 13], id: \.self) { minimum in
-                            let maximum = minimum == 13 ? 20 : minimum + (minimum == 9 ? 3 : 2)
-                            Button("\(minimum)–\(maximum) 位") {
-                                viewModel.startSpeakerDiarizationRetry(speakerCount: .range(minimum, maximum))
-                            }
-                        }
-                    }
-                } label: {
-                    Label("校准说话人", systemImage: "person.2.wave.2")
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .disabled(!viewModel.canRetrySpeakerDiarization || isEditingTitle)
-                .help("仅校准当前会议；人数指真正发过言的人。保留手工编辑，不重新转录文字。")
-                .accessibilityIdentifier("meeting.speakerDiarization.calibrate")
-                Text(viewModel.speakerCountLabel)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Button("重新识别说话人", systemImage: "person.2.wave.2") {
+                viewModel.startSpeakerDiarizationRetry(speakerCount: .automatic)
             }
+            .buttonStyle(.borderless)
+            .disabled(!viewModel.canRetrySpeakerDiarization || isEditingTitle)
+            .help("在本机自动识别，无需填写人数。保留手动改字、改名和指定的说话人。")
+            .accessibilityIdentifier("meeting.speakerDiarization.retry")
         }
         if let statusMessage = viewModel.speakerProcessingStatusMessage {
             HStack(spacing: 8) {
@@ -922,7 +902,7 @@ struct MeetingDetailView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 if viewModel.isRetryingSpeakerDiarization {
-                    Button("取消分离") { viewModel.cancelSpeakerDiarizationRetry() }
+                    Button("取消") { viewModel.cancelSpeakerDiarizationRetry() }
                         .buttonStyle(.borderless)
                 }
             }
@@ -937,19 +917,6 @@ struct MeetingDetailView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Spacer()
-                if viewModel.shouldShowSpeakerDiarizationRetryAction {
-                    Button("重新分离说话人") {
-                        viewModel.startSpeakerDiarizationRetry()
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(
-                        !viewModel.canRetrySpeakerDiarization
-                            || isEditingTitle
-                    )
-                    .accessibilityIdentifier(
-                        "meeting.speakerDiarization.retry"
-                    )
-                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)

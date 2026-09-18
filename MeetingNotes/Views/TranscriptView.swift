@@ -12,6 +12,7 @@ struct TranscriptDisplayEntry: Identifiable, Equatable {
     let source: TranscriptAudioSource
     var attributionStatus: SpeakerAttributionStatus? = nil
     var sourceEvidence: SpeakerSourceEvidence? = nil
+    var reviewHint: SpeakerReviewHint? = nil
 }
 
 struct TranscriptDisplayTurn: Identifiable, Equatable {
@@ -26,6 +27,7 @@ struct TranscriptDisplayTurn: Identifiable, Equatable {
     let isHighlighted: Bool
     var attributionStatus: SpeakerAttributionStatus? = nil
     var sourceEvidence: SpeakerSourceEvidence? = nil
+    var reviewHint: SpeakerReviewHint? = nil
 
     var id: UUID {
         transcriptIDs[0]
@@ -48,7 +50,7 @@ enum TranscriptSpeakerDisplayPolicy {
         attributionStatus: SpeakerAttributionStatus? = nil
     ) -> TranscriptSpeakerBadge? {
         guard let label = TranscriptSpeakerLabelPolicy.label(
-            speakerID: speakerID,
+            speakerID: speakerID ?? AutomaticSpeakerAttribution.defaultID(for: source),
             source: source,
             customNames: customNames,
             attributionStatus: attributionStatus
@@ -70,8 +72,6 @@ enum TranscriptSpeakerDisplayPolicy {
 
 @MainActor
 enum TranscriptDisplayPolicy {
-    private static let maximumTurnGap: TimeInterval = 5
-
     static func entries(
         from transcripts: [TranscriptRecord]
     ) -> [TranscriptDisplayEntry] {
@@ -114,7 +114,8 @@ enum TranscriptDisplayPolicy {
                     speakerID: transcript.speakerID,
                     source: transcript.source,
                     attributionStatus: transcript.attributionStatus,
-                    sourceEvidence: transcript.sourceEvidence
+                    sourceEvidence: transcript.sourceEvidence,
+                    reviewHint: transcript.reviewHint
                 )
             }
     }
@@ -135,13 +136,15 @@ enum TranscriptDisplayPolicy {
     static func turns(
         from transcripts: [CanonicalTranscriptEntry],
         bookmarks: [BookmarkRecord],
-        preservingDraftTargets: [MeetingTranscriptEditTarget] = []
+        preservingDraftTargets: [MeetingTranscriptEditTarget] = [],
+        uncertainGroupingBoundaries: [TimeInterval] = []
     ) -> [TranscriptDisplayTurn] {
         appending(
             transcripts,
             to: [],
             bookmarks: bookmarks,
-            preservingDraftTargets: preservingDraftTargets
+            preservingDraftTargets: preservingDraftTargets,
+            uncertainGroupingBoundaries: uncertainGroupingBoundaries
         )
     }
 
@@ -151,10 +154,12 @@ enum TranscriptDisplayPolicy {
         _ transcripts: [CanonicalTranscriptEntry],
         to existingTurns: [TranscriptDisplayTurn],
         bookmarks: [BookmarkRecord],
-        preservingDraftTargets: [MeetingTranscriptEditTarget] = []
+        preservingDraftTargets: [MeetingTranscriptEditTarget] = [],
+        uncertainGroupingBoundaries: [TimeInterval] = []
     ) -> [TranscriptDisplayTurn] {
         let appendedEntries = entries(from: transcripts)
         guard !appendedEntries.isEmpty else { return existingTurns }
+        let annotationBoundaries = uncertainGroupingBoundaries.filter(\.isFinite).sorted()
         let draftScopes = preservingDraftTargets.map {
             Set($0.transcriptIDs)
         }
@@ -178,7 +183,8 @@ enum TranscriptDisplayPolicy {
             if current?.canAppend(
                 entry,
                 highlighted: highlighted,
-                draftMembership: membership
+                draftMembership: membership,
+                uncertainGroupingBoundaries: annotationBoundaries
             ) == true {
                 current?.append(entry)
             } else {
@@ -211,8 +217,9 @@ enum TranscriptDisplayPolicy {
         let source: TranscriptAudioSource
         let isHighlighted: Bool
         let draftMembership: [Bool]
-        let attributionStatus: SpeakerAttributionStatus?
-        let sourceEvidence: SpeakerSourceEvidence?
+        var attributionStatus: SpeakerAttributionStatus?
+        var sourceEvidence: SpeakerSourceEvidence?
+        var reviewHint: SpeakerReviewHint?
 
         init(
             entry: TranscriptDisplayEntry,
@@ -231,6 +238,7 @@ enum TranscriptDisplayPolicy {
             self.draftMembership = draftMembership
             attributionStatus = entry.attributionStatus
             sourceEvidence = entry.sourceEvidence
+            reviewHint = entry.reviewHint
         }
 
         init(turn: TranscriptDisplayTurn, draftMembership: [Bool]) {
@@ -246,24 +254,36 @@ enum TranscriptDisplayPolicy {
             self.draftMembership = draftMembership
             attributionStatus = turn.attributionStatus
             sourceEvidence = turn.sourceEvidence
+            reviewHint = turn.reviewHint
         }
 
         func canAppend(
             _ entry: TranscriptDisplayEntry,
             highlighted: Bool,
-            draftMembership: [Bool]
+            draftMembership: [Bool],
+            uncertainGroupingBoundaries: [TimeInterval]
         ) -> Bool {
-            guard let speakerID,
-                  speakerID == entry.speakerID,
+            let sameKnownSpeaker = speakerID != nil && speakerID == entry.speakerID
+            let sameUncertainCandidate = speakerID == nil && entry.speakerID == nil &&
+                attributionStatus == .uncertain && entry.attributionStatus == .uncertain &&
+                reviewHint.map { hint in entry.reviewHint.map { hint.canGroup(with: $0) } ?? false } == true
+            guard sameKnownSpeaker || sameUncertainCandidate,
                   correctionID == nil,
                   entry.correctionID == nil else {
                 return false
             }
-            let maximumGap = maximumTurnGap
+            // Keep editor/correction boundaries intact, but confidence changes
+            // and pauses alone must not fragment one person's consecutive turn.
+            if sameUncertainCandidate, entry.startTime < endTime - 0.02 { return false }
+            var lower = 0, upper = uncertainGroupingBoundaries.count
+            while lower < upper {
+                let mid = (lower + upper) / 2
+                if uncertainGroupingBoundaries[mid] <= startTime { lower = mid + 1 } else { upper = mid }
+            }
+            if lower < uncertainGroupingBoundaries.count,
+               uncertainGroupingBoundaries[lower] <= entry.startTime { return false }
             return source == entry.source
-                && attributionStatus == entry.attributionStatus
-                && sourceEvidence == entry.sourceEvidence
-                && entry.startTime <= endTime + maximumGap
+                && (!sameUncertainCandidate || entry.startTime <= endTime + 0.15)
                 && isHighlighted == highlighted
                 && self.draftMembership == draftMembership
         }
@@ -272,6 +292,14 @@ enum TranscriptDisplayPolicy {
             transcriptIDs.append(contentsOf: entry.transcriptIDs)
             endTime = max(endTime, entry.endTime)
             textParts.append(entry.text)
+            if attributionStatus != entry.attributionStatus {
+                attributionStatus = attributionStatus == .manuallyAssigned || entry.attributionStatus == .manuallyAssigned
+                    ? .manuallyAssigned : .inferred
+            }
+            if sourceEvidence != entry.sourceEvidence {
+                sourceEvidence = sourceEvidence == .possibleEcho || entry.sourceEvidence == .possibleEcho ? .possibleEcho : .mixed
+            }
+            reviewHint = SpeakerReviewHint.consensus([reviewHint, entry.reviewHint])
         }
 
         var turn: TranscriptDisplayTurn {
@@ -286,7 +314,8 @@ enum TranscriptDisplayPolicy {
                 source: source,
                 isHighlighted: isHighlighted,
                 attributionStatus: attributionStatus,
-                sourceEvidence: sourceEvidence
+                sourceEvidence: sourceEvidence,
+                reviewHint: reviewHint
             )
         }
     }
@@ -321,6 +350,7 @@ struct TranscriptView: View {
     var onBeginSpeakerEditing: (() -> Void)?
     var onRenameSpeaker: ((String, String) -> Bool)?
     var onClearSpeakerName: ((String) -> Bool)?
+    var onAssignSpeaker: ((MeetingTranscriptEditTarget, String?, Bool) -> Bool)?
     var onChangeTranscript: ((String, MeetingTranscriptEditTarget) -> Void)?
     var onFlushEdits: (() -> Void)?
     var onRequestExactReplacement: ((String) -> Void)?
@@ -353,6 +383,10 @@ struct TranscriptView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 LazyVStack(alignment: .leading, spacing: 8) {
+                    if let speakerNameErrorMessage {
+                        Label(speakerNameErrorMessage, systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
                     if !speakerOptions.isEmpty {
                         speakerSelector
                             .padding(.bottom, 4)
@@ -436,21 +470,38 @@ struct TranscriptView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 52, alignment: .leading)
-            if let speakerBadge {
-                if let speakerID = turn.speakerID, turn.attributionStatus != .uncertain,
-                   turn.attributionStatus != .overlapping {
-                    speakerButton(
-                        speakerID: speakerID,
-                        badge: speakerBadge,
-                        accessibilityIdentifier:
-                            "meeting.transcripts.turnSpeaker.\(speakerID)"
-                    )
-                } else {
-                    Text(speakerBadge.label)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .help("音频证据不足或存在重叠发言，没有强行指定某一位说话人。")
+            if onAssignSpeaker != nil {
+                Menu {
+                    Text("指定这段的说话人")
+                    ForEach(speakerOptions) { option in
+                        Button(option.badge.label) {
+                            _ = onAssignSpeaker?(editTarget, option.speakerID, false)
+                        }
+                    }
+                    Button("新说话人") {
+                        _ = onAssignSpeaker?(editTarget, nil, true)
+                    }
+                    if turn.attributionStatus == .manuallyAssigned {
+                        Button("恢复自动标注") { _ = onAssignSpeaker?(editTarget, nil, false) }
+                    }
+                    if let speakerID = turn.speakerID, let speakerBadge {
+                        Divider()
+                        Button("重命名此说话人…") {
+                            beginEditing(speakerID: speakerID, badge: speakerBadge)
+                        }
+                    }
+                } label: {
+                    if let speakerBadge { speakerBadgeView(speakerBadge) }
+                    else { Text("指定说话人").font(.caption) }
                 }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help(turn.attributionStatus == .inferred || turn.attributionStatus == .uncertain || turn.attributionStatus == .overlapping
+                    ? "自动估计的主要说话人；点击即可修改，人工标注始终优先。"
+                    : "点击指定当前这段的说话人；人工标注优先于自动分离。")
+                .accessibilityIdentifier("meeting.transcripts.assignSpeaker.\(turn.id)")
+            } else if let speakerBadge {
+                Text(speakerBadge.label).font(.caption).foregroundStyle(.secondary)
             }
             if let evidence = turn.sourceEvidence {
                 Image(systemName: evidence == .possibleEcho ? "waveform.badge.exclamationmark" : "waveform")

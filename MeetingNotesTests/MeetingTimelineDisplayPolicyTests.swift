@@ -453,11 +453,11 @@ final class MeetingTimelineDisplayPolicyTests: XCTestCase {
             XCTAssertEqual(latest, full, "Append boundary at entry \(count)")
         }
 
-        XCTAssertEqual(latest.visibleTurns.count, 8)
+        XCTAssertEqual(latest.visibleTurns.count, 7)
         XCTAssertEqual(latest.visibleTurns.first?.transcriptIDs,
                        Array(entries.prefix(2)).map(\.id))
         XCTAssertEqual(latest.visibleTurns.last?.transcriptIDs,
-                       Array(entries.suffix(2)).map(\.id))
+                       Array(entries.suffix(3)).map(\.id))
         XCTAssertEqual(cache.incrementalAppendCount, entries.count - 1)
     }
 

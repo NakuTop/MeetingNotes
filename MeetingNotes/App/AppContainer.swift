@@ -47,6 +47,8 @@ final class AppContainer {
 
     private let controlRouter: MeetingControlRouter
     private let settingsStore: AppSettingsStore
+    private let voiceprintLibrary: LocalVoiceprintLibrary
+    private let voiceprintReader: VoiceprintClipReader
     private let summarizeAndArchiveUseCase: SummarizeAndArchiveUseCase
     let meetingDocumentsUseCase: MeetingDocumentsUseCase
     private let meetingTitleUpdater: any MeetingTitleUpdating
@@ -184,6 +186,15 @@ final class AppContainer {
             modelsDirectory: Self.fluidAudioModelsFolder,
             sourceLoader: sourceLoader
         )
+        let voiceprintDirectory = Self.fluidAudioModelsFolder.deletingLastPathComponent()
+            .appendingPathComponent("Voiceprints", isDirectory: true)
+        voiceprintLibrary = LocalVoiceprintLibrary(
+            store: EncryptedVoiceprintStore(directory: voiceprintDirectory,
+                keys: VoiceprintKeychainKey(service:
+                    (Bundle.main.bundleIdentifier ?? "com.shenminghao.MeetingNotes") + ".voiceprints")),
+            extractor: speakerDiarizer, enabled: settingsStore.localVoiceprintsEnabled
+        )
+        voiceprintReader = VoiceprintClipReader(reader: MeetingTrackAudioReader(sourceLoader: sourceLoader))
         if let modelPreparer {
             transcriptionModelViewModel = TranscriptionModelViewModel(
                 preparer: modelPreparer,
@@ -409,6 +420,11 @@ final class AppContainer {
         )
     }
 
+    func makeVoiceprintManagementPanel() -> VoiceprintPanelModel {
+        VoiceprintPanelModel(library: voiceprintLibrary, reader: voiceprintReader,
+            settings: settingsStore, selection: nil, onConfirmName: { _ in false })
+    }
+
     func detailViewModel(for meetingID: UUID) -> MeetingDetailViewModel {
         if let existing = detailViewModels[meetingID] {
             return existing
@@ -422,7 +438,9 @@ final class AppContainer {
             titleUpdater: meetingTitleUpdater,
             speakerDiarizationRetryer: speakerDiarizationRetryer,
             recordingPresentationStore: recordingPresentationStore,
-            fileStore: fileStore
+            fileStore: fileStore,
+            voiceprintLibrary: voiceprintLibrary,
+            voiceprintReader: voiceprintReader
         )
         detailViewModels[meetingID] = viewModel
         pendingMeetingEditFlusher.register(viewModel)

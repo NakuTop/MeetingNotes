@@ -3,7 +3,7 @@ import XCTest
 
 final class TranscriptSpeakerDisplayPolicyTests: XCTestCase {
     @MainActor
-    func testUncertainAndOverlapBadgesSurviveStoredAndEditedPresentation() {
+    func testUncertaintyMetadataSurvivesWhileBadgesShowAutomaticSpeakerNumbers() {
         let transcript = TranscriptRecord(startTime: 0, endTime: 2, text: "需要核对的发言", isFinal: true,
                                           sourceRawValue: TranscriptAudioSource.room.rawValue,
                                           attributionStatus: .overlapping, sourceEvidence: .possibleEcho)
@@ -14,9 +14,31 @@ final class TranscriptSpeakerDisplayPolicyTests: XCTestCase {
         XCTAssertEqual(turns.first?.attributionStatus, .overlapping)
         XCTAssertEqual(turns.first?.sourceEvidence, .possibleEcho)
         XCTAssertEqual(TranscriptSpeakerDisplayPolicy.badge(speakerID: nil, source: .room,
-                                                           attributionStatus: .overlapping)?.label, "重叠发言")
+                                                           attributionStatus: .overlapping)?.label, "说话人 1")
         XCTAssertEqual(TranscriptSpeakerDisplayPolicy.badge(speakerID: nil, source: .room,
-                                                           attributionStatus: .uncertain)?.label, "说话人待确认")
+                                                           attributionStatus: .uncertain)?.label, "说话人 1")
+    }
+
+    func testEstimatedBadgeHonorsAnExplicitUserNameWithoutReviewStep() {
+        let badge = TranscriptSpeakerDisplayPolicy.badge(
+            speakerID: "room-2", source: .room,
+            customNames: ["room-2": "候选姓名"], attributionStatus: .uncertain
+        )
+        XCTAssertEqual(badge?.label, "候选姓名")
+        XCTAssertEqual(TranscriptSpeakerLabelPolicy.label(
+            speakerID: "room-2", source: .room,
+            customNames: ["room-2": "候选姓名"], attributionStatus: .uncertain
+        ), "候选姓名", "Labels must agree across display and export; confidence is separate metadata")
+    }
+
+    func testManualAssignmentStillShowsRenamedSpeakerWithStablePalette() {
+        let automatic = TranscriptSpeakerDisplayPolicy.badge(speakerID: "room-2", source: .room)
+        let manual = TranscriptSpeakerDisplayPolicy.badge(
+            speakerID: "room-2", source: .room,
+            customNames: ["room-2": "已确认姓名"], attributionStatus: .manuallyAssigned
+        )
+        XCTAssertEqual(manual?.label, "已确认姓名")
+        XCTAssertEqual(manual?.paletteIndex, automatic?.paletteIndex)
     }
     func testMixedMasterSpeakersGetNeutralLabelsWithoutClaimingLocalOrRemote() {
         XCTAssertEqual(TranscriptSpeakerLabelPolicy.label(speakerID: "speaker-2", source: .mixed), "说话人 2")
@@ -196,12 +218,12 @@ final class TranscriptSpeakerDisplayPolicyTests: XCTestCase {
         XCTAssertEqual(room?.paletteIndex, first?.paletteIndex)
     }
 
-    func testUnknownAndMixedTranscriptsDoNotShowMisleadingBadges() {
-        XCTAssertNil(
+    func testMissingIdentityShowsTemporaryNumberButInvalidCrossTrackIDsStayRejected() {
+        XCTAssertEqual(
             TranscriptSpeakerDisplayPolicy.badge(
                 speakerID: nil,
                 source: .mixed
-            )
+            )?.label, "说话人 1"
         )
         XCTAssertNil(
             TranscriptSpeakerDisplayPolicy.badge(
@@ -356,7 +378,7 @@ final class TranscriptSpeakerDisplayPolicyTests: XCTestCase {
     }
 
     @MainActor
-    func testTurnBoundariesRespectSpeakerGapNilIdentityAndBookmarks() {
+    func testPausesDoNotSplitSameSpeakerButIdentityAndBookmarkBoundariesRemain() {
         let transcripts = [
             makeTranscript(start: 0, end: 1, speakerID: "room-1"),
             makeTranscript(start: 2, end: 3, speakerID: "room-2"),
@@ -373,9 +395,9 @@ final class TranscriptSpeakerDisplayPolicyTests: XCTestCase {
             bookmarks: [bookmark]
         )
 
-        XCTAssertEqual(turns.count, 7)
+        XCTAssertEqual(turns.count, 6)
         XCTAssertEqual(turns.map(\.isHighlighted), [
-            true, true, true, true, true, true, false,
+            true, true, true, true, true, false,
         ])
     }
 

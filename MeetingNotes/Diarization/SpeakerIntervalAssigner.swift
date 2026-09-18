@@ -5,20 +5,60 @@ struct SpeakerIntervalAssigner: Sendable {
         _ drafts: [TranscriptDraft],
         intervals: [SpeakerInterval],
         speakerPrefix: String,
-        source: TranscriptAudioSource
+        source: TranscriptAudioSource,
+        refinements: [SpeakerRefinedRegion] = []
     ) -> [AttributedTranscriptDraft] {
         let index = SpeakerEvidenceIndex(intervals)
+        let localIndexes = refinements.map { ($0, SpeakerEvidenceIndex($0.intervals)) }
+        func resolved(start: Double, end: Double) -> SpeakerEvidence {
+            let original = index.evidence(start: start, end: end)
+            guard original.status == .uncertain else { return original }
+            var candidates: [(SpeakerReferenceMatch, SpeakerEvidence)] = []
+            var hasUnresolvedLocalEvidence = false
+            for (region, localIndex) in localIndexes where region.span.start <= start && region.span.end >= end {
+                let local = localIndex.evidence(start: start, end: end)
+                // Keep all local voices in the index: overlapping or competing
+                // speech must never turn into a single confident speaker.
+                if local.status == .overlapping {
+                    return .init(rawSpeakerID: nil, status: .overlapping, hint: .init(
+                        candidateSpeakerID: local.hint?.candidateSpeakerID.flatMap { region.matches[$0]?.rawSpeakerID }
+                            ?? original.rawSpeakerID ?? original.hint?.candidateSpeakerID,
+                        alternativeSpeakerID: local.hint?.alternativeSpeakerID.flatMap { region.matches[$0]?.rawSpeakerID },
+                        reason: .overlapping))
+                }
+                guard local.status == .attributed, let id = local.rawSpeakerID,
+                      let match = region.matches[id] else { hasUnresolvedLocalEvidence = true; continue }
+                candidates.append((match, local))
+            }
+            guard let best = candidates.first,
+                  Set(candidates.map { $0.0.rawSpeakerID }).count == 1 else { return original }
+            let agreesWithOriginal = original.hint?.candidateSpeakerID == nil ||
+                original.hint?.candidateSpeakerID == best.0.rawSpeakerID
+            let allStrong = !hasUnresolvedLocalEvidence && candidates.allSatisfy {
+                $0.0.isStrong && $0.1.coverage >= 0.8 && $0.1.margin >= 0.5
+            }
+            if allStrong, agreesWithOriginal, original.hint?.reason != .competingSpeakers {
+                return .init(rawSpeakerID: best.0.rawSpeakerID, status: .attributed)
+            }
+            return .init(rawSpeakerID: nil, status: .uncertain, hint: .init(
+                candidateSpeakerID: best.0.rawSpeakerID,
+                alternativeSpeakerID: agreesWithOriginal ? nil : original.hint?.candidateSpeakerID,
+                reason: .acousticCandidate, basis: .meetingVoice,
+                coverage: candidates.map { $0.1.coverage }.min() ?? 0,
+                margin: candidates.map { $0.1.margin }.min() ?? 0))
+        }
         let pieces = drafts.flatMap { draft -> [(TranscriptDraft, SpeakerEvidence, TranscriptAttributionOrigin)] in
             let origin = TranscriptAttributionOrigin(startTime: draft.startTime, endTime: draft.endTime, text: draft.text)
             guard let units = TranscriptWordAlignment.units(in: draft) else {
-                return [(draft, index.evidence(start: draft.startTime, end: draft.endTime), origin)]
+                return [(draft, resolved(start: draft.startTime, end: draft.endTime), origin)]
             }
             var groups: [(Range<Int>, SpeakerEvidence)] = []
             for unitIndex in units.indices {
                 let word = units[unitIndex].word
-                let evidence = index.evidence(start: word.startTime, end: word.endTime)
-                if let last = groups.last, last.1 == evidence {
+                let evidence = resolved(start: word.startTime, end: word.endTime)
+                if let last = groups.last, last.1.canCombine(with: evidence) {
                     groups[groups.count - 1].0 = last.0.lowerBound..<(unitIndex + 1)
+                    groups[groups.count - 1].1 = last.1.combined(with: evidence)
                 } else {
                     groups.append((unitIndex..<(unitIndex + 1), evidence))
                 }
@@ -48,10 +88,30 @@ struct SpeakerIntervalAssigner: Sendable {
                 stableIDs[rawID] = "\(speakerPrefix)-\(stableIDs.count + 1)"
             }
         }
-        return pieces.map { draft, evidence, origin in
-            AttributedTranscriptDraft(
-                transcript: draft, speakerID: evidence.rawSpeakerID.flatMap { stableIDs[$0] }, source: source,
-                attributionStatus: evidence.status, attributionOrigin: origin
+        // Candidate-only voices get stable anonymous IDs too, without shifting
+        // the numbering of already-attributed speakers.
+        for index in chronological {
+            for rawID in [pieces[index].1.hint?.candidateSpeakerID, pieces[index].1.hint?.alternativeSpeakerID].compactMap({ $0 })
+            where stableIDs[rawID] == nil {
+                stableIDs[rawID] = "\(speakerPrefix)-\(stableIDs.count + 1)"
+            }
+        }
+        var automaticIDs: [Int: String] = [:]
+        var previousRawID: String?
+        for position in chronological {
+            let (draft, evidence, _) = pieces[position]
+            let raw = index.bestEffortSpeaker(start: draft.startTime, end: draft.endTime,
+                preferring: previousRawID, evidence: evidence) ?? previousRawID ?? "\u{0}unobserved"
+            if stableIDs[raw] == nil { stableIDs[raw] = "\(speakerPrefix)-\(stableIDs.count + 1)" }
+            automaticIDs[position] = stableIDs[raw]
+            previousRawID = raw
+        }
+        return pieces.enumerated().map { position, piece in
+            let (draft, evidence, origin) = piece
+            return AttributedTranscriptDraft(
+                transcript: draft, speakerID: automaticIDs[position], source: source,
+                attributionStatus: evidence.status == .uncertain ? .inferred : evidence.status, attributionOrigin: origin,
+                reviewHint: evidence.hint?.remapping(stableIDs)
             )
         }
     }
@@ -62,15 +122,38 @@ struct SpeakerIntervalAssigner: Sendable {
     }
 }
 
-private struct SpeakerEvidence: Equatable {
+struct SpeakerEvidence: Equatable {
     let rawSpeakerID: String?
     let status: SpeakerAttributionStatus
-    static let uncertain = Self(rawSpeakerID: nil, status: .uncertain)
+    var hint: SpeakerReviewHint? = nil
+    var coverage: Double = 0
+    var margin: Double = 0
+    static let uncertain = Self(rawSpeakerID: nil, status: .uncertain,
+        hint: .init(candidateSpeakerID: nil, reason: .invalidTiming))
+
+    func canCombine(with other: Self) -> Bool {
+        rawSpeakerID == other.rawSpeakerID && status == other.status &&
+            hint?.candidateSpeakerID == other.hint?.candidateSpeakerID &&
+            hint?.alternativeSpeakerID == other.hint?.alternativeSpeakerID &&
+            hint?.reason == other.hint?.reason && hint?.basis == other.hint?.basis
+    }
+
+    func combined(with other: Self) -> Self {
+        var result = self
+        result.coverage = min(coverage, other.coverage)
+        result.margin = min(margin, other.margin)
+        if result.hint != nil {
+            result.hint?.coverage = min(hint?.coverage ?? 0, other.hint?.coverage ?? 0)
+            result.hint?.margin = min(hint?.margin ?? 0, other.hint?.margin ?? 0)
+        }
+        return result
+    }
 }
 
-private struct SpeakerEvidenceIndex {
+struct SpeakerEvidenceIndex {
     private let intervals: [SpeakerInterval]
     private let prefixEnds: [TimeInterval]
+    private let byEnd: [SpeakerInterval]
 
     init(_ input: [SpeakerInterval]) {
         intervals = input.compactMap { interval in
@@ -78,7 +161,10 @@ private struct SpeakerEvidenceIndex {
             guard !id.isEmpty, interval.startTime.isFinite, interval.endTime.isFinite,
                   interval.startTime >= 0, interval.endTime > interval.startTime else { return nil }
             return SpeakerInterval(rawSpeakerID: id, startTime: interval.startTime, endTime: interval.endTime)
-        }.sorted { $0.startTime < $1.startTime }
+        }.sorted { $0.startTime == $1.startTime ? $0.rawSpeakerID < $1.rawSpeakerID : $0.startTime < $1.startTime }
+        byEnd = intervals.sorted {
+            $0.endTime == $1.endTime ? $0.rawSpeakerID < $1.rawSpeakerID : $0.endTime < $1.endTime
+        }
         var end: TimeInterval = 0
         prefixEnds = intervals.map { end = max(end, $0.endTime); return end }
     }
@@ -121,16 +207,60 @@ private struct SpeakerEvidenceIndex {
             active += change
         }
         let duration = end - start
-        if simultaneous >= max(0.08, duration * 0.2) {
-            return SpeakerEvidence(rawSpeakerID: nil, status: .overlapping)
-        }
         totals.sort { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }
-        guard let best = totals.first else { return .uncertain }
+        if simultaneous >= max(0.08, duration * 0.2) {
+            return SpeakerEvidence(rawSpeakerID: nil, status: .overlapping,
+                hint: .init(candidateSpeakerID: totals.first?.0,
+                    alternativeSpeakerID: totals.dropFirst().first?.0, reason: .overlapping))
+        }
+        guard let best = totals.first else {
+            return .init(rawSpeakerID: nil, status: .uncertain,
+                hint: .init(candidateSpeakerID: nil, reason: .missingSpeech))
+        }
         let runnerUp = totals.dropFirst().first?.1 ?? 0
         // Coverage/margin are conservative attribution rules, not calibrated
         // confidence probabilities. Insufficient evidence stays unassigned.
-        guard best.1 / duration >= 0.55, (best.1 - runnerUp) / duration >= 0.15 else { return .uncertain }
-        return SpeakerEvidence(rawSpeakerID: best.0, status: .attributed)
+        let coverage = best.1 / duration
+        let margin = (best.1 - runnerUp) / duration
+        guard coverage >= 0.55, margin >= 0.15 else {
+            return .init(rawSpeakerID: nil, status: .uncertain, hint: .init(
+                candidateSpeakerID: best.0, alternativeSpeakerID: totals.dropFirst().first?.0,
+                reason: margin < 0.15 ? .competingSpeakers : .insufficientCoverage,
+                coverage: coverage, margin: margin), coverage: coverage, margin: margin)
+        }
+        return SpeakerEvidence(rawSpeakerID: best.0, status: .attributed, coverage: coverage, margin: margin)
+    }
+
+    /// Keep the evidence classification separate from the product's requirement
+    /// to give every utterance a best estimate. Never consult another audio track.
+    func bestEffortSpeaker(start: TimeInterval, end: TimeInterval,
+                           preferring previous: String? = nil, evidence supplied: SpeakerEvidence? = nil) -> String? {
+        let value = supplied ?? evidence(start: start, end: end)
+        if let id = value.rawSpeakerID { return id }
+        if let candidate = value.hint?.candidateSpeakerID {
+            if value.hint?.reason == .competingSpeakers, abs(value.margin) < 0.000_001,
+               let previous, value.hint?.alternativeSpeakerID == previous { return previous }
+            return candidate
+        }
+        guard start.isFinite, end.isFinite, start >= 0, end > start else { return previous }
+        // No measured speech overlaps the text. Find the nearest real interval
+        // in O(log n), retaining previous-speaker continuity on equal distances.
+        var low = 0, high = intervals.count
+        while low < high {
+            let mid = (low + high) / 2
+            if intervals[mid].startTime < end { low = mid + 1 } else { high = mid }
+        }
+        let next = low < intervals.count ? intervals[low] : nil
+        low = 0; high = byEnd.count
+        while low < high {
+            let mid = (low + high) / 2
+            if byEnd[mid].endTime <= start { low = mid + 1 } else { high = mid }
+        }
+        let prior = low > 0 ? byEnd[low - 1] : nil
+        if let prior, let next {
+            return start - prior.endTime <= next.startTime - end ? prior.rawSpeakerID : next.rawSpeakerID
+        }
+        return prior?.rawSpeakerID ?? next?.rawSpeakerID ?? previous
     }
 
     private static func union(_ ranges: [Range<TimeInterval>]) -> [Range<TimeInterval>] {

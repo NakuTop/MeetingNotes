@@ -7,8 +7,6 @@ enum TranscriptSpeakerLabelPolicy {
         customNames: [String: String] = [:],
         attributionStatus: SpeakerAttributionStatus? = nil
     ) -> String? {
-        if attributionStatus == .overlapping { return "重叠发言" }
-        if attributionStatus == .uncertain { return "说话人待确认" }
         guard let speakerID else { return nil }
         if let customName = customNames[speakerID]?.trimmingCharacters(
             in: .whitespacesAndNewlines
@@ -18,6 +16,9 @@ enum TranscriptSpeakerLabelPolicy {
 
         if speakerID.hasPrefix("speaker-") {
             return numberedLabel(speakerID: speakerID, prefix: "speaker", labelPrefix: "说话人")
+        }
+        if speakerID.hasPrefix("room-"), source == .mixed {
+            return numberedLabel(speakerID: speakerID, prefix: "room", labelPrefix: "说话人")
         }
         switch (speakerID, source) {
         case ("me", .microphone):

@@ -242,7 +242,8 @@ final class MeetingTimelineProjectionCache {
         let turns = TranscriptDisplayPolicy.turns(
             from: input.transcripts,
             bookmarks: bookmarks,
-            preservingDraftTargets: input.preservingDraftTargets
+            preservingDraftTargets: input.preservingDraftTargets,
+            uncertainGroupingBoundaries: notes.map(\.timestamp) + screenshots.map(\.timestamp)
         )
         return makeSnapshot(
             turns: turns,
@@ -281,7 +282,8 @@ final class MeetingTimelineProjectionCache {
             Array(input.transcripts.dropFirst(previous.transcripts.count)),
             to: cached.snapshot.visibleTurns,
             bookmarks: bookmarks,
-            preservingDraftTargets: input.preservingDraftTargets
+            preservingDraftTargets: input.preservingDraftTargets,
+            uncertainGroupingBoundaries: notes.map(\.timestamp) + screenshots.map(\.timestamp)
         )
         return makeSnapshot(
             turns: turns,

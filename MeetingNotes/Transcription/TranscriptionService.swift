@@ -35,10 +35,16 @@ struct AttributedTranscriptDraft: Equatable, Sendable {
     // Ephemeral lineage lets persistence preserve edits made while inference
     // was running. It is never an instruction to change the user's text.
     var attributionOrigin: TranscriptAttributionOrigin? = nil
+    var automaticSpeakerID: String? = nil
+    var automaticAttributionStatus: SpeakerAttributionStatus? = nil
+    var reviewHint: SpeakerReviewHint? = nil
 }
 
 enum SpeakerAttributionStatus: String, Codable, Sendable {
+    case manuallyAssigned
     case attributed
+    // Best-effort automatic attribution, not a verified identity/confidence claim.
+    case inferred
     case uncertain
     case overlapping
 }

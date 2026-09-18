@@ -44,7 +44,10 @@ final class MeetingRepository {
     private let contextSaver: @MainActor (ModelContext) throws -> Void
     private let detailedMinutesEncoder:
         (GeneratedDetailedMinutes) throws -> EncodedDetailedMinutes
-    private var liveSpeakerHistory: [UUID: (source: TranscriptAudioSource, intervals: [SpeakerInterval], through: TimeInterval)] = [:]
+    private var liveSpeakerHistory: [UUID: (source: TranscriptAudioSource, intervals: [SpeakerInterval],
+        through: TimeInterval, clusterIDs: [String: String])] = [:]
+    private var liveSpeakerIndexes: [UUID: SpeakerEvidenceIndex] = [:]
+    private var lastSpeakerBatch: [UUID: UUID] = [:]
 
     private static var schema: Schema {
         Schema([
@@ -314,10 +317,10 @@ final class MeetingRepository {
         meetingID: UUID
     ) throws -> [CanonicalTranscriptEntry] {
         let meeting = try meeting(id: meetingID)
-        return TranscriptCorrectionResolver.resolve(
+        return AutomaticSpeakerAttribution.complete(TranscriptCorrectionResolver.resolve(
             transcripts: meeting.transcripts,
             corrections: meeting.transcriptCorrections
-        )
+        ))
     }
 
     private func resolvedNewTranscriptCorrectionTarget(
@@ -1082,8 +1085,12 @@ final class MeetingRepository {
         )
         if let history = liveSpeakerHistory[meetingID] {
             transcript.source = history.source
-            if end <= history.through {
-                transcript.speakerID = Self.overlappingSpeaker(start: start, end: end, intervals: history.intervals)
+            if speakerID == nil {
+                let index = liveSpeakerIndexes[meetingID] ?? SpeakerEvidenceIndex(history.intervals)
+                let evidence = index.evidence(start: start, end: end)
+                transcript.speakerID = index.bestEffortSpeaker(start: start, end: end, evidence: evidence)
+                    ?? AutomaticSpeakerAttribution.defaultID(for: history.source)
+                transcript.attributionStatus = evidence.status == .uncertain ? .inferred : evidence.status
             }
         }
         context.insert(transcript)
@@ -1113,10 +1120,11 @@ final class MeetingRepository {
         let previousTranscripts = meeting.transcripts
         let previousSpeakerNames = meeting.speakerNames
         let previousUpdatedAt = meeting.updatedAt
+        let stabilized = ManualSpeakerAssignment.stabilize(drafts, against: previousTranscripts)
+        let protectedDrafts = AutomaticSpeakerAttribution.complete(try SpeakerReplacementEditProtection.preserveEditedRows(
+            in: stabilized, originals: previousTranscripts, corrections: meeting.transcriptCorrections
+        ))
         let contentSnapshot = try beginContentMutation(for: meeting)
-        let protectedDrafts = SpeakerReplacementEditProtection.preserveEditedRows(
-            in: drafts, originals: previousTranscripts, corrections: meeting.transcriptCorrections
-        )
         let replacements = protectedDrafts.enumerated().map { sequenceIndex, draft in
             TranscriptRecord(
                 startTime: draft.transcript.startTime,
@@ -1129,7 +1137,10 @@ final class MeetingRepository {
                 sequenceIndex: sequenceIndex,
                 words: draft.transcript.words,
                 attributionStatus: draft.attributionStatus,
-                sourceEvidence: draft.sourceEvidence
+                sourceEvidence: draft.sourceEvidence,
+                automaticSpeakerID: draft.automaticSpeakerID,
+                automaticAttributionStatus: draft.automaticAttributionStatus,
+                reviewHint: draft.reviewHint
             )
         }
 
@@ -1140,15 +1151,21 @@ final class MeetingRepository {
 
         replacements.forEach(replacementContext.insert)
         if !previousSpeakerNames.isEmpty {
+            let previousCanonical = AutomaticSpeakerAttribution.complete(TranscriptCorrectionResolver.resolve(
+                transcripts: previousTranscripts, corrections: meeting.transcriptCorrections))
             let evidence = previousSpeakerNames.map { name in
                 SpeakerNameEvidence(speakerID: name.speakerID, displayName: name.displayName,
-                    intervals: previousTranscripts.filter { $0.speakerID == name.speakerID }.map {
+                    intervals: previousCanonical.filter { $0.speakerID == name.speakerID }.map {
                         SpeakerNameEvidenceInterval(startTime: $0.startTime, endTime: $0.endTime, source: $0.source)
                     })
             }
-            let names = SpeakerNameRemapper().remap(oldNamedSpeakers: evidence, newDrafts: drafts)
+            var names = SpeakerNameRemapper().remap(oldNamedSpeakers: evidence, newDrafts: protectedDrafts)
+            let manualIDs = Set(previousTranscripts.filter { $0.attributionStatus == .manuallyAssigned }.compactMap(\.speakerID))
+            for name in previousSpeakerNames where manualIDs.contains(name.speakerID) {
+                names[name.speakerID] = name.displayName
+            }
             let renamed = names.compactMap { speakerID, displayName -> SpeakerNameRecord? in
-                let matching = drafts.filter { $0.speakerID == speakerID }
+                let matching = protectedDrafts.filter { $0.speakerID == speakerID }
                 guard let start = matching.map(\.transcript.startTime).min(),
                       let end = matching.map(\.transcript.endTime).max() else { return nil }
                 return SpeakerNameRecord(speakerID: speakerID, displayName: displayName,
@@ -1164,6 +1181,7 @@ final class MeetingRepository {
         do {
             try contextSaver(replacementContext)
             synchronizeRegisteredCorrections(correctionRebinds)
+            lastSpeakerBatch.removeValue(forKey: meetingID)
         } catch {
             replacementContext.rollback()
             correctionRebinds.forEach { $0.restore() }
@@ -1197,29 +1215,53 @@ final class MeetingRepository {
             return
         }
         var history = liveSpeakerHistory[meetingID]
-            ?? (source: batch.source, intervals: [], through: 0)
+            ?? (source: batch.source, intervals: [], through: 0, clusterIDs: [:])
         guard batch.startTime >= history.through, batch.endTime > batch.startTime else { return }
-        history.intervals.append(contentsOf: batch.intervals)
+        let manualIDs = Set(meeting.transcripts.filter { $0.attributionStatus == .manuallyAssigned }.compactMap(\.speakerID))
+        var allocated = Set(meeting.transcripts.compactMap(\.speakerID)).union(history.clusterIDs.values)
+        for interval in batch.intervals {
+            let raw = interval.rawSpeakerID
+            if history.clusterIDs[raw] == nil {
+                // Newly discovered automatic clusters cannot take a number
+                // already created by the human. Existing clusters keep IDs.
+                let collision = manualIDs.contains(raw) || history.clusterIDs.values.contains(raw)
+                let stable = collision
+                    ? ManualSpeakerAssignment.nextSpeakerID(records: meeting.transcripts,
+                        mode: meeting.mode, reservedIDs: allocated) : raw
+                history.clusterIDs[raw] = stable
+                allocated.insert(stable)
+            }
+            history.intervals.append(.init(rawSpeakerID: history.clusterIDs[raw]!,
+                startTime: interval.startTime, endTime: interval.endTime))
+        }
         history.through = batch.endTime
-        let changes = meeting.transcripts.compactMap { record -> (TranscriptRecord, String?, String?, String)? in
-            guard record.isFinal, record.endTime <= batch.endTime,
-                  record.endTime > batch.startTime,
-                  let speaker = Self.overlappingSpeaker(start: record.startTime, end: record.endTime, intervals: history.intervals),
-                  record.speakerID != speaker || record.source != batch.source else { return nil }
-            return (record, record.speakerID, record.sourceRawValue, speaker)
+        // One index per batch, shared by all overlapping and late-delivered
+        // sentences; do not linearly rescan a four-hour history for each row.
+        let index = SpeakerEvidenceIndex(history.intervals)
+        let changes = meeting.transcripts.compactMap { record -> (TranscriptRecord, String?, String?, String?, String, SpeakerAttributionStatus)? in
+            guard record.isFinal, record.attributionStatus != .manuallyAssigned, record.endTime <= batch.endTime,
+                  record.endTime > batch.startTime else { return nil }
+            let evidence = index.evidence(start: record.startTime, end: record.endTime)
+            let speaker = index.bestEffortSpeaker(start: record.startTime, end: record.endTime, evidence: evidence)
+                ?? AutomaticSpeakerAttribution.defaultID(for: batch.source)
+            let status: SpeakerAttributionStatus = evidence.status == .uncertain ? .inferred : evidence.status
+            guard record.speakerID != speaker || record.source != batch.source || record.attributionStatus != status else { return nil }
+            return (record, record.speakerID, record.sourceRawValue, record.attributionStatusRawValue, speaker, status)
         }
         if !changes.isEmpty {
             let previousUpdatedAt = meeting.updatedAt
             let snapshot = try beginContentMutation(for: meeting)
-            for (record, _, _, speaker) in changes {
+            for (record, _, _, _, speaker, status) in changes {
                 record.speakerID = speaker
                 record.source = batch.source
+                record.attributionStatus = status
             }
             meeting.updatedAt = .now
             do { try saveContext() } catch {
-                for (record, speaker, source, _) in changes {
+                for (record, speaker, source, status, _, _) in changes {
                     record.speakerID = speaker
                     record.sourceRawValue = source
+                    record.attributionStatusRawValue = status
                 }
                 meeting.updatedAt = previousUpdatedAt
                 snapshot.restore(meeting)
@@ -1227,31 +1269,149 @@ final class MeetingRepository {
             }
         }
         liveSpeakerHistory[meetingID] = history
+        liveSpeakerIndexes[meetingID] = index
     }
 
     func beginLiveSpeakerAttribution(meetingID: UUID, mode: MeetingMode) {
-        liveSpeakerHistory[meetingID] = (source: mode == .online ? .mixed : .room, intervals: [], through: 0)
+        liveSpeakerHistory[meetingID] = (source: mode == .online ? .mixed : .room,
+            intervals: [], through: 0, clusterIDs: [:])
+        liveSpeakerIndexes[meetingID] = SpeakerEvidenceIndex([])
     }
 
     func endLiveSpeakerAttribution(meetingID: UUID) {
         liveSpeakerHistory.removeValue(forKey: meetingID)
-    }
-
-    private static func overlappingSpeaker(start: TimeInterval, end: TimeInterval, intervals: [SpeakerInterval]) -> String? {
-        var best: String?
-        var greatestOverlap: TimeInterval = 0
-        for interval in intervals {
-            let overlap = min(end, interval.endTime) - max(start, interval.startTime)
-            if overlap > greatestOverlap {
-                greatestOverlap = overlap
-                best = interval.rawSpeakerID
-            }
-        }
-        return best
+        liveSpeakerIndexes.removeValue(forKey: meetingID)
     }
 
     func speakerDisplayNames(meetingID: UUID) throws -> [String: String] {
         try meeting(id: meetingID).speakerDisplayNames
+    }
+
+    // A nil selection removes the human override and restores the latest
+    // automatic estimate. Every ID must still belong to this exact meeting.
+    @discardableResult
+    func assignSpeaker(meetingID: UUID, transcriptIDs: [UUID], speakerID: String?,
+                       createNew: Bool = false, displayName: String? = nil) throws -> String? {
+        let meeting = try meeting(id: meetingID)
+        let normalizedName = try displayName.map(Self.normalizedSpeakerDisplayName)
+        let ids = Set(transcriptIDs)
+        let rows = meeting.transcripts.filter { ids.contains($0.id) }
+        guard !ids.isEmpty, rows.count == ids.count, rows.allSatisfy(\.isFinal) else {
+            throw SpeakerAssignmentError.staleTranscript
+        }
+        let selected = createNew
+            ? ManualSpeakerAssignment.nextSpeakerID(records: meeting.transcripts, mode: meeting.mode,
+                reservedIDs: Set(liveSpeakerHistory[meetingID]?.clusterIDs.values.map { $0 } ?? [])
+                    .union(try canonicalTranscripts(meetingID: meetingID).compactMap(\.speakerID))) : speakerID
+        if let selected, !createNew,
+           !meeting.transcripts.contains(where: {
+               $0.speakerID == selected || ($0.reviewHint?.canGroupForReview == true && $0.reviewHint?.candidateSpeakerID == selected)
+           }), !(try canonicalTranscripts(meetingID: meetingID)).contains(where: { $0.speakerID == selected }) {
+            throw SpeakerAssignmentError.invalidSpeaker
+        }
+        let previous = rows.map { ($0, $0.speakerID, $0.attributionStatusRawValue,
+                                   $0.automaticSpeakerID, $0.automaticSpeakerStatusRawValue) }
+        let updatedAt = meeting.updatedAt
+        let snapshot = try beginContentMutation(for: meeting)
+        var insertedName: SpeakerNameRecord?
+        var previousName: (SpeakerNameRecord, SpeakerNameSnapshot)?
+        if let normalizedName, let selected {
+            if let name = meeting.speakerNames.first(where: { $0.speakerID == selected }) {
+                previousName = (name, SpeakerNameSnapshot(name))
+                name.displayName = normalizedName
+                name.updatedAt = .now
+            } else {
+                let name = SpeakerNameRecord(speakerID: selected, displayName: normalizedName,
+                    evidenceStartTime: rows.map(\.startTime).min()!,
+                    evidenceEndTime: rows.map(\.endTime).max()!, meeting: meeting)
+                context.insert(name)
+                meeting.speakerNames.append(name)
+                insertedName = name
+            }
+        }
+        for row in rows {
+            if let selected {
+                if row.attributionStatus != .manuallyAssigned {
+                    row.automaticSpeakerID = row.speakerID
+                    row.automaticSpeakerStatusRawValue = row.attributionStatusRawValue
+                }
+                row.speakerID = selected
+                row.attributionStatus = .manuallyAssigned
+            } else if row.attributionStatus == .manuallyAssigned {
+                row.speakerID = row.automaticSpeakerID
+                row.attributionStatusRawValue = row.automaticSpeakerStatusRawValue
+                row.automaticSpeakerID = nil
+                row.automaticSpeakerStatusRawValue = nil
+            }
+        }
+        meeting.updatedAt = .now
+        do { try saveContext() } catch {
+            if let insertedName {
+                meeting.speakerNames.removeAll { $0 === insertedName }
+                context.delete(insertedName)
+            }
+            if let (name, old) = previousName { old.restore(name) }
+            for (row, id, status, automatic, automaticStatus) in previous {
+                row.speakerID = id
+                row.attributionStatusRawValue = status
+                row.automaticSpeakerID = automatic
+                row.automaticSpeakerStatusRawValue = automaticStatus
+            }
+            meeting.updatedAt = updatedAt
+            snapshot.restore(meeting)
+            throw error
+        }
+        lastSpeakerBatch.removeValue(forKey: meetingID)
+        return selected
+    }
+
+    func assignSpeakerBatch(meetingID: UUID, preview: [SpeakerReviewRowSnapshot],
+                            speakerID: String) throws -> SpeakerBatchAssignmentReceipt {
+        let meeting = try meeting(id: meetingID)
+        let ids = Set(preview.map(\.id))
+        let byID = Dictionary(uniqueKeysWithValues: meeting.transcripts.map { ($0.id, $0) })
+        guard !preview.isEmpty, ids.count == preview.count,
+              preview.allSatisfy({ expected in
+                  guard expected.hint.canGroupForReview, let row = byID[expected.id] else { return false }
+                  return expected.matches(row)
+              }) else { throw SpeakerAssignmentError.staleTranscript }
+        let rows = preview.compactMap { byID[$0.id] }
+        let before = rows.map(SpeakerAssignmentSnapshot.init)
+        try assignSpeaker(meetingID: meetingID, transcriptIDs: preview.map(\.id), speakerID: speakerID)
+        let receipt = SpeakerBatchAssignmentReceipt(id: UUID(), meetingID: meetingID, speakerID: speakerID,
+            before: before, after: rows.map(SpeakerAssignmentSnapshot.init))
+        lastSpeakerBatch[meetingID] = receipt.id
+        return receipt
+    }
+
+    func canUndoSpeakerBatch(_ receipt: SpeakerBatchAssignmentReceipt) -> Bool {
+        guard lastSpeakerBatch[receipt.meetingID] == receipt.id,
+              let meeting = try? meeting(id: receipt.meetingID) else { return false }
+        let byID = Dictionary(uniqueKeysWithValues: meeting.transcripts.map { ($0.id, $0) })
+        return receipt.after.allSatisfy { expected in
+            byID[expected.id].map { SpeakerAssignmentSnapshot($0) == expected } ?? false
+        }
+    }
+
+    func isLatestSpeakerBatch(_ receipt: SpeakerBatchAssignmentReceipt) -> Bool {
+        lastSpeakerBatch[receipt.meetingID] == receipt.id
+    }
+
+    func undoSpeakerBatch(_ receipt: SpeakerBatchAssignmentReceipt) throws {
+        guard canUndoSpeakerBatch(receipt) else { throw SpeakerAssignmentError.staleTranscript }
+        let meeting = try meeting(id: receipt.meetingID)
+        let byID = Dictionary(uniqueKeysWithValues: meeting.transcripts.map { ($0.id, $0) })
+        let updatedAt = meeting.updatedAt
+        let snapshot = try beginContentMutation(for: meeting)
+        for previous in receipt.before { if let row = byID[previous.id] { previous.restore(row) } }
+        meeting.updatedAt = .now
+        do { try saveContext() } catch {
+            for current in receipt.after { if let row = byID[current.id] { current.restore(row) } }
+            meeting.updatedAt = updatedAt
+            snapshot.restore(meeting)
+            throw error
+        }
+        lastSpeakerBatch.removeValue(forKey: receipt.meetingID)
     }
 
     func setSpeakerDisplayName(
@@ -1263,7 +1423,7 @@ final class MeetingRepository {
         let normalizedName = try Self.normalizedSpeakerDisplayName(displayName)
 
         let meeting = try meeting(id: meetingID)
-        let matchingTranscripts = meeting.transcripts.filter {
+        let matchingTranscripts = try canonicalTranscripts(meetingID: meetingID).filter {
             $0.speakerID == speakerID
         }
         guard let evidenceStartTime = matchingTranscripts
@@ -2501,10 +2661,11 @@ final class MeetingRepository {
         let previousStateRawValue = meeting.speakerProcessingStateRawValue
         let previousErrorCode = meeting.speakerProcessingErrorCode
         let previousUpdatedAt = meeting.updatedAt
-        let contentSnapshot = try beginContentMutation(for: meeting)
-        let protectedDrafts = SpeakerReplacementEditProtection.preserveEditedRows(
-            in: drafts, originals: previousTranscripts, corrections: meeting.transcriptCorrections
+        let stabilized = ManualSpeakerAssignment.stabilize(drafts, against: previousTranscripts)
+        let protectedDrafts = try SpeakerReplacementEditProtection.preserveEditedRows(
+            in: stabilized, originals: previousTranscripts, corrections: meeting.transcriptCorrections
         )
+        let contentSnapshot = try beginContentMutation(for: meeting)
         let replacements = protectedDrafts.enumerated().map { sequenceIndex, draft in
             TranscriptRecord(
                 startTime: draft.transcript.startTime,
@@ -2517,11 +2678,28 @@ final class MeetingRepository {
                 sequenceIndex: sequenceIndex,
                 words: draft.transcript.words,
                 attributionStatus: draft.attributionStatus,
-                sourceEvidence: draft.sourceEvidence
+                sourceEvidence: draft.sourceEvidence,
+                automaticSpeakerID: draft.automaticSpeakerID,
+                automaticAttributionStatus: draft.automaticAttributionStatus,
+                reviewHint: draft.reviewHint
             )
         }
         let now = Date.now
-        let replacementSpeakerNames = speakerDisplayNames
+        var preservedNames = speakerDisplayNames
+        if previousTranscripts.contains(where: { $0.attributionStatus == .manuallyAssigned }) {
+            let evidence = previousSpeakerNames.map { name in
+                SpeakerNameEvidence(speakerID: name.speakerID, displayName: name.displayName,
+                    intervals: previousTranscripts.filter { $0.speakerID == name.speakerID }.map {
+                        SpeakerNameEvidenceInterval(startTime: $0.startTime, endTime: $0.endTime, source: $0.source)
+                    })
+            }
+            preservedNames = SpeakerNameRemapper().remap(oldNamedSpeakers: evidence, newDrafts: protectedDrafts)
+            let manualIDs = Set(previousTranscripts.filter { $0.attributionStatus == .manuallyAssigned }.compactMap(\.speakerID))
+            for name in previousSpeakerNames where manualIDs.contains(name.speakerID) {
+                preservedNames[name.speakerID] = name.displayName
+            }
+        }
+        let replacementSpeakerNames = preservedNames
             .sorted { $0.key < $1.key }
             .compactMap { speakerID, displayName -> SpeakerNameRecord? in
                 guard let normalizedName = AppSettingsStore
@@ -2563,6 +2741,7 @@ final class MeetingRepository {
         do {
             try contextSaver(transactionContext)
             synchronizeRegisteredCorrections(correctionRebinds)
+            lastSpeakerBatch.removeValue(forKey: meetingID)
         } catch {
             transactionContext.rollback()
             correctionRebinds.forEach { $0.restore() }

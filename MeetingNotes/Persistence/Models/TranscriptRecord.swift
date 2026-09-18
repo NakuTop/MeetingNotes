@@ -15,6 +15,9 @@ final class TranscriptRecord {
     var wordTimingsData: Data?
     var attributionStatusRawValue: String?
     var speakerSourceEvidenceRawValue: String?
+    var automaticSpeakerID: String?
+    var automaticSpeakerStatusRawValue: String?
+    var speakerReviewHintData: Data?
     var meeting: MeetingRecord?
 
     var words: [TranscriptWordTiming] {
@@ -42,6 +45,11 @@ final class TranscriptRecord {
         }
     }
 
+    var reviewHint: SpeakerReviewHint? {
+        get { speakerReviewHintData.flatMap { try? JSONDecoder().decode(SpeakerReviewHint.self, from: $0) } }
+        set { speakerReviewHintData = newValue.flatMap { try? JSONEncoder().encode($0) } }
+    }
+
     init(
         id: UUID = UUID(),
         startTime: TimeInterval,
@@ -55,6 +63,9 @@ final class TranscriptRecord {
         words: [TranscriptWordTiming] = [],
         attributionStatus: SpeakerAttributionStatus? = nil,
         sourceEvidence: SpeakerSourceEvidence? = nil,
+        automaticSpeakerID: String? = nil,
+        automaticAttributionStatus: SpeakerAttributionStatus? = nil,
+        reviewHint: SpeakerReviewHint? = nil,
         meeting: MeetingRecord? = nil
     ) {
         self.id = id
@@ -69,6 +80,9 @@ final class TranscriptRecord {
         wordTimingsData = words.isEmpty ? nil : try? JSONEncoder().encode(words)
         attributionStatusRawValue = attributionStatus?.rawValue
         speakerSourceEvidenceRawValue = sourceEvidence?.rawValue
+        self.automaticSpeakerID = automaticSpeakerID
+        automaticSpeakerStatusRawValue = automaticAttributionStatus?.rawValue
+        speakerReviewHintData = reviewHint.flatMap { try? JSONEncoder().encode($0) }
         self.meeting = meeting
     }
 }

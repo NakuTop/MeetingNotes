@@ -799,6 +799,70 @@ final class MeetingDetailViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.noteDraftToken(forID: note.id))
     }
 
+    func testFourHourEditingReusesCanonicalProjectionAndInvalidatesAfterPersistence() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let id = try repository.createMeeting(mode: .offline, startedAt: .now)
+        let meeting = try repository.meeting(id: id)
+        meeting.transcripts = (0..<3_000).map { index in
+            TranscriptRecord(startTime: Double(index) * 4.8, endTime: Double(index) * 4.8 + 4,
+                text: "性能测试原句\(index)", isFinal: true, speakerID: "room-\((index / 3) % 5 + 1)",
+                sourceRawValue: TranscriptAudioSource.room.rawValue, sequenceIndex: index, meeting: meeting)
+        }
+        try repository.updateMeetingState(id: id, state: .ready)
+        let autosaver = MeetingEditAutosaver(delay: { _ in throw CancellationError() })
+        let viewModel = MeetingDetailViewModel(meetingID: id, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(), titleUpdater: DetailTitleUpdaterSpy(),
+            editAutosaver: autosaver)
+        let target = MeetingTranscriptEditTarget(turn: try XCTUnwrap(viewModel.timelineProjection.visibleTurns.first))
+        XCTAssertEqual(viewModel.canonicalProjectionBuildCount, 1)
+        let start = ContinuousClock.now
+        for i in 0..<200 { viewModel.updateTranscriptDraft("手动输入\(i)", for: target) }
+        let elapsed = ContinuousClock.now - start
+        print("LONG_MEETING_EDIT_BENCHMARK rows=3000 inputs=200 elapsed=\(elapsed)")
+        XCTAssertEqual(viewModel.canonicalProjectionBuildCount, 1, "Typing must not rebuild the whole canonical transcript")
+        XCTAssertEqual(viewModel.transcriptDraftText(for: target), "手动输入199")
+        XCTAssertLessThan(elapsed, .seconds(2))
+        await viewModel.flushEdits()
+        XCTAssertEqual(viewModel.canonicalProjectionBuildCount, 2)
+        XCTAssertEqual(try repository.canonicalTranscripts(meetingID: id).first?.text, "手动输入199")
+        XCTAssertEqual(try repository.transcripts(meetingID: id).count, 3_000)
+        autosaver.cancel()
+    }
+
+    func testLongSingleSpeakerTurnStaysEditableWithoutRebuildingEveryKeystroke() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let id = try repository.createMeeting(mode: .offline, startedAt: .now)
+        let meeting = try repository.meeting(id: id)
+        meeting.transcripts = (0..<3_000).map { index in
+            TranscriptRecord(startTime: Double(index) * 4.8, endTime: Double(index) * 4.8 + 4,
+                text: "连续发言原句\(index)", isFinal: true, speakerID: "room-1",
+                sourceRawValue: TranscriptAudioSource.room.rawValue, sequenceIndex: index, meeting: meeting)
+        }
+        try repository.updateMeetingState(id: id, state: .ready)
+        let autosaver = MeetingEditAutosaver(delay: { _ in throw CancellationError() })
+        let viewModel = MeetingDetailViewModel(meetingID: id, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(), titleUpdater: DetailTitleUpdaterSpy(),
+            editAutosaver: autosaver)
+        XCTAssertEqual(viewModel.timelineProjection.visibleTurns.count, 1)
+        let target = MeetingTranscriptEditTarget(turn: try XCTUnwrap(viewModel.timelineProjection.visibleTurns.first))
+        XCTAssertEqual(target.transcriptIDs.count, 3_000)
+        let original = target.originalText
+        let start = ContinuousClock.now
+        for i in 0..<200 { viewModel.updateTranscriptDraft(original + "补充\(i)", for: target) }
+        let elapsed = ContinuousClock.now - start
+        print("LONG_SINGLE_SPEAKER_EDIT_BENCHMARK rows=3000 inputs=200 elapsed=\(elapsed)")
+        XCTAssertEqual(viewModel.canonicalProjectionBuildCount, 1)
+        XCTAssertLessThan(elapsed, .seconds(2))
+        await viewModel.flushEdits()
+        XCTAssertEqual(try repository.canonicalTranscripts(meetingID: id).map(\.text), [original + "补充199"])
+        XCTAssertEqual(try repository.transcripts(meetingID: id).count, 3_000)
+        // A native undo using the pre-autosave target must still restore text.
+        viewModel.updateTranscriptDraft(original, for: target)
+        await viewModel.flushEdits()
+        XCTAssertEqual(try repository.canonicalTranscripts(meetingID: id).map(\.text), [original])
+        autosaver.cancel()
+    }
+
     func testCharacterOnlyTranscriptDraftUpdateReusesTimelineProjection()
         throws {
         let repository = try MeetingRepository.inMemory()
@@ -1116,7 +1180,7 @@ final class MeetingDetailViewModelTests: XCTestCase {
         try repository.appendTranscript(meetingID: meetingID, start: 3, end: 4, text: "结束后的最后一句")
         try repository.updateMeetingState(id: meetingID, state: .ready)
         await refresh.value
-        XCTAssertEqual(viewModel.timelineProjection.visibleTurns.map(\.text), ["实时第一句", "结束后的最后一句"])
+        XCTAssertEqual(viewModel.timelineProjection.visibleTurns.map(\.text), ["实时第一句 结束后的最后一句"])
     }
 
     func testPlaybackTaskCancellationStillPublishesFinalTranscript() async throws {
@@ -1352,6 +1416,10 @@ final class MeetingDetailViewModelTests: XCTestCase {
                 "部分分轨处理失败，已使用可用录音和转录，不影响播放、总结与同步。"
             ),
             (
+                SpeakerDiarizationRetryUseCase.speakerCountMismatchCode,
+                "识别到的说话人数与指定人数不一致，已自动标注最可能的说话人；如有错误，可点击标签修改。"
+            ),
+            (
                 "speaker_diarization_model_preparation_failed",
                 "说话人模型未准备好，请检查网络后重试。"
             ),
@@ -1574,6 +1642,27 @@ final class MeetingDetailViewModelTests: XCTestCase {
         try repository.updateMeetingState(id: meetingID, state: .recording)
         viewModel.load()
         XCTAssertFalse(viewModel.canRetrySpeakerDiarization)
+    }
+
+    func testOneClickAutomaticRetryDoesNotReuseLegacySpeakerCount() async throws {
+        let repository = try MeetingRepository.inMemory()
+        let id = try repository.createMeeting(mode: .offline, startedAt: .now, speakerDiarizationRequested: true)
+        let meeting = try repository.meeting(id: id)
+        meeting.speakerProcessingState = .completed
+        meeting.speakerCountConstraint = .exact(5)
+        try repository.updateMeetingState(id: id, state: .ready)
+        let retryer = DetailSpeakerRetrySpy()
+        let viewModel = MeetingDetailViewModel(meetingID: id, repository: repository,
+            settingsStore: makeSettingsStore(), action: DetailActionSpy(),
+            titleUpdater: DetailTitleUpdaterSpy(), speakerDiarizationRetryer: retryer)
+
+        viewModel.startSpeakerDiarizationRetry(speakerCount: .automatic)
+        await viewModel.waitForSpeakerDiarizationRetry()
+
+        XCTAssertEqual(retryer.requests, [id])
+        XCTAssertEqual(retryer.counts, [.automatic])
+        XCTAssertFalse(viewModel.isRetryingSpeakerDiarization)
+        XCTAssertNil(viewModel.speakerDiarizationRetryErrorMessage)
     }
 
     func testViewIndependentSpeakerRetryOwnsTaskUntilCompletion() async throws {
@@ -3886,9 +3975,15 @@ private final class DetailTitleUpdaterSpy: MeetingTitleUpdating {
 private final class DetailSpeakerRetrySpy:
     MeetingSpeakerDiarizationRetrying {
     private(set) var requests: [UUID] = []
+    private(set) var counts: [SpeakerCountConstraint] = []
 
     func retry(meetingID: UUID) async throws {
         requests.append(meetingID)
+    }
+
+    func retry(meetingID: UUID, speakerCount: SpeakerCountConstraint) async throws {
+        counts.append(speakerCount)
+        try await retry(meetingID: meetingID)
     }
 }
 

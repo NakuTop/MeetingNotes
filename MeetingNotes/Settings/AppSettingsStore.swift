@@ -15,6 +15,7 @@ final class AppSettingsStore {
             "settings.speakerDiarizationEnabled"
         static let frequentSpeakerNames =
             "settings.frequentSpeakerNames"
+        static let localVoiceprintsEnabled = "settings.localVoiceprintsEnabled"
         static let preferredInputDeviceID =
             "settings.preferredInputDeviceID"
         static let preferredOutputDeviceID =
@@ -26,6 +27,18 @@ final class AppSettingsStore {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+    }
+
+    var localVoiceprintsEnabled: Bool {
+        get {
+            access(keyPath: \AppSettingsStore.localVoiceprintsEnabled)
+            return defaults.bool(forKey: Key.localVoiceprintsEnabled)
+        }
+        set {
+            withMutation(keyPath: \AppSettingsStore.localVoiceprintsEnabled) {
+                defaults.set(newValue, forKey: Key.localVoiceprintsEnabled)
+            }
+        }
     }
 
     var deepSeekModel: String {
@@ -89,6 +102,11 @@ final class AppSettingsStore {
     var isSpeakerDiarizationEnabled: Bool {
         get {
             access(keyPath: \AppSettingsStore.isSpeakerDiarizationEnabled)
+            // Missing preference opts into the automatic local workflow; an
+            // existing explicit opt-out must survive updates unchanged.
+            guard defaults.object(forKey: Key.speakerDiarizationEnabled) != nil else {
+                return true
+            }
             return defaults.bool(forKey: Key.speakerDiarizationEnabled)
         }
         set {

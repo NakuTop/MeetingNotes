@@ -11,6 +11,7 @@ struct CanonicalTranscriptEntry: Identifiable, Equatable, Sendable {
     let isManuallyEdited: Bool
     var attributionStatus: SpeakerAttributionStatus? = nil
     var sourceEvidence: SpeakerSourceEvidence? = nil
+    var reviewHint: SpeakerReviewHint? = nil
 }
 
 @MainActor
@@ -22,6 +23,9 @@ enum TranscriptCorrectionResolver {
         corrections: [TranscriptCorrectionRecord]
     ) -> [CanonicalTranscriptEntry] {
         let orderedTranscripts = transcripts.sorted(by: transcriptComesBefore)
+        // Most live rows have no corrections. Avoid building ID/availability
+        // indexes and sorting positioned entries again for this common path.
+        if corrections.isEmpty { return orderedTranscripts.map(rawEntry) }
         let orderedCorrections = corrections.sorted(by: correctionComesBefore)
         let storedTranscriptIDs = orderedCorrections.map(\.transcriptIDs)
         let transcriptIndexByID = orderedTranscripts.indices.reduce(
@@ -90,18 +94,7 @@ enum TranscriptCorrectionResolver {
             let transcript = orderedTranscripts[index]
             entries.append(
                 PositionedEntry(
-                    entry: CanonicalTranscriptEntry(
-                        id: transcript.id,
-                        transcriptIDs: [transcript.id],
-                        startTime: transcript.startTime,
-                        endTime: transcript.endTime,
-                        text: transcript.text,
-                        speakerID: transcript.speakerID,
-                        source: transcript.source,
-                        isManuallyEdited: false,
-                        attributionStatus: transcript.attributionStatus,
-                        sourceEvidence: transcript.sourceEvidence
-                    ),
+                    entry: rawEntry(transcript),
                     sequenceIndex: transcript.sequenceIndex
                 )
             )
@@ -144,6 +137,14 @@ enum TranscriptCorrectionResolver {
         }
 
         return entries.sorted(by: positionedEntryComesBefore).map(\.entry)
+    }
+
+    private static func rawEntry(_ transcript: TranscriptRecord) -> CanonicalTranscriptEntry {
+        CanonicalTranscriptEntry(id: transcript.id, transcriptIDs: [transcript.id],
+            startTime: transcript.startTime, endTime: transcript.endTime, text: transcript.text,
+            speakerID: transcript.speakerID, source: transcript.source, isManuallyEdited: false,
+            attributionStatus: transcript.attributionStatus, sourceEvidence: transcript.sourceEvidence,
+            reviewHint: transcript.reviewHint)
     }
 
     /// Fallback reattachment is deliberately conservative. A candidate must
@@ -284,7 +285,8 @@ enum TranscriptCorrectionResolver {
             attributionStatus: matchedTranscripts.contains { $0.attributionStatus == .overlapping }
                 ? .overlapping : (speakerIDs.count > 1 ? .uncertain : matchedTranscripts.first?.attributionStatus),
             sourceEvidence: Set(matchedTranscripts.map(\.sourceEvidence)).count == 1
-                ? matchedTranscripts.first?.sourceEvidence : .mixed
+                ? matchedTranscripts.first?.sourceEvidence : .mixed,
+            reviewHint: SpeakerReviewHint.consensus(matchedTranscripts.map(\.reviewHint))
         )
     }
 

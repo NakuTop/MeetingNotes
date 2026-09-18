@@ -23,9 +23,15 @@ protocol SpeakerDiarizing: Sendable {
     ) async throws -> [SpeakerInterval]
 
     func diarize(source: MeetingAudioSource, speakerCount: SpeakerCountConstraint) async throws -> [SpeakerInterval]
+    func analyze(source: MeetingAudioSource, speakerCount: SpeakerCountConstraint,
+                 reviewSpans: [SpeakerReviewSpan]) async throws -> SpeakerDiarizationAnalysis
 }
 
 extension SpeakerDiarizing {
+    func analyze(source: MeetingAudioSource, speakerCount: SpeakerCountConstraint,
+                 reviewSpans: [SpeakerReviewSpan]) async throws -> SpeakerDiarizationAnalysis {
+        .init(intervals: try await diarize(source: source, speakerCount: speakerCount))
+    }
     func diarize(source: MeetingAudioSource, speakerCount: SpeakerCountConstraint) async throws -> [SpeakerInterval] {
         guard speakerCount == .automatic else { throw SpeakerDiarizationError.unsupportedSpeakerCount }
         return try await diarize(source: source)

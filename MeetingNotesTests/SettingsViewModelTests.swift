@@ -1157,21 +1157,21 @@ final class SettingsViewModelTests: XCTestCase {
         )
     }
 
-    func testSpeakerDiarizationPreferenceDefaultsOffAndLoadsAndSaves() async throws {
+    func testSpeakerDiarizationDefaultsOnAndExplicitOptOutLoadsAndSaves() async throws {
         let fixture = try makeFixture()
 
         fixture.viewModel.load()
 
-        XCTAssertFalse(fixture.viewModel.isSpeakerDiarizationEnabled)
+        XCTAssertTrue(fixture.viewModel.isSpeakerDiarizationEnabled)
 
-        fixture.viewModel.isSpeakerDiarizationEnabled = true
+        fixture.viewModel.isSpeakerDiarizationEnabled = false
         let saved = await fixture.viewModel.save()
         XCTAssertTrue(saved)
-        fixture.viewModel.isSpeakerDiarizationEnabled = false
+        fixture.viewModel.isSpeakerDiarizationEnabled = true
         fixture.viewModel.load()
 
-        XCTAssertTrue(fixture.settings.isSpeakerDiarizationEnabled)
-        XCTAssertTrue(fixture.viewModel.isSpeakerDiarizationEnabled)
+        XCTAssertFalse(fixture.settings.isSpeakerDiarizationEnabled)
+        XCTAssertFalse(fixture.viewModel.isSpeakerDiarizationEnabled)
     }
 
     func testNotionArchivingPreferenceLoadsAndSaves() async throws {

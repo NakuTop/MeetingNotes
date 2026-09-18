@@ -353,22 +353,22 @@ struct SpeakerAwareTranscriptFinalizer: MeetingSpeakerFinalizing {
         }
 
         do {
-            let intervals = try await diarizer.diarize(
-                source: masterSource
-            )
-            guard !intervals.isEmpty else {
+            let analysis = try await diarizer.analyze(source: masterSource, speakerCount: .automatic,
+                                                      reviewSpans: SpeakerReviewSpan.measured(in: provisional))
+            guard !analysis.intervals.isEmpty else {
                 throw SpeakerDiarizationError.resultValidationFailed
             }
             let attributed = assembler.assemble(
                     intervalAssigner.assign(
                         provisional,
-                        intervals: intervals,
+                        intervals: analysis.intervals,
                         // Live online text comes from the mixed master. Use
                         // that same audio to attribute it without re-running
                         // Whisper over both full-length source tracks. Do not
                         // pretend a mixed sentence is definitely local/remote.
                         speakerPrefix: mode == .online ? "speaker" : "room",
-                        source: mode == .online ? .mixed : .room
+                        source: mode == .online ? .mixed : .room,
+                        refinements: analysis.refinements
                     )
             )
             let reviewed: [AttributedTranscriptDraft]

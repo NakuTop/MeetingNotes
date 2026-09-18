@@ -3,6 +3,8 @@ import SwiftUI
 struct SettingsView: View {
     @Bindable var viewModel: SettingsViewModel
     @Bindable var transcriptionModelViewModel: TranscriptionModelViewModel
+    var makeVoiceprintManagementPanel: (() -> VoiceprintPanelModel)?
+    @State private var voiceprintPanel: VoiceprintPanelModel?
 
     var body: some View {
         ScrollView {
@@ -312,11 +314,11 @@ struct SettingsView: View {
 
                 AdaptiveGlassCard {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("试验功能")
+                        Text("说话人识别")
                             .font(.headline)
 
                         Toggle(
-                            "FluidAudio 说话人分离",
+                            "自动识别说话人",
                             isOn: $viewModel.isSpeakerDiarizationEnabled
                         )
                         .accessibilityIdentifier(
@@ -324,10 +326,21 @@ struct SettingsView: View {
                         )
 
                         Text(
-                            "默认关闭，所有分离均在本地运行。首次使用可能需要下载模型，并会增加会后处理时间。录音中修改只影响下一场会议。"
+                            "AI 在本机自动识别：录制中分批标注，结束后统一校准。无需录入声纹或填写人数，点说话人标签即可改人、改名。首次使用需下载模型，会后校准需要一些时间；开关从下一场会议生效。"
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        if let makeVoiceprintManagementPanel {
+                            DisclosureGroup("高级数据管理") {
+                                Button("管理已有本机声纹…") {
+                                    voiceprintPanel = makeVoiceprintManagementPanel()
+                                }
+                                .buttonStyle(.borderless)
+                                .padding(.top, 6)
+                                .accessibilityIdentifier("settings.speakers.voiceprintData")
+                            }
+                            .font(.caption)
+                        }
                     }
                 }
 
@@ -432,6 +445,9 @@ struct SettingsView: View {
         }
         .accessibilityIdentifier("settings.scroll")
         .frame(width: 620, height: 780)
+        .sheet(item: $voiceprintPanel) { panel in
+            VoiceprintLibraryView(model: panel)
+        }
         .task {
             viewModel.audioSettingsDidAppear()
             viewModel.load()

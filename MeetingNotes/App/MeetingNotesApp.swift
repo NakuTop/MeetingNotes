@@ -85,7 +85,9 @@ struct MeetingNotesApp: App {
                 SettingsView(
                     viewModel: container.settingsViewModel,
                     transcriptionModelViewModel:
-                        container.transcriptionModelViewModel
+                        container.transcriptionModelViewModel,
+                    makeVoiceprintManagementPanel:
+                        container.makeVoiceprintManagementPanel
                 )
             case .failed:
                 ContentUnavailableView(

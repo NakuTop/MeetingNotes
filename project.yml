@@ -9,13 +9,13 @@ options:
 settings:
   base:
     ARCHS: arm64
-    CURRENT_PROJECT_VERSION: 28
+    CURRENT_PROJECT_VERSION: 32
     EXCLUDED_ARCHS: x86_64
     LD_RUNPATH_SEARCH_PATHS:
       - "$(inherited)"
       - "@executable_path/../Frameworks"
     MACOSX_DEPLOYMENT_TARGET: "15.0"
-    MARKETING_VERSION: 1.3.3
+    MARKETING_VERSION: 1.3.4
     MEETINGNOTES_DISPLAY_NAME: 会议记录
     SWIFT_STRICT_CONCURRENCY: complete
     SWIFT_VERSION: "6.0"

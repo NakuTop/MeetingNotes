@@ -3930,6 +3930,10 @@ final class MeetingRepositoryTests: XCTestCase {
         XCTAssertEqual(transcript.words, [])
         XCTAssertNil(transcript.attributionStatus)
         XCTAssertNil(transcript.sourceEvidence)
+        XCTAssertNil(transcript.automaticSpeakerID)
+        XCTAssertNil(transcript.automaticSpeakerStatusRawValue)
+        XCTAssertNil(transcript.speakerReviewHintData)
+        XCTAssertNil(transcript.reviewHint)
         XCTAssertEqual(meeting.speakerCountConstraint, .automatic)
     }
 
