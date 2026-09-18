@@ -3,6 +3,28 @@
     <channel>
         <title>MeetingNotes</title>
         <item>
+            <title>1.3.4</title>
+            <pubDate>Fri, 18 Sep 2026 23:08:40 +0800</pubDate>
+            <sparkle:version>32</sparkle:version>
+            <sparkle:shortVersionString>1.3.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# MeetingNotes 1.3.4（32）
+
+> 免费自签名正式版，未经 Apple Developer ID 签名或公证。首次安装可能需要在 macOS 中手动允许；请仅从 NakuTop/MeetingNotes 官方 GitHub 下载。支持 Apple Silicon Mac，macOS 15 或更新版本。
+
+- 简化说话人识别：在本机自动完成分批标注和会后校准，无需填写人数或逐段确认。
+- 每句转录自动显示最可能的说话人编号，不再显示“待确认”；有声学证据时优先采用证据，无证据时先给出暂定归属，后续识别再校准。自动标注不代表保证身份正确。
+- 相邻同一说话人的内容合并显示，减少重复标签。保留原始文字、时间轴、手动修改、撤销重做，以及笔记和截图边界。
+- 点击标签即可指定已有或新的说话人，也可统一修改姓名。人工指定优先于后续自动识别。
+- 优化长会议的说话人查询和文字编辑缓存，减少逐字输入时重复处理整场转录的开销；覆盖 4 小时、约 3,000 段的后台性能回归。
+- 保留原有录音、截图、Whisper 模型、Notion 手动替换同步和 DeepSeek 数据边界。音频与本地声纹不上传。
+
+验证：后台单元测试 1,509 项通过、0 失败，6 项需显式开启的真实音频探针跳过。构建、DMG 完整性、应用签名及 Sparkle 更新签名通过。未运行影响桌面操作的 UI 自动化；多人实际归属准确度与应用内安装仍需用户实测，不以自动编号或后台测试替代人工判断。
+]]></description>
+            <enclosure url="https://github.com/NakuTop/MeetingNotes/releases/download/v1.3.4/MeetingNotes.dmg" length="10074695" type="application/octet-stream" sparkle:edSignature="hbVNim9uAHF6C+WR+9eYM7RbfPCLKkXOiBhPFGo9bp+TkpVFA4RZBr7f5cddDeE3MZKnkX7FaE5P1IGVazg+CQ=="/>
+        </item>
+        <item>
             <title>1.3.3</title>
             <pubDate>Thu, 17 Sep 2026 13:43:42 +0800</pubDate>
             <sparkle:version>28</sparkle:version>
