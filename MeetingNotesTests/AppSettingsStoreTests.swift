@@ -184,7 +184,7 @@ final class AppSettingsStoreTests: XCTestCase {
         }
         let first = AppSettingsStore(defaults: defaults)
 
-        XCTAssertEqual(AppSettingsStore.defaultDeepSeekModel, "deepseek-v4-flash")
+        XCTAssertEqual(AppSettingsStore.defaultDeepSeekModel, "deepseek-flash")
         XCTAssertEqual(first.deepSeekModel, AppSettingsStore.defaultDeepSeekModel)
         XCTAssertEqual(first.notionParentPageURL, "")
 
@@ -197,6 +197,48 @@ final class AppSettingsStoreTests: XCTestCase {
             reloaded.notionParentPageURL,
             "https://www.notion.so/parent-page"
         )
+    }
+
+    func testLegacyFlashModelSettingsMigrateWithoutChangingOtherPreferences() throws {
+        for legacy in ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] {
+            let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+            defaults.set(legacy, forKey: "settings.deepSeekModel")
+            defaults.set(false, forKey: "settings.notionArchivingEnabled")
+            defaults.set("https://www.notion.so/parent", forKey: "settings.notionParentPageURL")
+
+            let store = AppSettingsStore(defaults: defaults)
+
+            XCTAssertEqual(store.deepSeekModel, "deepseek-flash", legacy)
+            XCTAssertEqual(defaults.string(forKey: "settings.deepSeekModel"), "deepseek-flash")
+            XCTAssertEqual(AppSettingsStore(defaults: defaults).deepSeekModel, "deepseek-flash")
+            XCTAssertFalse(store.isNotionArchivingEnabled)
+            XCTAssertEqual(store.notionParentPageURL, "https://www.notion.so/parent")
+        }
+    }
+
+    func testModelWritesCanonicalizeOnlyRetiredFlashAliases() throws {
+        let suiteName = "MeetingNotesTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AppSettingsStore(defaults: defaults)
+        let cases = [
+            (" deepseek-v4-flash \n", "deepseek-flash"),
+            ("deepseek-v4-flash-vision-exp", "deepseek-flash"),
+            ("deepseek-flash", "deepseek-flash"),
+            ("deepseek-v4-pro", "deepseek-v4-pro"),
+            ("deepseek-reasoner", "deepseek-reasoner"),
+            ("custom-model", "custom-model"),
+        ]
+
+        for (input, expected) in cases {
+            store.deepSeekModel = input
+
+            XCTAssertEqual(store.deepSeekModel, expected)
+            XCTAssertEqual(defaults.string(forKey: "settings.deepSeekModel"), expected)
+            XCTAssertEqual(AppSettingsStore(defaults: defaults).deepSeekModel, expected)
+        }
     }
 
     func testEmptyModelFallsBackToDefault() throws {

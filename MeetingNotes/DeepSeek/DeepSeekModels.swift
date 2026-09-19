@@ -1,5 +1,18 @@
 import Foundation
 
+enum DeepSeekModelName {
+    static let flash = "deepseek-flash"
+
+    static func canonical(_ name: String) -> String {
+        switch name.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "deepseek-v4-flash", "deepseek-v4-flash-vision-exp":
+            return flash
+        default:
+            return name
+        }
+    }
+}
+
 struct ActionItem: Codable, Equatable, Sendable {
     let task: String
     let owner: String?

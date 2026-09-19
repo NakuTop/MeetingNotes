@@ -26,7 +26,7 @@ final class DeepSeekAudioDiagnosticClientTests: XCTestCase {
                 JSONSerialization.jsonObject(with: bodyData)
                     as? [String: Any]
             )
-            XCTAssertEqual(body["model"] as? String, "deepseek-chat")
+            XCTAssertEqual(body["model"] as? String, "deepseek-flash")
             XCTAssertEqual(body["stream"] as? Bool, false)
             XCTAssertEqual(body["max_tokens"] as? Int, 256)
             XCTAssertEqual(
@@ -69,12 +69,45 @@ final class DeepSeekAudioDiagnosticClientTests: XCTestCase {
         let result = try await client.requestExplanation(
             report: clientDiagnosticReport(),
             metadata: uploadMetadata(),
-            model: "deepseek-chat"
+            model: AppSettingsStore.defaultDeepSeekModel
         )
 
         XCTAssertEqual(result.issue, "音频采集正常")
         XCTAssertEqual(result.solution, "无需修改设备。")
         XCTAssertEqual(result.source, .deepSeek)
+    }
+
+    func testDiagnosticRequestCanonicalizesOnlyRetiredFlashAliases() async throws {
+        for (model, expected) in [
+            ("deepseek-v4-flash", "deepseek-flash"),
+            ("deepseek-v4-flash-vision-exp", "deepseek-flash"),
+            ("deepseek-v4-pro", "deepseek-v4-pro"),
+            ("deepseek-chat", "deepseek-chat"),
+        ] {
+            let client = DeepSeekAudioDiagnosticClient(
+                apiKey: "test-key",
+                httpClient: HTTPClientStub { request in
+                    let body = try XCTUnwrap(
+                        JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody))
+                            as? [String: Any]
+                    )
+                    XCTAssertEqual(body["model"] as? String, expected)
+                    XCTAssertEqual(body["max_tokens"] as? Int, 256)
+                    XCTAssertEqual(body["stream"] as? Bool, false)
+                    return try chatResponse(
+                        request: request,
+                        finishReason: "stop",
+                        content: "{\"issue\":\"音频正常\",\"solution\":\"无需调整\"}"
+                    )
+                }
+            )
+
+            let result = try await client.requestExplanation(
+                report: clientDiagnosticReport(), metadata: uploadMetadata(), model: model
+            )
+
+            XCTAssertEqual(result.source, .deepSeek)
+        }
     }
 
     func testRejectsNonStopMissingEmptyOverlongAndControlCharacterResponses()

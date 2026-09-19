@@ -79,7 +79,7 @@ struct DeepSeekAudioDiagnosticClient: Sendable {
         )
         request.httpBody = try encoder.encode(
             AudioDiagnosticChatRequest(
-                model: model,
+                model: DeepSeekModelName.canonical(model),
                 messages: [
                     .init(role: "system", content: Self.systemPrompt),
                     .init(role: "user", content: userMessage)

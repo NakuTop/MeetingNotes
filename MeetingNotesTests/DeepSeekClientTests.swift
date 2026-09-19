@@ -22,7 +22,7 @@ final class DeepSeekClientTests: XCTestCase {
                 object: [
                     "object": "list",
                     "data": [
-                        ["id": "deepseek-v4-flash", "object": "model", "owned_by": "deepseek"],
+                        ["id": "deepseek-flash", "object": "model", "owned_by": "deepseek"],
                         ["id": "deepseek-v4-pro", "object": "model", "owned_by": "deepseek"]
                     ]
                 ]
@@ -32,7 +32,7 @@ final class DeepSeekClientTests: XCTestCase {
 
         let models = try await client.testConnection()
 
-        XCTAssertEqual(models, ["deepseek-v4-flash", "deepseek-v4-pro"])
+        XCTAssertEqual(models, ["deepseek-flash", "deepseek-v4-pro"])
     }
 
     func testSummaryRequestUsesJSONOutputAndParsesStructuredSummary() async throws {
@@ -48,7 +48,7 @@ final class DeepSeekClientTests: XCTestCase {
             let body = try XCTUnwrap(
                 JSONSerialization.jsonObject(with: bodyData) as? [String: Any]
             )
-            XCTAssertEqual(body["model"] as? String, "deepseek-v4-flash")
+            XCTAssertEqual(body["model"] as? String, "deepseek-flash")
             XCTAssertEqual(body["stream"] as? Bool, false)
             XCTAssertEqual(body["max_tokens"] as? Int, 4_096)
             let responseFormat = try XCTUnwrap(body["response_format"] as? [String: String])
@@ -91,7 +91,7 @@ final class DeepSeekClientTests: XCTestCase {
 
         let summary = try await client.summarize(
             input: input,
-            model: "deepseek-v4-flash"
+            model: AppSettingsStore.defaultDeepSeekModel
         )
 
         XCTAssertEqual(summary.suggestedTitle, "项目启动会")
@@ -103,6 +103,59 @@ final class DeepSeekClientTests: XCTestCase {
             [.init(task: "准备排期", owner: nil, dueDate: nil)]
         )
         XCTAssertEqual(summary.bookmarkInsights, ["00:05 启动决定"])
+    }
+
+    func testSummaryAndMinutesCanonicalizeFlashAliasesWithoutChangingOtherModels()
+        async throws {
+        let cases = [
+            ("deepseek-v4-flash", "deepseek-flash"),
+            ("deepseek-v4-flash-vision-exp", "deepseek-flash"),
+            ("deepseek-flash", "deepseek-flash"),
+            ("deepseek-v4-pro", "deepseek-v4-pro"),
+            ("custom-model", "custom-model"),
+        ]
+        let input = MeetingSummaryInput(
+            title: "模型名称回归",
+            transcripts: [.init(startTime: 0, endTime: 1, text: "测试文字")],
+            bookmarks: []
+        )
+        for (model, expected) in cases {
+            let client = DeepSeekClient(
+                apiKey: "test-key",
+                httpClient: HTTPClientStub { request in
+                    let body = try XCTUnwrap(
+                        JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody))
+                            as? [String: Any]
+                    )
+                    XCTAssertEqual(body["model"] as? String, expected)
+                    XCTAssertEqual(body["stream"] as? Bool, false)
+                    XCTAssertEqual((body["thinking"] as? [String: String])?["type"], "disabled")
+                    XCTAssertEqual((body["response_format"] as? [String: String])?["type"], "json_object")
+                    let content: String
+                    if body["max_tokens"] as? Int == 8_192 {
+                        content = String(
+                            decoding: try JSONEncoder().encode(Self.detailedMinutes(overview: "测试纪要")),
+                            as: UTF8.self
+                        )
+                    } else {
+                        XCTAssertEqual(body["max_tokens"] as? Int, 4_096)
+                        content = """
+                        {"suggestedTitle":"测试","overview":"测试摘要","keyPoints":[],"decisions":[],"actionItems":[],"bookmarkInsights":[]}
+                        """
+                    }
+                    let (response, data) = try Self.chatResponse(
+                        request: request, finishReason: "stop", content: content
+                    )
+                    return (data, response)
+                }
+            )
+
+            let summary = try await client.summarize(input: input, model: model)
+            let minutes = try await client.detailedMinutes(input: input, model: model)
+
+            XCTAssertEqual(summary.overview, "测试摘要")
+            XCTAssertEqual(minutes.overview, "测试纪要")
+        }
     }
 
     func testMapsFinishReasonAndInvalidJSONToDistinctErrors() async throws {

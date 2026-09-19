@@ -1050,8 +1050,10 @@ final class SettingsViewModel {
 
         deepSeekConnection = .testing
         do {
-            let models = try await deepSeekTester.testConnection(apiKey: apiKey)
-            availableModels = Array(Set(models)).sorted()
+            let reportedModels = try await deepSeekTester.testConnection(apiKey: apiKey)
+            let models = Array(Set(reportedModels.map(DeepSeekModelName.canonical))).sorted()
+            availableModels = models
+            selectedModel = DeepSeekModelName.canonical(selectedModel)
             if availableModels.isEmpty {
                 availableModels = [selectedModel]
             } else if !availableModels.contains(selectedModel),

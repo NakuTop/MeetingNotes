@@ -177,7 +177,7 @@ struct DeepSeekClient: Sendable {
         authorize(&request)
         request.httpBody = try encoder.encode(
             ChatCompletionRequest(
-                model: model,
+                model: DeepSeekModelName.canonical(model),
                 messages: [
                     .init(role: "system", content: systemMessage),
                     .init(role: "user", content: userMessage)

@@ -1278,6 +1278,37 @@ final class SettingsViewModelTests: XCTestCase {
         )
     }
 
+    func testDeepSeekConnectionNormalizesAndDeduplicatesRetiredFlashAliases() async throws {
+        for legacy in ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp"] {
+            let tester = RecordingDeepSeekTester(result: .success([
+                "deepseek-v4-pro", legacy, "deepseek-flash", "deepseek-v4-flash-vision-exp",
+            ]))
+            let fixture = try makeFixture(deepSeekTester: tester)
+            fixture.viewModel.deepSeekAPIKeyInput = "test-key"
+            fixture.viewModel.selectedModel = legacy
+
+            await fixture.viewModel.testDeepSeekConnection()
+
+            XCTAssertEqual(fixture.viewModel.availableModels, ["deepseek-flash", "deepseek-v4-pro"])
+            XCTAssertEqual(fixture.viewModel.selectedModel, "deepseek-flash")
+            XCTAssertEqual(fixture.viewModel.deepSeekConnection, .succeeded(message: "连接成功，发现 2 个模型"))
+        }
+    }
+
+    func testDeepSeekConnectionPreservesExplicitProSelection() async throws {
+        let tester = RecordingDeepSeekTester(result: .success([
+            "deepseek-v4-flash", "deepseek-v4-pro",
+        ]))
+        let fixture = try makeFixture(deepSeekTester: tester)
+        fixture.viewModel.deepSeekAPIKeyInput = "test-key"
+        fixture.viewModel.selectedModel = "deepseek-v4-pro"
+
+        await fixture.viewModel.testDeepSeekConnection()
+
+        XCTAssertEqual(fixture.viewModel.availableModels, ["deepseek-flash", "deepseek-v4-pro"])
+        XCTAssertEqual(fixture.viewModel.selectedModel, "deepseek-v4-pro")
+    }
+
     func testDeepSeekConnectionFallsBackToSavedKey() async throws {
         let tester = RecordingDeepSeekTester(
             result: .success(["deepseek-chat"])

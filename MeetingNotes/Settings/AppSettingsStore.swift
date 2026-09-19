@@ -3,7 +3,7 @@ import Observation
 
 @Observable
 final class AppSettingsStore {
-    static let defaultDeepSeekModel = "deepseek-v4-flash"
+    static let defaultDeepSeekModel = DeepSeekModelName.flash
 
     private enum Key {
         static let deepSeekModel = "settings.deepSeekModel"
@@ -27,6 +27,12 @@ final class AppSettingsStore {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        if let stored = defaults.string(forKey: Key.deepSeekModel) {
+            let canonical = DeepSeekModelName.canonical(stored)
+            if canonical != stored {
+                defaults.set(canonical, forKey: Key.deepSeekModel)
+            }
+        }
     }
 
     var localVoiceprintsEnabled: Bool {
@@ -47,14 +53,17 @@ final class AppSettingsStore {
                   !stored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return Self.defaultDeepSeekModel
             }
-            return stored
+            return DeepSeekModelName.canonical(stored)
         }
         set {
             let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty {
                 defaults.removeObject(forKey: Key.deepSeekModel)
             } else {
-                defaults.set(trimmed, forKey: Key.deepSeekModel)
+                defaults.set(
+                    DeepSeekModelName.canonical(trimmed),
+                    forKey: Key.deepSeekModel
+                )
             }
         }
     }
