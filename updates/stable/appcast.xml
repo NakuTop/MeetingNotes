@@ -3,6 +3,26 @@
     <channel>
         <title>MeetingNotes</title>
         <item>
+            <title>1.3.5</title>
+            <pubDate>Sat, 19 Sep 2026 09:19:22 +0800</pubDate>
+            <sparkle:version>33</sparkle:version>
+            <sparkle:shortVersionString>1.3.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# MeetingNotes 1.3.5（33）
+
+> 免费自签名正式版，未经 Apple Developer ID 签名或公证。首次安装可能需要在 macOS 中手动允许；请仅从 NakuTop/MeetingNotes 官方 GitHub 下载。支持 Apple Silicon Mac，macOS 15 或更新版本。
+
+- 将默认 DeepSeek 模型名更新为 `deepseek-flash`。
+- 已保存的 `deepseek-v4-flash` 和 `deepseek-v4-flash-vision-exp` 设置自动迁移到新名称；模型列表合并重复别名。
+- 重点总结、完整纪要及智能音频诊断统一使用新 Flash 名称，保留用户选择的其他模型。
+- 不修改历史纪要记录、提示词、请求参数、音频录制、转录模型、Notion 同步或上传内容范围；不会因此上传截图、音频或声纹。
+
+按用户明确要求，本次跳过单元测试、UI 自动化和人工验收，未进行真实 DeepSeek API 调用。仅执行 Release 构建、安装包完整性、身份及代码签名、Sparkle 更新签名和线上更新源核验；不沿用旧版本测试结果作为本版测试通过的依据。
+]]></description>
+            <enclosure url="https://github.com/NakuTop/MeetingNotes/releases/download/v1.3.5/MeetingNotes.dmg" length="10077107" type="application/octet-stream" sparkle:edSignature="HxF1Yk+sogWeNJaon81WbNp46lbOQc65cWIZwd+vx2S/K+nbxuq28EU1E3AFdJoBolgwU2jRlZiHGk71YaVPBQ=="/>
+        </item>
+        <item>
             <title>1.3.4</title>
             <pubDate>Fri, 18 Sep 2026 23:08:40 +0800</pubDate>
             <sparkle:version>32</sparkle:version>
