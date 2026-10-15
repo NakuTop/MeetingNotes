@@ -101,6 +101,7 @@ actor MeetingCoordinator {
     private var captureHealthPipelineFailed = false
     private var captureInterruptionFinalizationScheduled = false
     private var lifecycleOperationInProgress = false
+    private var audioImportInProgress = false
     private var discardRequestedMeetingIDs: Set<UUID> = []
     private var lifecycleCompletionWaiters:
         [CheckedContinuation<Void, Never>] = []
@@ -1111,8 +1112,18 @@ actor MeetingCoordinator {
         }
     }
 
+    func beginAudioImport() throws {
+        guard !audioImportInProgress, !lifecycleOperationInProgress,
+              !stateMachine.state.blocksCaptureSettingsChanges else {
+            throw MeetingCoordinatorError.operationInProgress
+        }
+        audioImportInProgress = true
+    }
+
+    func endAudioImport() { audioImportInProgress = false }
+
     private func beginLifecycleOperation() throws {
-        guard !lifecycleOperationInProgress else {
+        guard !lifecycleOperationInProgress, !audioImportInProgress else {
             throw MeetingCoordinatorError.operationInProgress
         }
         lifecycleOperationInProgress = true

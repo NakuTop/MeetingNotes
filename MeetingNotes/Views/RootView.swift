@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct RootView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -43,6 +44,17 @@ struct RootView: View {
             if viewModel.systemRequirementsSnapshot.isSupportedPlatform {
                 NavigationSplitView(columnVisibility: $columnVisibility) {
                     MeetingSidebarView(viewModel: viewModel)
+                        .toolbar {
+                            ToolbarItem {
+                                Button { viewModel.chooseLocalRecording() } label: {
+                                    Label("导入录音", systemImage: "square.and.arrow.down")
+                                }
+                                .disabled(viewModel.isStarting)
+                                .help("导入本地录音（⌘I）")
+                                .keyboardShortcut("i", modifiers: .command)
+                                .accessibilityIdentifier("meeting.import.toolbar")
+                            }
+                        }
                         .navigationSplitViewColumnWidth(min: 260, ideal: 300)
                 } detail: {
                     Group {
@@ -87,6 +99,22 @@ struct RootView: View {
                 )
             }
 
+            if let progress = viewModel.importProgress {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text(progress.message).frame(maxWidth: .infinity, alignment: .leading)
+                    Button("取消处理") { viewModel.cancelImport() }
+                }.padding(12)
+                .accessibilityIdentifier("meeting.import.progress")
+            }
+            if viewModel.canRetryImportedTranscription {
+                HStack {
+                    Text("本地录音已保留，可继续转录。")
+                    Spacer()
+                    Button("重试转录") { viewModel.retryImportedTranscription() }
+                        .accessibilityIdentifier("meeting.import.retry")
+                }.padding(12)
+            }
             if let errorMessage = viewModel.errorMessage {
                 HStack(spacing: 10) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -147,6 +175,12 @@ struct RootView: View {
         .accessibilityIdentifier("app.windowGlassSurface")
         .containerBackground(for: .window) {
             AppWindowGlassBackground()
+        }
+        .fileImporter(isPresented: $viewModel.isChoosingImportFile, allowedContentTypes: [.audio]) { result in
+            switch result {
+            case let .success(url): viewModel.importLocalRecording(from: url)
+            case let .failure(error): viewModel.reportImportSelectionFailure(error)
+            }
         }
         .task {
             await viewModel.recoverInterruptedMeetings()

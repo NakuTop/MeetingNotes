@@ -2825,6 +2825,31 @@ final class MeetingRepository {
         }
     }
 
+    /// Persist imported audio's lifecycle without implying that speaker analysis has already finished.
+    func saveImportedRecordingState(id: UUID, duration: TimeInterval, state: RecordingState,
+                                    errorCode: String? = nil, speakerErrorCode: String? = nil) throws {
+        let meeting = try meeting(id: id)
+        guard state == .finalizing || state == .ready else { throw MeetingRepositoryError.invalidState(meeting.speakerProcessingState) }
+        let previous = (meeting.stateRawValue, meeting.endedAt, meeting.activeDuration, meeting.updatedAt,
+                        meeting.lastErrorCode, meeting.speakerProcessingStateRawValue, meeting.speakerProcessingErrorCode)
+        meeting.state = state
+        meeting.endedAt = meeting.endedAt ?? .now
+        meeting.activeDuration = duration
+        meeting.updatedAt = .now
+        meeting.lastErrorCode = errorCode
+        if meeting.speakerDiarizationRequested {
+            meeting.speakerProcessingState = state == .finalizing ? .pending
+                : (errorCode != nil || speakerErrorCode != nil ? .degraded : .completed)
+            meeting.speakerProcessingErrorCode = speakerErrorCode ?? errorCode
+        }
+        do { try saveContext() }
+        catch {
+            (meeting.stateRawValue, meeting.endedAt, meeting.activeDuration, meeting.updatedAt,
+             meeting.lastErrorCode, meeting.speakerProcessingStateRawValue, meeting.speakerProcessingErrorCode) = previous
+            throw error
+        }
+    }
+
     func finalizeMeeting(
         id: UUID,
         endedAt: Date,

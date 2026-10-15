@@ -1,7 +1,7 @@
 # MeetingNotes 应用内更新发布
 
 本文档定义 Sparkle 2.9.2 、GitHub Release 和 GitHub Pages appcast 的
-唯一发布路径。普通 branch push 和 pull request 不会发布任何内容；
+Developer ID 工作流发布路径。普通 branch push 和 pull request 不会发布任何内容；
 `.github/workflows/publish-update.yml` 只能通过 GitHub Actions 的
 **Run workflow** 手动触发。
 
@@ -108,3 +108,18 @@ Beta feed 和 stable feed 不得相互拷贝，也不得在同一次运行中
 当 GitHub Pages、Sparkle 或 appcast 异常时，应用内更新可以暂停，但
 已验证的 GitHub Release 页面是唯一手动下载备用入口。不得上传
 ad-hoc、未公证或身份不匹配的 DMG 作为临时替代。
+
+## 现有免费自签名稳定渠道
+
+现有 v1.3.4 及 v1.3.5 稳定版使用固定的本地代码签名身份与 Sparkle Ed25519 更新签名，并非 Developer ID 公证分发。对该渠道的后续发布，可在明确要求发布时从已验证的本地安装包延续发布；无需把本地自签名包冒充 Developer ID 包，也不使用只接受 ad-hoc 的验证器代替本地证书验证。
+
+发布必须满足以下检查：
+
+1. 源码 version/build、已测试代码与归档内应用一致，并提交对应源码和版本标签。
+2. `build_and_package.sh Release` 的 `PACKAGE_VALIDATION=PASS`，签名模式为 `local-identity`；保持既有 bundle ID、稳定证书 designated requirement 和嵌入的 Sparkle 公钥。
+3. 使用钥匙串账户 `NakuTop.MeetingNotes` 生成更新包签名，不导出或打印私钥；使用 Sparkle 工具和 CryptoKit 分别验证包签名。
+4. 核对 appcast 中的下载 URL、字节长度、版本号、build、最低系统和 arm64 要求；发布说明标明未获 Developer ID 签名与公证。
+5. 先公开非草稿 Release 并验证可匿名下载，再仅更新 `gh-pages` 的 stable appcast，保留 Beta 内容不变。
+6. 验证线上 stable feed、Release tag、SHA-256 和更新包签名；记录 Pages 构建结果。
+
+这里的 `APPLE_DISTRIBUTABLE=NO` 和 `PUBLISHABLE=NO` 保持原义，不代表通过 Apple 信任及公证检查。它们不替代上述免费渠道的独立校验，也不放宽 Developer ID CI 的校验条件。自动更新兼容性以既有本地证书身份和原 Sparkle 公钥为基础。

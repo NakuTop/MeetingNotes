@@ -60,6 +60,7 @@ final class MeetingLibraryViewModel {
     private let repository: any MeetingLibraryRepository
     private let fileDeleter: any MeetingFileDeleting
     private let starter: any MeetingStarting
+    private let audioImporter: (any MeetingAudioImporting)?
     private let titleUpdater: any MeetingTitleUpdating
     private let operationGate: MeetingOperationGate
     private let playbackStopper: any MeetingPlaybackStopping
@@ -71,6 +72,15 @@ final class MeetingLibraryViewModel {
     private(set) var meetings: [MeetingRecord] = []
     var selectedMeetingID: UUID?
     private(set) var isStarting = false
+    var isChoosingImportFile = false
+    private(set) var importProgress: MeetingAudioImportProgress?
+    private(set) var importingMeetingID: UUID?
+    @ObservationIgnored private var importTask: Task<Void, Never>?
+    var isImporting: Bool { importTask != nil }
+    var canRetryImportedTranscription: Bool {
+        !isStarting && !isImporting && selectedMeeting?.state == .ready
+            && selectedMeeting?.lastErrorCode?.hasPrefix("audio_import_") == true
+    }
     private(set) var deletingMeetingIDs: Set<UUID> = []
     private(set) var pinningMeetingIDs: Set<UUID> = []
     private(set) var renamingMeetingIDs: Set<UUID> = []
@@ -90,6 +100,7 @@ final class MeetingLibraryViewModel {
         repository: any MeetingLibraryRepository,
         fileDeleter: any MeetingFileDeleting,
         starter: any MeetingStarting,
+        audioImporter: (any MeetingAudioImporting)? = nil,
         titleUpdater: any MeetingTitleUpdating,
         operationGate: MeetingOperationGate,
         playbackStopper: any MeetingPlaybackStopping,
@@ -102,6 +113,7 @@ final class MeetingLibraryViewModel {
         self.repository = repository
         self.fileDeleter = fileDeleter
         self.starter = starter
+        self.audioImporter = audioImporter
         self.titleUpdater = titleUpdater
         self.operationGate = operationGate
         self.playbackStopper = playbackStopper
@@ -270,6 +282,72 @@ final class MeetingLibraryViewModel {
         }
     }
 
+    func chooseLocalRecording() {
+        guard !isStarting, !isImporting else { return }
+        isChoosingImportFile = true
+    }
+
+    func importLocalRecording(from url: URL) {
+        guard !isStarting, !isImporting, let audioImporter else { return }
+        refreshSystemRequirements()
+        guard systemRequirementsSnapshot.isSupportedPlatform, systemRequirementsSnapshot.hasEnoughDiskSpace else {
+            setErrorPresentation(message: "系统不受支持或可用磁盘空间不足 2 GB，无法安全导入录音。")
+            return
+        }
+        beginImportTask { [weak self] in
+            _ = try await audioImporter.importRecording(from: url, onCreated: { id in
+                self?.importingMeetingID = id
+                self?.load()
+                self?.selectedMeetingID = id
+            }, onProgress: { [weak self] progress in
+                self?.importProgress = progress
+            })
+        }
+    }
+
+    func retryImportedTranscription() {
+        guard canRetryImportedTranscription, let id = selectedMeetingID, let audioImporter else { return }
+        importingMeetingID = id
+        beginImportTask { [weak self] in
+            try await audioImporter.retryTranscription(meetingID: id, onProgress: { [weak self] progress in
+                self?.importProgress = progress
+            })
+        }
+    }
+
+    func cancelImport() { importTask?.cancel() }
+
+    func reportImportSelectionFailure(_ error: Error) {
+        if (error as NSError).code != NSUserCancelledError {
+            setErrorPresentation(message: "无法打开选中的录音，请重新选择文件。")
+        }
+    }
+
+    private func beginImportTask(_ action: @escaping @MainActor () async throws -> Void) {
+        isStarting = true
+        setErrorPresentation()
+        importTask = Task { [weak self] in
+            guard let self else { return }
+            defer { isStarting = false; importTask = nil; importProgress = nil; importingMeetingID = nil }
+            do {
+                try await action()
+                load()
+            } catch is CancellationError {
+                load()
+                setErrorPresentation(message: "已取消处理。原始文件未被修改；若录音已导入，可点击重试转录继续。")
+            } catch let error as LocalAudioImportError {
+                load()
+                setErrorPresentation(message: error.localizedDescription)
+            } catch MeetingCoordinatorError.operationInProgress {
+                load()
+                setErrorPresentation(message: "当前有录音或其他任务正在处理，请结束后再导入录音。")
+            } catch {
+                load()
+                setErrorPresentation(message: "无法导入这份录音，请确认文件可播放且磁盘空间充足。原始文件未被修改。")
+            }
+        }
+    }
+
     func retryLastStart() async {
         guard !isStarting, let mode = lastFailedStartMode else { return }
         setErrorPresentation()
@@ -311,8 +389,7 @@ final class MeetingLibraryViewModel {
     }
 
     func canDelete(_ meeting: MeetingRecord) -> Bool {
-        _ = meeting
-        return true
+        meeting.id != importingMeetingID
     }
 
     func canRename(_ meeting: MeetingRecord) -> Bool {

@@ -174,3 +174,9 @@ lipo -archs .deriveddata/Build/Products/Release/MeetingNotes.app/Contents/MacOS/
 | 13 | 自动化与 Apple Silicon 真机端到端通过 | 662 项单元测试、9 项完整 UI 流程通过，包含一小时等价 harness | 自动化通过，真实录音/系统音频/外部服务清单待用户确认 |
 
 任何标记为“待验证”的项目都不是已通过项。完整操作记录在[真机检查表](docs/testing/manual-apple-silicon-checklist.md)。
+
+## 导入本地录音
+
+首页点击“导入本地录音”，或点击侧栏上方的导入按钮（⌘I），选择 WAV、M4A、MP3、CAF 等 macOS 可读取的音频文件。应用保留原文件，在本地分段转换后自动转录；开启自动说话人识别时会继续识别说话人。导入后的会议支持现有回放、文字校正、摘要、详细纪要和 Notion 归档。
+
+处理过程中可取消。若录音已经保存而模型加载或转录失败，会议仍保留在列表中，选择后点击“重试转录”即可继续。录音期间不同时导入文件，导入期间也不会启动新的录音。

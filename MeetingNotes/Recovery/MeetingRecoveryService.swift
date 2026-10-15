@@ -92,7 +92,8 @@ final class MeetingRecoveryService {
                     activeDuration
                 ),
                 activeDuration: activeDuration,
-                lastErrorCode: "capture_interrupted_recovered"
+                lastErrorCode: meeting.lastErrorCode?.hasPrefix("audio_import_") == true
+                    ? "audio_import_interrupted" : "capture_interrupted_recovered"
             )
         } else {
             try repository.updateMeetingState(

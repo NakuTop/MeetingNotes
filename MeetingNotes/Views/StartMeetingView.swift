@@ -15,6 +15,15 @@ struct StartMeetingView: View {
                 symbol: "display",
                 mode: .online
             )
+            Button { viewModel.chooseLocalRecording() } label: {
+                Label("导入本地录音", systemImage: "waveform.badge.plus")
+                    .font(.title3.weight(.semibold))
+                    .frame(minWidth: 150, minHeight: 54)
+            }
+            .adaptivePrimaryButtonStyle()
+            .controlSize(.large)
+            .disabled(viewModel.isStarting)
+            .accessibilityIdentifier("meeting.import.audio")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(40)

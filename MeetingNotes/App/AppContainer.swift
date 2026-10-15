@@ -279,10 +279,21 @@ final class AppContainer {
             repository: repository,
             fileStore: fileStore
         )
+        let importReader = MeetingTrackAudioReader(sourceLoader: sourceLoader)
+        let audioImporter = MeetingAudioImportUseCase(
+            repository: repository, fileStore: fileStore, settings: settingsStore,
+            coordinator: coordinator, operationGate: operationGate,
+            serviceProvider: PreferredTranscriptionServiceProvider(
+                controller: transcriptionModelController, preference: transcriptionQualityPreference),
+            reader: importReader,
+            finalizer: SpeakerAwareTranscriptFinalizer(reader: importReader,
+                sourceLoader: sourceLoader, diarizer: speakerDiarizer)
+        )
         let libraryViewModel = MeetingLibraryViewModel(
             repository: repository,
             fileDeleter: fileStore,
             starter: coordinator,
+            audioImporter: audioImporter,
             titleUpdater: titleUpdater,
             operationGate: operationGate,
             playbackStopper: audioPlayerController,

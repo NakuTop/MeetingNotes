@@ -2,6 +2,32 @@ import XCTest
 @testable import MeetingNotes
 
 final class MeetingCoordinatorTests: XCTestCase {
+    func testImportReservationBlocksCaptureAndCanBeReleased() async throws {
+        let fixture = makeFixture(permissions: [.microphone: .denied])
+        try await fixture.coordinator.beginAudioImport()
+        do {
+            _ = try await fixture.coordinator.start(mode: .offline)
+            XCTFail("Recording must not start while importing")
+        } catch MeetingCoordinatorError.operationInProgress {}
+        await fixture.coordinator.endAudioImport()
+        do {
+            _ = try await fixture.coordinator.start(mode: .offline)
+            XCTFail("Expected microphone denial after the reservation was released")
+        } catch MeetingCoordinatorError.permissionDenied {}
+    }
+
+    func testImportCannotInterruptAnActiveRecording() async throws {
+        let fixture = makeFixture()
+        _ = try await fixture.coordinator.start(mode: .offline)
+        do {
+            try await fixture.coordinator.beginAudioImport()
+            XCTFail("Import must not begin during an active recording")
+        } catch MeetingCoordinatorError.operationInProgress {}
+        let snapshot = await fixture.coordinator.snapshot()
+        XCTAssertEqual(snapshot.state, .recording)
+        try await fixture.coordinator.stop()
+    }
+
     func testLiveSpeakersReceiveTheSameChunksWhileRecordingAndAreCancelledOnStop() async throws {
         let session = CoordinatorLiveSpeakerSpy()
         let fixture = makeFixture(packets: [makeOnlinePacket(index: 0)],

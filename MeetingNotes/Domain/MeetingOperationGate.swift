@@ -1,6 +1,7 @@
 import Foundation
 
 enum MeetingOperationKind: Equatable, Sendable {
+    case audioImport
     case rename
     case delete
     case summarizeArchive
