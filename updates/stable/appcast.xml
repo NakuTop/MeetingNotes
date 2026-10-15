@@ -3,6 +3,28 @@
     <channel>
         <title>MeetingNotes</title>
         <item>
+            <title>1.3.6</title>
+            <pubDate>Thu, 15 Oct 2026 09:56:40 +0800</pubDate>
+            <sparkle:version>34</sparkle:version>
+            <sparkle:shortVersionString>1.3.6</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# MeetingNotes 1.3.6（34）
+
+> 免费自签名正式版，未经 Apple Developer ID 签名或公证。支持 Apple Silicon Mac，macOS 15 或更新版本。请从 NakuTop/MeetingNotes 官方 GitHub 页面下载。
+
+- 新增本地录音导入：首页点击“导入本地录音”，或使用侧栏导入按钮、⌘I 选择文件。
+- 导入后在本地分段转换和转录，按设置继续识别说话人，并可使用现有回放、文字校正、摘要、详细纪要与 Notion 归档流程。
+- 保留原始文件；处理过程中可取消，模型加载或转录失败后保留已保存的录音，并可“重试转录”。
+- 导入与实时录音互斥，避免两项采集处理任务相互干扰。
+
+验证：126 项相关测试通过，覆盖 WAV/M4A、长录音分段、原文件保留、失败重试、取消和恢复、现有录音协调与会议列表。已在本机安装版通过文件选择器实际导入合成 AIFF 录音，并确认真实本地转录与说话人处理完成。未将这次测试录音上传到 DeepSeek 或 Notion。
+
+沿用稳定渠道既有的本地证书身份与 Sparkle Ed25519 更新签名。
+]]></description>
+            <enclosure url="https://github.com/NakuTop/MeetingNotes/releases/download/v1.3.6/MeetingNotes-1.3.6-build34.dmg" length="10135076" type="application/octet-stream" sparkle:edSignature="H//Aqy6oUi34yNx6mgz84lL/V9YB2UhR5SO1GAus+8EcEpxhVZjorfl4Va9WZaBPnQZoJLuBIdkEM/+NGlLWDg=="/>
+        </item>
+        <item>
             <title>1.3.5</title>
             <pubDate>Sat, 19 Sep 2026 09:19:22 +0800</pubDate>
             <sparkle:version>33</sparkle:version>
@@ -43,114 +65,6 @@
 验证：后台单元测试 1,509 项通过、0 失败，6 项需显式开启的真实音频探针跳过。构建、DMG 完整性、应用签名及 Sparkle 更新签名通过。未运行影响桌面操作的 UI 自动化；多人实际归属准确度与应用内安装仍需用户实测，不以自动编号或后台测试替代人工判断。
 ]]></description>
             <enclosure url="https://github.com/NakuTop/MeetingNotes/releases/download/v1.3.4/MeetingNotes.dmg" length="10074695" type="application/octet-stream" sparkle:edSignature="hbVNim9uAHF6C+WR+9eYM7RbfPCLKkXOiBhPFGo9bp+TkpVFA4RZBr7f5cddDeE3MZKnkX7FaE5P1IGVazg+CQ=="/>
-        </item>
-        <item>
-            <title>1.3.3</title>
-            <pubDate>Thu, 17 Sep 2026 13:43:42 +0800</pubDate>
-            <sparkle:version>28</sparkle:version>
-            <sparkle:shortVersionString>1.3.3</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# MeetingNotes 1.3.3（28）
-
-> 免费自签名正式版，未经 Apple Developer ID 签名或公证。首次安装可能需要在 macOS 中手动允许；请仅从 NakuTop/MeetingNotes 官方 GitHub 下载。支持 Apple Silicon Mac，macOS 15 或更新版本。
-
-- 改善说话人标注：使用实际词级时间戳对齐转录与说话人片段，修复中文时间戳被整句合并的问题；不通过均分文字猜测发言边界。
-- 保持整场会议的说话人编号一致；静音间隙不再借用最近的说话人，证据不足或多人同时说话时明确显示“说话人待确认”或“重叠发言”。
-- 增加“校准说话人”：可对单场会议选择自动判断、指定实际发言人数或人数范围。人数与结果不符时给出提示，不凭空增加人物。
-- 重新校准保留手动修改的文字，包括分离任务运行期间的编辑；不会把手工改写的整句强行拆成多人的文字。
-- 在线会议增加麦克风/系统音轨及可能回声的辅助提示。来源提示不等于身份识别，不会自动合并人物或删除转录。
-- 继续沿用录音、截图、撤销重做、Whisper 模型选择、语言自动检测、Notion 手动同步及 DeepSeek 数据边界；原始音频始终在本机处理。
-
-更新后，可在旧会议中点击“校准说话人”，按真正发过言的人数选择 4 位或 5 位，再核对人物对应关系。旧转录没有词级时间戳时不会自动重新转录，也不会猜测句内分界。
-
-准确率边界：本地实录的 4–5 人范围测试在两场会议中均返回 5 个聚类，因此人数约束及自动测试不等于人物归属全部正确。短促插话、重叠发言及具体身份仍需人工核对；本版不包含自动姓名识别或声纹身份库。
-
-本次正式版后台单元测试 1,425 通过、0 失败，6 项需显式开启的本地音频探针在常规套件中跳过。相同实现此前已另行通过真实录音的词级对齐、整场校准及分轨提示探针。未运行 UI 自动化或两个交互浮窗测试，不以后台测试代替人工验收。
-]]></description>
-            <enclosure url="https://github.com/NakuTop/MeetingNotes/releases/download/v1.3.3/MeetingNotes.dmg" length="9854077" type="application/octet-stream" sparkle:edSignature="fbnbwdXoaympACqcix9nzpF8HT64vHlwTa7NnYwIVO+8Me/vPe0UP3I0ey5n3wAqMSp6HD47hIY1o4xvQpqcBw=="/>
-        </item>
-        <item>
-            <title>1.3.2</title>
-            <pubDate>Tue, 15 Sep 2026 15:28:11 +0800</pubDate>
-            <sparkle:version>27</sparkle:version>
-            <sparkle:shortVersionString>1.3.2</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# MeetingNotes 1.3.2（27）
-
-> 免费自签名正式版，未经 Apple Developer ID 签名或公证。首次安装可能需要在 macOS 中手动允许；请仅从 NakuTop/MeetingNotes 官方 GitHub 下载。支持 Apple Silicon Mac，macOS 15 或更新版本。
-
-- 修复在线长会议结束后长时间停留在“分离说话人”的问题：对已有转录直接标注说话人，不再先对整场麦克风和系统分轨重复转录。
-- 录制期间自动分批更新说话人标签，结束后再进行整场校准；后台标注不会阻塞文字转录。
-- 说话人标注保留已编辑的文字，实时标注不替换文字行；最终校准按时间重叠证据保留可确定对应的自定义说话人名称。
-- 重新分离任务不再因详情界面消失而被取消，并提供明确的“取消分离”操作。
-- 保持录音、截图、撤销重做、Whisper 模型、Notion 手动同步和 DeepSeek 数据边界不变。
-
-首次使用实时说话人标注时，会下载对应的本地模型；音频不上传。实时标签有短暂延迟，最终以整场校准结果为准。旧会议可在更新后使用“重新分离说话人”。
-
-本次后台单元测试 1,399 通过、0 失败；4 项需显式开启的本地音频探针在常规套件中跳过，其中真实录音整场标注及与高精度转录并行的 2 项专项已另行通过。未运行 UI 自动化或两个交互浮窗测试。实际应用中的更新安装与说话人准确率由用户复测，不以自动化结果替代人工验收。
-]]></description>
-            <enclosure url="https://github.com/NakuTop/MeetingNotes/releases/download/v1.3.2/MeetingNotes.dmg" length="9762784" type="application/octet-stream" sparkle:edSignature="a65M1Q8r7SfCtC+DJKXFjiNf3vGuqDHtRhUR1+EbbIOUvRS6Gj8xgP9FAMPXhgDc4ljXiZGH8I1tX2yUWaP9BQ=="/>
-        </item>
-        <item>
-            <title>1.3.1</title>
-            <pubDate>Mon, 07 Sep 2026 17:19:00 +0800</pubDate>
-            <sparkle:version>26</sparkle:version>
-            <sparkle:shortVersionString>1.3.1</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# MeetingNotes 1.3.1（26）
-
-> 免费自签名正式版，未经 Apple Developer ID 签名或公证。首次安装可能需要在 macOS 中手动允许；请仅从 NakuTop/MeetingNotes 官方 GitHub 下载。支持 Apple Silicon Mac，macOS 15 或更新版本。
-
-- 在线会议改用纯系统音频捕获，不再持续采集桌面画面；修复系统音频状态、缓冲及诊断提示。
-- 截图支持直接点选目标窗口，Esc 取消；修复选窗高亮、点击与截图生成问题，保持无损 PNG 清晰度。
-- 优化长会议转录刷新、文字编辑与自动保存，修复录制期间实时转录显示。
-- 重点总结与完整纪要切换支持更大的点击区域，保留原有磨砂透明界面。
-- 手动文字编辑支持原生 ⌘Z 撤销与 ⇧⌘Z 重做，修复撤销结果与自动保存同步、清空文字后的恢复。
-- FluidAudio 更新至固定版本 0.13.2。高精度模型、均衡模型、Notion 手动替换同步与 DeepSeek 数据边界保持不变。
-
-本轮 Beta 功能已由用户实机确认。发布验证仅使用后台测试；不运行干扰桌面操作的 UI 自动化。
-]]></description>
-            <enclosure url="https://github.com/NakuTop/MeetingNotes/releases/download/v1.3.1/MeetingNotes.dmg" length="9744696" type="application/octet-stream" sparkle:edSignature="98DvqaqFstom6l60fUtD7bJZi6QFdtZY4WNX+PIGEO3FgU5OSAMiUfEJDawwBthvkQgkI0nPl8KP25e5aOE6Cw=="/>
-        </item>
-        <item>
-            <title>1.3.0</title>
-            <pubDate>Tue, 01 Sep 2026 13:37:01 +0800</pubDate>
-            <sparkle:version>18</sparkle:version>
-            <sparkle:shortVersionString>1.3.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[# MeetingNotes 1.3.0（18）
-
-> 免费自签名正式版，未经 Apple Developer ID 签名或公证。首次安装时需在 macOS 中手动允许；请仅从 NakuTop/MeetingNotes 官方 GitHub 下载。
-
-- 保留原正式版会议流程，合入已通过实机测试的麦克风兼容捕获与智能音频诊断。
-- 修复模型准备期间悬浮窗、结束会议、删除会议及设置不可用的问题。
-- 支持在转录过程中编辑文字，并可编辑重点总结与完整纪要；支持同词统一替换和本机自动保存。
-- Notion 手动同步会替换应用管理的旧内容；会议截图可同步到 Notion，但不会发送给 DeepSeek。
-- 新增会议时间轴笔记与电脑截图，并保持原有磨砂透明界面风格。
-- FluidAudio 使用已验证的说话人聚类阈值，改善线下会议说话人分离。
-- 高精度模型使用 `openai_whisper-large-v3`，均衡模型保持 `small_216MB`。
-- 提供基于 GitHub 与 Sparkle 的免费应用内更新通道。
-]]></description>
-            <enclosure url="https://github.com/NakuTop/MeetingNotes/releases/download/v1.3.0/MeetingNotes.dmg" length="9539673" type="application/octet-stream" sparkle:edSignature="Ddt12xdEYw23QevYGsIkB7HR+kQbiDenArGRWtdRaR99yNQ/kCTorpOHCSqMeAtqnhJm7+F1/MFMqOt2+LAUBg=="/>
-        </item>
-        <item>
-            <title>1.2.0</title>
-            <pubDate>Mon, 31 Aug 2026 10:19:14 +0800</pubDate>
-            <sparkle:version>16</sparkle:version>
-            <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[- 保留正式版原有会议流程，整合麦克风兼容捕获与智能音频诊断更新。
-- 修复模型准备期间会议悬浮窗、结束会议、删除会议及设置可用性。
-- 支持转录、重点总结与完整纪要随时编辑、同词替换及本机自动保存。
-- Notion 手动同步时替换应用管理的旧内容，不再重复叠加。
-- 新增基于 GitHub 与 Sparkle 的免费应用内更新通道。
-]]></description>
-            <enclosure url="https://github.com/NakuTop/MeetingNotes/releases/download/v1.2.0-unsigned-build16/MeetingNotes-1.2.0-build16-unsigned.dmg" length="9236097" type="application/octet-stream" sparkle:edSignature="XMwtWmkLADixKc5nn5kwQCZUzhmDnVLSzCEdT6Kap8NNlEt6cJ8oPVKvQFSEfrJQ9UtBAuy4+GUfvQc2abfqDg=="/>
         </item>
     </channel>
 </rss>
