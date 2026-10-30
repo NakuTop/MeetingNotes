@@ -66,7 +66,8 @@ struct NotionClient: NotionAPIClient, Sendable {
                             type: "title",
                             title: [.plain(String(title.prefix(1_900)))]
                         )
-                    )
+                    ),
+                    position: .init(type: "page_start")
                 )
             )
         } catch {
@@ -470,6 +471,11 @@ private struct PageResponse: Decodable {
 private struct CreatePageRequest: Encodable {
     let parent: Parent
     let properties: Properties
+    let position: Position
+
+    struct Position: Encodable {
+        let type: String
+    }
 
     struct Parent: Encodable {
         let type: String

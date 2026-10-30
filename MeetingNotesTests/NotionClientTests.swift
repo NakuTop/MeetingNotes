@@ -52,7 +52,7 @@ final class NotionClientTests: XCTestCase {
         }
     }
 
-    func testCreatesChildPageAndAppendReturnsCreatedBlockIDs() async throws {
+    func testCreatesChildPageAtParentStartAndAppendReturnsCreatedBlockIDs() async throws {
         let parentID = try XCTUnwrap(
             UUID(uuidString: "ABCDEF12-3456-7890-ABCD-EF1234567890")
         )
@@ -96,6 +96,8 @@ final class NotionClientTests: XCTestCase {
         let parent = try XCTUnwrap(createBody["parent"] as? [String: String])
         XCTAssertEqual(parent["type"], "page_id")
         XCTAssertEqual(parent["page_id"], parentID.uuidString.lowercased())
+        let position = try XCTUnwrap(createBody["position"] as? [String: String])
+        XCTAssertEqual(position, ["type": "page_start"])
         XCTAssertTrue(String(data: requests[0].httpBody ?? Data(), encoding: .utf8)?.contains("产品周会") == true)
 
         XCTAssertEqual(requests[1].httpMethod, "PATCH")
